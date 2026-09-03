@@ -50,6 +50,7 @@ pub struct PushFailedHttpBody {
     pub origin: ErrorOrigin,
     pub reason: ErrorReason,
     pub status: i64,
+    #[serde(rename = "bodyPreview")]
     pub body_preview: Option<String>,
 }
 
@@ -88,6 +89,7 @@ pub struct TransformFailedHttpBody {
     pub origin: ErrorOrigin,
     pub reason: ErrorReason,
     pub status: i64,
+    #[serde(rename = "bodyPreview")]
     pub body_preview: Option<String>,
 }
 

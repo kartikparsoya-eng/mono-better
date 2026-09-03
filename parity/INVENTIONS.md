@@ -138,6 +138,30 @@ guarantees, error semantics) versus TS.
   `drainer_surfaces_push_failed_zerocache_on_network_error` (assert
   `WsCommand::Fail`, not `Send`) and view_syncer.rs
   `connection_sinks_deliver_only_to_current_socket`.
+- **2xx response fan-out + post-push validation (2026-09-03):** the loopback
+  answers 200 with the API server's validated `MutateResponse` VERBATIM
+  (rust-push-relay.ts:166), which may itself be a `PushFailed` body. Rust used
+  to drain that body unread, so prod's most common push error (`oooMutation`,
+  the majority of TS "returned a push error" lines) never reached the client
+  and a successful push never validated the connection. Now the drainer ports
+  `#processPush` (pusher.ts:535-597: auth-error body → `failConnection`;
+  success → `validateConnection(server-validated userID | client-fallback)`;
+  a validation `Unauthorized` → `failConnection` + `PushFailed` http 401) and
+  `#fanOutResponses` (pusher.ts:366-486: whole-response failure → `#failDownstream`
+  per client grouped by `mutationIDs.clientID`, legacy `error` mapping
+  included; else per-mutation `oooMutation` → `{PushFailed, server,
+  oooMutation, "mutation was out of order", details, mutationIDs}`; other
+  mutation errors only logged). Response-derived routing is by clientID only
+  (`ConnectionSinks::fail_client_current`) — exactly TS `#clients.get(clientID)`
+  (its own stale-routing TODO, pusher.ts:378). Wire key `bodyPreview` fixed
+  (was `body_preview`). Pinned by pusher.rs
+  `drainer_fails_downstream_on_ooo_mutation_result`,
+  `drainer_fails_downstream_on_push_failed_body_in_2xx`,
+  `drainer_validates_connection_after_successful_push`,
+  `drainer_fails_downstream_when_validation_rejects_user_mismatch`,
+  `drainer_surfaces_push_failed_http_on_non_2xx` (`bodyPreview`) and
+  view_syncer.rs `successful_push_validates_connection_through_the_ccm`
+  (the CCM wiring).
 
 ## I-4 — ws_sink writer/reader tasks + slow-client shed
 - **Files:** `ws_server.rs` (`run_ws_writer`/`run_ws_reader`), `ws_sink.rs`.

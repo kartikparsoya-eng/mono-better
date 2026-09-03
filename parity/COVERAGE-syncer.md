@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **535** · ✅ COVERED **492** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **492/502 = 98%**
+- Rust fns total **541** · ✅ COVERED **498** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **498/508 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -30,7 +30,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 492
+## ✅ COVERED — body pinned to TS fixture — 498
 
 | fn | file | signature |
 |---|---|---|
@@ -235,11 +235,15 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `enqueue_payload` | services/mutagen/pusher.rs | `fn enqueue_payload(&self, push: QueuedPush, what: &str) -> bool {` |
 | `enqueue_push` | services/mutagen/pusher.rs | `fn enqueue_push(` |
 | `fail_downstream` | services/mutagen/pusher.rs | `fn fail_downstream(` |
+| `fan_out_responses` | services/mutagen/pusher.rs | `fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {` |
+| `group_by` | services/mutagen/pusher.rs | `fn group_by<'a, T>(items: impl Iterator<Item = (String, T)>) -> Vec<(String, Vec<T>)> {` |
 | `init_connection` | services/mutagen/pusher.rs | `fn init_connection(&self, _selector: &ConnectionSelector) {}` |
+| `is_push_error_response` | services/mutagen/pusher.rs | `fn is_push_error_response(response: &serde_json::Value) -> bool {` |
 | `mutation_ids_of` | services/mutagen/pusher.rs | `fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {` |
 | `queue_cap` | services/mutagen/pusher.rs | `fn queue_cap() -> i64 {` |
 | `relay_body` | services/mutagen/pusher.rs | `fn relay_body(` |
 | `set_auth_fail_hook` | services/mutagen/pusher.rs | `fn set_auth_fail_hook(&self, hook: AuthFailHook) {` |
+| `set_validate_hook` | services/mutagen/pusher.rs | `fn set_validate_hook(&self, hook: ValidateHook) {` |
 | `ivm_row_to_json` | services/run_ast.rs | `pub(crate) fn ivm_row_to_json(row: &Row) -> serde_json::Value {` |
 | `ivm_value_to_json` | services/run_ast.rs | `pub(crate) fn ivm_value_to_json(v: &Value) -> serde_json::Value {` |
 | `rows_by_source_to_json` | services/run_ast.rs | `fn rows_by_source_to_json(src: &rust_ivm::builder::debug_delegate::RowsBySource) -> Row…` |
@@ -493,6 +497,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `compute_serving_lag_stats_ms` | workers/syncer.rs | `pub fn compute_serving_lag_stats_ms<'a>(` |
 | `create_connection` | workers/syncer.rs | `pub async fn create_connection(&self, ctx: ConnectionContext) {` |
 | `drain` | workers/syncer.rs | `pub async fn drain(&self) {` |
+| `fail_client_current` | workers/syncer.rs | `pub fn fail_client_current(&self, client_id: &str, error: &crate::protocol::ErrorBody) …` |
 | `fail_if_current` | workers/syncer.rs | `pub fn fail_if_current(` |
 | `find_first_unserved_index` | workers/syncer.rs | `pub fn find_first_unserved_index(` |
 | `get_or_create_cg` | workers/syncer.rs | `pub(crate) fn get_or_create_cg(&self, client_group_id: &str) -> Result<Arc<CGHandle>, S…` |
@@ -523,6 +528,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `close_with_code` | ws_sink.rs | `pub fn close_with_code(&self, code: u16, reason: String) {` |
 | `count_shed_once` | ws_sink.rs | `fn count_shed_once(limits: &SinkLimits, reason: &'static str) {` |
 | `fail` | ws_sink.rs | `pub fn fail(&self, error: ErrorBody) {` |
+| `fail_with_code` | ws_sink.rs | `pub fn fail_with_code(&self, error: ErrorBody, code: Option<u16>) {` |
 | `push` | ws_sink.rs | `pub fn push(&self, msg: Value) {` |
 | `send_command` | ws_sink.rs | `fn send_command(&self, command: WsCommand) -> Result<(), String> {` |
 | `with_limits` | ws_sink.rs | `pub fn with_limits(tx: mpsc::UnboundedSender<WsCommand>, limits: Arc<SinkLimits>) -> Se…` |

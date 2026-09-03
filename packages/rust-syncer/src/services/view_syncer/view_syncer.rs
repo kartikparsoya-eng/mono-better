@@ -1328,6 +1328,25 @@ impl ViewSyncerService {
             }));
         }
 
+        // TS pusher.ts:545-556: a SUCCESSFUL push validates the connection's
+        // current auth snapshot (`server-validated` with the API server's
+        // userID, else `client-fallback`) — the CCM marks it Validated, pins
+        // the group user and arms revalidation; a stale revision is a no-op
+        // and a userID mismatch is `Unauthorized` (the pusher turns that into
+        // `failConnection` + a PushFailed http 401, pusher.ts:578-590).
+        if let Some(p) = &pusher {
+            let hook_ccm = ccm.clone();
+            p.set_validate_hook(Arc::new(move |selector, revision, validation| {
+                let sel = CcmConnectionSelector {
+                    client_id: selector.client_id.clone(),
+                    ws_id: selector.ws_id.clone(),
+                };
+                lock_unpoisoned(&hook_ccm)
+                    .validate_connection(&sel, revision, &validation)
+                    .map(|_| ())
+            }));
+        }
+
         let created_at = now_ms();
         let mut svc = ViewSyncerService {
             cg_id: cg_id.to_string(),
@@ -4587,6 +4606,133 @@ mod tests {
                 metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
             }
         }
+    }
+
+    /// Test double: records the pusher hooks the view-syncer wires.
+    struct RecordingHookPusher {
+        validate_hook: Mutex<Option<crate::workers::syncer_ws_message_handler::ValidateHook>>,
+    }
+    impl PusherDispatch for RecordingHookPusher {
+        fn enqueue_push(
+            &self,
+            _selector: &ConnectionSelector,
+            _body: &serde_json::Value,
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) -> crate::workers::connection::HandlerResult {
+            crate::workers::connection::HandlerResult::Ok
+        }
+        fn init_connection(&self, _s: &ConnectionSelector) {}
+        fn ack_mutation_responses(
+            &self,
+            _selector: &ConnectionSelector,
+            _body: &serde_json::Value,
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) {
+        }
+        fn delete_client_mutations(
+            &self,
+            _selector: &ConnectionSelector,
+            _client_ids: &[String],
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) {
+        }
+        fn set_validate_hook(&self, hook: crate::workers::syncer_ws_message_handler::ValidateHook) {
+            *self.validate_hook.lock().unwrap() = Some(hook);
+        }
+    }
+    struct RecordingHookFactory {
+        handle: tokio::runtime::Handle,
+        pusher: Arc<RecordingHookPusher>,
+    }
+    impl CGServicesFactory for RecordingHookFactory {
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            Some(self.pusher.clone())
+        }
+        fn create_sync_engine_config(&self, cg: &str) -> SyncEngineConfig {
+            RevalidateFactory {
+                handle: self.handle.clone(),
+                revalidate_interval_ms: None,
+            }
+            .create_sync_engine_config(cg)
+        }
+    }
+
+    /// TS `#processPush` (pusher.ts:545-556) → `#connContextManager
+    /// .validateConnection(connCtx, revision, validation)`: the view-syncer
+    /// must hand the pusher a validate path into THIS group's CCM, and that
+    /// path must (a) mark a matching `server-validated` connection Validated
+    /// and (b) reject a mismatched userID with `Unauthorized` (TS
+    /// connection-context-manager.ts:420). Without the wiring the pusher's
+    /// hook stays unset: a successful push never validates the connection and
+    /// the background retransform finds none ("No validated connection is
+    /// available for shared query work", prod 14/day).
+    #[test]
+    fn successful_push_validates_connection_through_the_ccm() {
+        use crate::services::view_syncer::connection_context_manager::ConnectionState;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pusher = Arc::new(RecordingHookPusher {
+            validate_hook: Mutex::new(None),
+        });
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(RecordingHookFactory {
+            handle: rt.handle().clone(),
+            pusher: pusher.clone(),
+        });
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(ToggleAuthValidator {
+                valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let hook = pusher.validate_hook.lock().unwrap().clone().expect(
+            "view-syncer must wire the pusher's validate hook (TS #processPush → validateConnection)",
+        );
+        let sel = ConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        let ccm_sel = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        let revision = lock_unpoisoned(&state.ccm)
+            .get_connection_context(&ccm_sel)
+            .expect("connection registered in the CCM")
+            .revision;
+        hook(
+            &sel,
+            revision,
+            ConnectionValidation::ServerValidated {
+                validated_user_id: Some("user-1".to_string()),
+            },
+        )
+        .expect("a matching server userID validates the connection");
+        let ctx = lock_unpoisoned(&state.ccm)
+            .get_connection_context(&ccm_sel)
+            .expect("still registered");
+        assert_eq!(ctx.state, ConnectionState::Validated);
+        let err = hook(
+            &sel,
+            revision,
+            ConnectionValidation::ServerValidated {
+                validated_user_id: Some("someone-else".to_string()),
+            },
+        )
+        .expect_err("a mismatched server userID must be rejected (TS: validateConnection throws Unauthorized)");
+        assert!(matches!(err, CCMError::Unauthorized(_)), "got {err:?}");
     }
 
     /// Drive the initConnection-time `#validateConnection` (view-syncer.ts:942)

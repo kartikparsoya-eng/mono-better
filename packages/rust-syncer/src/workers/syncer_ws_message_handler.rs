@@ -200,11 +200,31 @@ pub trait PusherDispatch: Send + Sync {
     /// forever (the 2026-08-29 401 storm). Default no-op for dispatch impls
     /// without a connection-context owner (tests).
     fn set_auth_fail_hook(&self, _hook: AuthFailHook) {}
+
+    /// TS `#processPush` (pusher.ts:545-556): a SUCCESSFUL push validates the
+    /// connection's current auth snapshot in the CCM (`server-validated` with
+    /// the returned `userID`, else `client-fallback`). Default no-op for
+    /// dispatch impls without a connection-context owner (tests).
+    fn set_validate_hook(&self, _hook: ValidateHook) {}
 }
 
 /// Callback invoked by the pusher's drainer on a 401/403 relay response:
 /// `(selector, revision)` → `ConnectionContextManager::fail_connection`.
 pub type AuthFailHook = std::sync::Arc<dyn Fn(&ConnectionSelector, u32) + Send + Sync>;
+
+/// TS `#processPush` → `connContextManager.validateConnection(connCtx, revision,
+/// validation)` after a successful push (pusher.ts:545-556). Runs on the
+/// pusher's drainer task; the CCM's revision guard makes a stale call a no-op.
+pub type ValidateHook = std::sync::Arc<
+    dyn Fn(
+            &ConnectionSelector,
+            u32,
+            crate::services::view_syncer::connection_context_manager::ConnectionValidation,
+        )
+            -> Result<(), crate::services::view_syncer::connection_context_manager::CCMError>
+        + Send
+        + Sync,
+>;
 
 /// The message handler — port of `SyncerWsMessageHandler`.
 ///

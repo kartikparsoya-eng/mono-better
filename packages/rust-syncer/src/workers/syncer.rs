@@ -656,6 +656,22 @@ impl ConnectionSinks {
     /// failing the *new* socket for the *old* socket's push would be a spurious
     /// disconnect. Rust is deliberately stricter here than TS (which routes by
     /// `clientID` only) — a documented, strictly-safer divergence.
+    /// TS `#failDownstream(client.downstream, …)` where the client came from
+    /// `this.#clients.get(clientID)` — response-derived routing by clientID
+    /// (`fan_out_responses`): FAIL the client's CURRENT socket, whichever ws id
+    /// the registry holds. Returns whether delivered.
+    pub fn fail_client_current(&self, client_id: &str, error: &crate::protocol::ErrorBody) -> bool {
+        let sink = {
+            let conns = lock_unpoisoned(&self.0);
+            match conns.get(client_id) {
+                Some(info) => info.sink.clone(),
+                None => return false,
+            }
+        };
+        sink.fail(error.clone());
+        true
+    }
+
     pub fn fail_if_current(
         &self,
         client_id: &str,

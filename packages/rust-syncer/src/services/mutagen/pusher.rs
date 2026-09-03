@@ -38,6 +38,7 @@ use crate::protocol::{
 };
 use crate::workers::connection::HandlerResult;
 use crate::workers::syncer::ConnectionSinks;
+use crate::workers::syncer_ws_message_handler::ValidateHook;
 use crate::workers::syncer_ws_message_handler::{
     AuthFailHook, ConnectionSelector, PushRelayHeaders, PusherDispatch,
 };
@@ -214,6 +215,9 @@ pub struct PusherService {
     /// → `failConnection`). Installed post-construction by the view-syncer
     /// (which owns the ConnectionContextManager); `None` until wired.
     auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>>,
+    /// TS `#connContextManager.validateConnection` after a successful push
+    /// (pusher.ts:545-556); see [`ValidateHook`].
+    validate_hook: std::sync::Arc<std::sync::Mutex<Option<ValidateHook>>>,
     /// Queued-but-not-yet-POSTed pushes (enqueue increments, drainer decrements).
     depth: Arc<AtomicI64>,
     cap: i64,
@@ -238,6 +242,9 @@ impl PusherService {
         let auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let drainer_auth_fail_hook = auth_fail_hook.clone();
+        let validate_hook: std::sync::Arc<std::sync::Mutex<Option<ValidateHook>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let drainer_validate_hook = validate_hook.clone();
         // Single sequential drainer: builds the reqwest client inside the
         // runtime (so its pool/timers bind to the reactor) and POSTs each queued
         // push one at a time, preserving per-connection mutation order.
@@ -274,10 +281,99 @@ impl PusherService {
                     }
                     match req.send().await {
                         Ok(resp) if resp.status().is_success() => {
-                            // Drain the body: hyper only returns the connection
-                            // to reqwest's pool once the response is consumed —
-                            // otherwise every push pays a fresh loopback connect.
-                            let _ = resp.bytes().await;
+                            // The TS loopback relay answers 200 with the API
+                            // server's validated `MutateResponse` verbatim
+                            // (rust-push-relay.ts:166) — which may itself be a
+                            // `PushFailed` body. Port of TS `#processPush`'s
+                            // response handling (pusher.ts:535-556) followed by
+                            // `#fanOutResponses` (pusher.ts:366-486).
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            let mut response: serde_json::Value =
+                                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                            if let Some(t) = &target {
+                                let sel = ConnectionSelector {
+                                    client_id: t.client_id.clone(),
+                                    ws_id: t.ws_id.clone(),
+                                };
+                                if is_push_error_response(&response) {
+                                    if crate::custom_queries::transform_query::is_auth_error_body(&response) {
+                                        tracing::warn!(
+                                            client_id = %t.client_id,
+                                            "Push auth failed; invalidating connection"
+                                        );
+                                        let hook = drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                        if let Some(hook) = hook {
+                                            hook(&sel, t.revision);
+                                        }
+                                    }
+                                } else {
+                                    // TS: validateConnection(connCtx, revision,
+                                    // kind === 'MutateResponse' && userID !== undefined
+                                    //   ? {server-validated, validatedUserID: userID}
+                                    //   : {client-fallback})
+                                    let validation = if response.get("kind").and_then(|k| k.as_str())
+                                        == Some("MutateResponse")
+                                        && response.get("userID").is_some()
+                                    {
+                                        crate::services::view_syncer::connection_context_manager::ConnectionValidation::ServerValidated {
+                                            validated_user_id: response
+                                                .get("userID")
+                                                .and_then(|u| u.as_str())
+                                                .map(|u| u.to_string()),
+                                        }
+                                    } else {
+                                        crate::services::view_syncer::connection_context_manager::ConnectionValidation::ClientFallback
+                                    };
+                                    let hook = drainer_validate_hook.lock().ok().and_then(|g| g.clone());
+                                    if let Some(hook) = hook
+                                        && let Err(e) = hook(&sel, t.revision, validation)
+                                    {
+                                        // TS `#processPush` catch (pusher.ts:578-597):
+                                        // an auth error from validation FAILS the
+                                        // connection at its revision and becomes a
+                                        // `PushFailed` http 401 for the client; any
+                                        // other error becomes `PushFailed` internal
+                                        // "Failed to push: …". Both are fanned out
+                                        // below like a relay-returned failure.
+                                        let mutation_ids = serde_json::to_value(&t.mutation_ids)
+                                            .unwrap_or_else(|_| serde_json::json!([]));
+                                        let is_auth_error = matches!(
+                                            e,
+                                            crate::services::view_syncer::connection_context_manager::CCMError::Unauthorized(_)
+                                                | crate::services::view_syncer::connection_context_manager::CCMError::AuthInvalidated(_)
+                                        );
+                                        let message = e.to_error_body().message().to_string();
+                                        if is_auth_error {
+                                            tracing::warn!(
+                                                client_id = %t.client_id,
+                                                response = %message,
+                                                "Push validation failed; invalidating connection"
+                                            );
+                                            let hook = drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                            if let Some(hook) = hook {
+                                                hook(&sel, t.revision);
+                                            }
+                                            response = serde_json::json!({
+                                                "kind": "PushFailed",
+                                                "origin": "zeroCache",
+                                                "reason": "http",
+                                                "message": message,
+                                                "status": 401,
+                                                "mutationIDs": mutation_ids,
+                                            });
+                                        } else {
+                                            response = serde_json::json!({
+                                                "kind": "PushFailed",
+                                                "origin": "zeroCache",
+                                                "reason": "internal",
+                                                "message": format!("Failed to push: {message}"),
+                                                "mutationIDs": mutation_ids,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            fan_out_responses(&sinks, &response);
                         }
                         Ok(resp) => {
                             // Non-2xx: the app/endpoint rejected or errored. The
@@ -349,6 +445,7 @@ impl PusherService {
         Self {
             tx,
             auth_fail_hook,
+            validate_hook,
             depth,
             cap: queue_cap(),
             _census: crate::live_count::Guard::new(&crate::live_count::PUSHER),
@@ -448,6 +545,12 @@ impl PusherService {
 impl PusherDispatch for PusherService {
     fn set_auth_fail_hook(&self, hook: AuthFailHook) {
         if let Ok(mut guard) = self.auth_fail_hook.lock() {
+            *guard = Some(hook);
+        }
+    }
+
+    fn set_validate_hook(&self, hook: ValidateHook) {
+        if let Ok(mut guard) = self.validate_hook.lock() {
             *guard = Some(hook);
         }
     }
@@ -612,6 +715,206 @@ fn fail_downstream(
     error_body: &crate::protocol::ErrorBody,
 ) -> bool {
     sinks.fail_if_current(client_id, ws_id, error_body)
+}
+
+/// TS `#processPush`/`#fanOutResponses` error test: `('kind' in response &&
+/// response.kind === ErrorKind.PushFailed) || 'error' in response`.
+fn is_push_error_response(response: &serde_json::Value) -> bool {
+    response.get("kind").and_then(|k| k.as_str()) == Some("PushFailed")
+        || response.get("error").is_some()
+}
+
+/// Port of TS `Pusher#fanOutResponses` (pusher.ts:366-486). A whole-response
+/// failure (`kind: PushFailed`, or the legacy `error` shape) FAILS every client
+/// named in `mutationIDs` (TS `#failDownstream`); otherwise each client's
+/// mutation results are scanned and an `oooMutation` result FAILS that client
+/// with `{PushFailed, origin: server, reason: oooMutation, message: "mutation
+/// was out of order", details, mutationIDs: <that client's mutations>}`.
+/// Other per-mutation errors are only logged — the client learns through the
+/// lmid poke, exactly as in TS. Clients are reached by clientID
+/// (`ConnectionSinks::fail_client_current`) — TS routes by clientID only too
+/// (its own "stale-routing" TODO at pusher.ts:435).
+fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {
+    fn group_by<T>(items: impl Iterator<Item = (String, T)>) -> Vec<(String, Vec<T>)> {
+        // TS `groupBy` → Map: first-seen order preserved.
+        let mut out: Vec<(String, Vec<T>)> = Vec::new();
+        for (k, v) in items {
+            match out.iter_mut().find(|(kk, _)| *kk == k) {
+                Some((_, vs)) => vs.push(v),
+                None => out.push((k, vec![v])),
+            }
+        }
+        out
+    }
+    let mutation_id_of = |m: &serde_json::Value| -> Option<MutationID> {
+        Some(MutationID {
+            id: m.get("id")?.as_i64()?,
+            client_id: m.get("clientID")?.as_str()?.to_string(),
+        })
+    };
+    if is_push_error_response(response) {
+        tracing::warn!(response = %response, "The server behind ZERO_MUTATE_URL returned a push error.");
+        let ids: Vec<MutationID> = response
+            .get("mutationIDs")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(mutation_id_of).collect())
+            .unwrap_or_default();
+        for (client_id, mutation_ids) in group_by(ids.into_iter().map(|m| (m.client_id.clone(), m)))
+        {
+            let body: crate::protocol::ErrorBody = if let Some(error) = response.get("error") {
+                let error = error.as_str().unwrap_or_default();
+                if error == "http" {
+                    crate::protocol::ErrorBody::PushFailedHttp(PushFailedHttpBody {
+                        kind: ErrorKind::PushFailed,
+                        details: None,
+                        mutation_ids,
+                        message: format!(
+                            "Fetch from API server returned non-OK status {}",
+                            response
+                                .get("status")
+                                .and_then(|s| s.as_i64())
+                                .unwrap_or_default()
+                        ),
+                        origin: ErrorOrigin::ZeroCache,
+                        reason: ErrorReason::Http,
+                        status: response
+                            .get("status")
+                            .and_then(|s| s.as_i64())
+                            .unwrap_or_default(),
+                        body_preview: response.get("details").map(|d| {
+                            d.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| d.to_string())
+                        }),
+                    })
+                } else if error == "unsupportedPushVersion" {
+                    crate::protocol::ErrorBody::PushFailedServer(
+                        crate::protocol::PushFailedServerBody {
+                            kind: ErrorKind::PushFailed,
+                            details: None,
+                            mutation_ids,
+                            message: "Unsupported push version".to_string(),
+                            origin: ErrorOrigin::Server,
+                            reason: ErrorReason::UnsupportedPushVersion,
+                        },
+                    )
+                } else {
+                    crate::protocol::ErrorBody::PushFailedServer(
+                        crate::protocol::PushFailedServerBody {
+                            kind: ErrorKind::PushFailed,
+                            details: None,
+                            mutation_ids,
+                            message: if error == "zeroPusher" {
+                                response
+                                    .get("details")
+                                    .map(|d| {
+                                        d.as_str()
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| d.to_string())
+                                    })
+                                    .unwrap_or_default()
+                            } else if error == "unsupportedSchemaVersion" {
+                                "Unsupported schema version".to_string()
+                            } else {
+                                "An unknown error occurred while pushing to the API server"
+                                    .to_string()
+                            },
+                            origin: ErrorOrigin::Server,
+                            reason: ErrorReason::Internal,
+                        },
+                    )
+                }
+            } else {
+                // `kind: PushFailed`: TS forwards the response body VERBATIM as
+                // the error (`#failDownstream(client.downstream, response)`).
+                // `ErrorBody` is `#[serde(untagged)]` with `Basic` first, so a
+                // generic parse would silently drop `reason`/`mutationIDs`;
+                // parse the concrete PushFailed shapes (http carries `status`).
+                serde_json::from_value::<PushFailedHttpBody>(response.clone())
+                    .map(crate::protocol::ErrorBody::PushFailedHttp)
+                    .or_else(|_| {
+                        serde_json::from_value::<crate::protocol::PushFailedServerBody>(
+                            response.clone(),
+                        )
+                        .map(crate::protocol::ErrorBody::PushFailedServer)
+                    })
+                    .unwrap_or_else(|_| {
+                        crate::protocol::ErrorBody::PushFailedServer(
+                            crate::protocol::PushFailedServerBody {
+                                kind: ErrorKind::PushFailed,
+                                details: None,
+                                mutation_ids,
+                                message: response
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or(
+                                        "An unknown error occurred while pushing to the API server",
+                                    )
+                                    .to_string(),
+                                origin: ErrorOrigin::Server,
+                                reason: ErrorReason::Internal,
+                            },
+                        )
+                    })
+            };
+            sinks.fail_client_current(&client_id, &body);
+        }
+        return;
+    }
+    let mutations: Vec<serde_json::Value> = response
+        .get("mutations")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let grouped = group_by(mutations.into_iter().filter_map(|m| {
+        let cid = m.get("id")?.get("clientID")?.as_str()?.to_string();
+        Some((cid, m))
+    }));
+    let mut connection_terminations: Vec<(String, crate::protocol::ErrorBody)> = Vec::new();
+    for (client_id, mutations) in grouped {
+        let mut failure: Option<crate::protocol::ErrorBody> = None;
+        let mut i = 0;
+        while i < mutations.len() {
+            let m = &mutations[i];
+            let result = m.get("result").cloned().unwrap_or(serde_json::Value::Null);
+            if result.get("error").is_some() {
+                tracing::warn!(result = %result, "The server behind ZERO_MUTATE_URL returned a mutation error.");
+            }
+            if result.get("error").and_then(|e| e.as_str()) == Some("oooMutation") {
+                failure = Some(crate::protocol::ErrorBody::PushFailedServer(
+                    crate::protocol::PushFailedServerBody {
+                        kind: ErrorKind::PushFailed,
+                        details: result.get("details").cloned(),
+                        mutation_ids: mutations
+                            .iter()
+                            .filter_map(|m| {
+                                Some(MutationID {
+                                    client_id: m.get("id")?.get("clientID")?.as_str()?.to_string(),
+                                    id: m.get("id")?.get("id")?.as_i64()?,
+                                })
+                            })
+                            .collect(),
+                        message: "mutation was out of order".to_string(),
+                        origin: ErrorOrigin::Server,
+                        reason: ErrorReason::OutOfOrderMutation,
+                    },
+                ));
+                break;
+            }
+            i += 1;
+        }
+        if failure.is_some() && i + 1 < mutations.len() {
+            tracing::warn!(
+                "push-response contains mutations after a mutation which should fatal the connection"
+            );
+        }
+        if let Some(f) = failure {
+            connection_terminations.push((client_id, f));
+        }
+    }
+    for (client_id, f) in connection_terminations {
+        sinks.fail_client_current(&client_id, &f);
+    }
 }
 
 #[cfg(test)]
@@ -894,9 +1197,230 @@ mod tests {
         assert_eq!(ids_of(&bodies[2]), vec![4], "ws2 stays separate");
     }
 
+    /// Port parity for TS `#fanOutResponses` (pusher.ts:366-486): a 2xx push
+    /// response whose per-mutation result is `oooMutation` FAILS that client's
+    /// downstream with `{PushFailed, origin: server, reason: oooMutation,
+    /// message: "mutation was out of order", details, mutationIDs: <all of that
+    /// client's mutations in the response>}` — prod's most common push error
+    /// (Grafana VictoriaLogs, 2026-09-03: the majority of "returned a push
+    /// error" lines). Rust used to drain the 2xx body unread.
+    #[tokio::test]
+    async fn drainer_fails_downstream_on_ooo_mutation_result() {
+        let addr = oneshot_http(
+            200,
+            r#"{"kind":"MutateResponse","userID":"u1","mutations":[{"id":{"clientID":"cA","id":7},"result":{"error":"oooMutation","details":"expected 6"}}]}"#,
+        )
+        .await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an oooMutation result must fail the downstream (TS #fanOutResponses)")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
+                assert_eq!(msg[0], "error");
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert_eq!(msg[1]["origin"], "server");
+                assert_eq!(msg[1]["reason"], "oooMutation");
+                assert_eq!(msg[1]["message"], "mutation was out of order");
+                assert_eq!(msg[1]["details"], "expected 6");
+                assert_eq!(msg[1]["mutationIDs"][0]["clientID"], "cA");
+                assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
+            }
+            _ => panic!("expected WsCommand::Fail carrying the oooMutation PushFailed body"),
+        }
+    }
+
+    /// TS `#fanOutResponses`: a 2xx response that IS a `PushFailed` body (the
+    /// TS loopback relay forwards the API server's validated response verbatim,
+    /// rust-push-relay.ts:166) fails the clients named in its `mutationIDs`
+    /// with that body.
+    #[tokio::test]
+    async fn drainer_fails_downstream_on_push_failed_body_in_2xx() {
+        let addr = oneshot_http(
+            200,
+            r#"{"kind":"PushFailed","origin":"server","reason":"internal","message":"mutator crashed","mutationIDs":[{"clientID":"cA","id":7}]}"#,
+        )
+        .await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a PushFailed body in a 2xx must fail the downstream (TS #fanOutResponses)")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert_eq!(msg[1]["reason"], "internal");
+                assert_eq!(msg[1]["message"], "mutator crashed");
+                assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
+            }
+            _ => panic!("expected WsCommand::Fail carrying the PushFailed body"),
+        }
+    }
+
+    /// TS `#processPush` (pusher.ts:545-556): a successful push VALIDATES the
+    /// connection in the CCM — `server-validated` with the returned `userID`
+    /// (else `client-fallback`). Without it the background retransform never
+    /// finds a validated connection ("No validated connection is available for
+    /// shared query work", prod: 14/day on TS).
+    #[tokio::test]
+    async fn drainer_validates_connection_after_successful_push() {
+        use crate::services::view_syncer::connection_context_manager::ConnectionValidation;
+        let addr = oneshot_http(
+            200,
+            r#"{"kind":"MutateResponse","userID":"u1","mutations":[{"id":{"clientID":"cA","id":7},"result":{}}]}"#,
+        )
+        .await;
+        let sinks = ConnectionSinks::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let seen: Arc<std::sync::Mutex<Vec<(String, u32, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        pusher.set_validate_hook(Arc::new(move |sel, rev, v| {
+            let tag = match v {
+                ConnectionValidation::ServerValidated { validated_user_id } => {
+                    format!("server-validated:{validated_user_id:?}")
+                }
+                ConnectionValidation::ClientFallback => "client-fallback".to_string(),
+            };
+            seen2
+                .lock()
+                .unwrap()
+                .push((sel.client_id.clone(), rev, tag));
+            Ok(())
+        }));
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+        for _ in 0..50 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(
+            got.len(),
+            1,
+            "a successful push must validate the connection exactly once (TS #processPush), got {got:?}"
+        );
+        assert_eq!(got[0].0, "cA");
+        assert_eq!(got[0].2, "server-validated:Some(\"u1\")");
+    }
+
+    /// TS `#processPush` catch (pusher.ts:578-597): when the post-push
+    /// `validateConnection` REJECTS the connection (`Unauthorized`: the API
+    /// server's `userID` does not match the connection's), the connection is
+    /// failed at its revision (`failConnection`) and the client is failed with
+    /// `{PushFailed, origin: zeroCache, reason: http, status: 401, message:
+    /// <the validation error>, mutationIDs}`.
+    #[tokio::test]
+    async fn drainer_fails_downstream_when_validation_rejects_user_mismatch() {
+        use crate::services::view_syncer::connection_context_manager::CCMError;
+        let addr = oneshot_http(
+            200,
+            r#"{"kind":"MutateResponse","userID":"someone-else","mutations":[{"id":{"clientID":"cA","id":7},"result":{}}]}"#,
+        )
+        .await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let failed: Arc<std::sync::Mutex<Vec<(String, u32)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failed2 = failed.clone();
+        pusher.set_auth_fail_hook(Arc::new(move |sel, rev| {
+            failed2.lock().unwrap().push((sel.client_id.clone(), rev));
+        }));
+        pusher.set_validate_hook(Arc::new(|_sel, _rev, _v| {
+            Err(CCMError::Unauthorized(
+                "Connection userID does not match validated server userID.".to_string(),
+            ))
+        }));
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a rejected validation must fail the downstream (TS #processPush catch)")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert_eq!(msg[1]["origin"], "zeroCache");
+                assert_eq!(msg[1]["reason"], "http");
+                assert_eq!(msg[1]["status"], 401);
+                assert_eq!(
+                    msg[1]["message"],
+                    "Connection userID does not match validated server userID."
+                );
+                assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
+            }
+            _ => panic!("expected WsCommand::Fail carrying the PushFailed http 401 body"),
+        }
+        assert_eq!(
+            failed.lock().unwrap().as_slice(),
+            &[("cA".to_string(), 0u32)][..],
+            "the connection must be failed at its revision (TS failConnection)"
+        );
+    }
+
     /// A non-2xx relay response surfaces a `PushFailedHttp` frame to the
     /// originating socket, carrying the status, mutation ids, and a body preview
-    /// — without closing the connection.
+    /// (`bodyPreview`), then CLOSES the connection (TS `#failDownstream`).
     #[tokio::test]
     async fn drainer_surfaces_push_failed_http_on_non_2xx() {
         let addr = oneshot_http(500, "nope").await;
@@ -931,7 +1455,9 @@ mod tests {
                 assert_eq!(msg[1]["kind"], "PushFailed");
                 assert_eq!(msg[1]["status"], 500);
                 assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
-                assert_eq!(msg[1]["body_preview"], "nope");
+                // Wire key is TS `bodyPreview` (zero-protocol error.ts:90) —
+                // rust serialized `body_preview` until 2026-09-03.
+                assert_eq!(msg[1]["bodyPreview"], "nope");
             }
             _ => panic!("expected WsCommand::Fail (error frame + close), got a non-closing frame"),
         }
