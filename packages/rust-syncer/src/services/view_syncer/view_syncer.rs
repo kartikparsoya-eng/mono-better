@@ -1576,7 +1576,8 @@ impl ViewSyncerService {
                     // client must wipe local state and re-sync fresh, not just
                     // reconnect elsewhere. Fail the group with that error here; the
                     // caller's generic `fail_group` is then a no-op (terminal set).
-                    tracing::error!("CG {}: {message}", self.cg_id);
+                    // TS view-syncer.ts:564 `lc.info?.(`resetting CVR: ${message}`)`.
+                    tracing::info!(cg_id = %self.cg_id, "resetting CVR: {message}");
                     self.cvr = None;
                     self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(
                         message,
@@ -2760,6 +2761,12 @@ impl ViewSyncerService {
             let now = now_ms();
             let ttl_clock = self.get_ttl_clock(now);
             let hydrate_started = std::time::Instant::now();
+            // TS view-syncer.ts:590 `lc.info?.(`init pipelines@${version} (cvr@${cvrVer})`)`.
+            tracing::info!(
+                cg_id = %self.cg_id,
+                "init pipelines@{state_version} (cvr@{})",
+                rust_cvr::schema::types::version_string(&cvr.version)
+            );
             crate::trace::note(
                 "hydrate-start",
                 &format!("cg={} client={client_id}", self.cg_id),
@@ -3189,6 +3196,9 @@ impl ViewSyncerService {
     }
 
     fn delete_client_due_to_disconnect(&mut self, client_id: &str, ws_id: &str) {
+        // TS view-syncer.ts:880-883: the downstream's cleanup logs `client closed`
+        // (an error close was already logged as "closing connection … with error").
+        tracing::info!(client_id, ws_id, "client closed");
         crate::trace::note(
             "conn-close",
             &format!("cg={} client={client_id} ws={ws_id}", self.cg_id),
@@ -3442,10 +3452,8 @@ impl ViewSyncerService {
     /// TS `#syncQueryPipelines`: `#pipelines.reset()` then re-run the query
     /// pipeline set. Called when `advance_and_sync` reports a reset.
     async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {
-        tracing::warn!(
-            "CG {}: pipeline reset ({reason}); re-initializing engine + rehydrating",
-            self.cg_id
-        );
+        // TS view-syncer.ts:573 `lc.info?.(`resetting pipelines: ${result.message}`)`.
+        tracing::info!(cg_id = %self.cg_id, "resetting pipelines: {reason}");
         // Schema-change resets must re-read the replica schema. Reusing the specs
         // captured at CG creation would rebuild the engine with the same stale
         // table/column set and either reset-loop or serve an obsolete schema.
@@ -3832,6 +3840,8 @@ pub(crate) async fn cg_event_loop(
                             // idle-keepalive expiry (the mirror of TS
                             // #checkForShutdownConditionsInLock); emit the same
                             // lifecycle line so log-sequence parity holds (D gate).
+                            // TS view-syncer.ts:2803 `stop()` → `lc.info?.('stopping view syncer')`.
+                            tracing::info!("stopping view syncer");
                             tracing::info!("closing clientGroupID={cg_id}");
                             tracing::info!(
                                 "CG thread {cg_id}: idle keepalive elapsed; shutting down"
@@ -8176,7 +8186,8 @@ impl ViewSyncerService {
         let fut = async move {
             let store = store_arc.lock().await;
             if let Err(e) = store.update_ttl_clock(ttl_clock, last_active as f64).await {
-                tracing::error!("failed to update ttlClock: {e}");
+                // TS view-syncer.ts:1115 `lc.warn?.('failed to update TTL clock', …)`.
+                tracing::warn!(error = %e, "failed to update TTL clock");
             }
         };
         match &self.tokio_handle {
@@ -8293,6 +8304,12 @@ impl ViewSyncerService {
             load_started.elapsed().as_secs_f64() * 1000.0,
         );
         let result = result?;
+        // TS cvr-store.ts:511 `lc.info?.(`loaded cvr@${versionString(cvr.version)} (${ms} ms)`)`.
+        tracing::info!(
+            "loaded cvr@{} ({:.0} ms)",
+            rust_cvr::schema::types::version_string(&result.cvr.version),
+            load_started.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(Some(result.cvr))
     }
 
@@ -8531,6 +8548,7 @@ impl ViewSyncerService {
             if !ops.is_empty() {
                 store_arc.lock().await.apply_store_ops(ops);
             }
+            let flush_started = std::time::Instant::now();
             let store_flushed = {
                 // Bounded retry-with-backoff before declaring the group dead. A
                 // failed flush is terminal (fail_group → every client rehomes and
@@ -8582,6 +8600,16 @@ impl ViewSyncerService {
             };
             // The store applies the row deltas to its own cache inside `flush`
             // (TS cvr-store.ts:1218), so there is nothing to mirror here.
+            if let Some(stats) = &store_flushed {
+                // TS cvr-store.ts:1248 `lc.info?.(`flushed cvr@${versionString(cvr.version)}
+                // ${JSON.stringify(stats)} in (${elapsed} ms)`)`.
+                tracing::info!(
+                    "flushed cvr@{} {} in ({:.1} ms)",
+                    rust_cvr::schema::types::version_string(&flushed.version),
+                    serde_json::to_string(stats).unwrap_or_default(),
+                    flush_started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             Ok(store_flushed.is_some())
             }),
         )
@@ -8980,9 +9008,10 @@ impl ViewSyncerService {
         // when no query URL is configured is warned regardless of what this pass
         // would actually re-transform.
         if !custom_queries.is_empty() && custom_ctx.is_none() {
+            // TS view-syncer.ts:1496 — exact text; the count is a rust-side detail.
             tracing::warn!(
-                "custom queries present but no userQueryURL context; skipping {} query(ies)",
-                custom_queries.len()
+                skipped = custom_queries.len(),
+                "Custom/named queries were requested but no `ZERO_QUERY_URL` is configured for Zero Cache."
             );
         }
 
@@ -9989,6 +10018,13 @@ impl ViewSyncerService {
         if let Some(e) = cvr_err {
             return Err(e);
         }
+        // TS view-syncer.ts:2365 `lc.info?.(`finished processing queries (process:
+        // ${totalProcessTime} ms, wall: ${wallTime} ms)`)` — wall = this pass.
+        tracing::info!(
+            cg_id = %self.cg_id,
+            "finished processing queries (process: {total_process_time_ms:.1} ms, wall: {:.1} ms)",
+            fetch_started.elapsed().as_secs_f64() * 1000.0
+        );
         crate::trace::note(
             "hydrate-fetch",
             &format!(

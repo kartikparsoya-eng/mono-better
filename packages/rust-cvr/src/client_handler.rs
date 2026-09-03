@@ -442,6 +442,8 @@ impl PokeHandler {
             if cmp_versions(&base, &Some(final_version.clone())) == Ordering::Equal
                 && !self.force_initial_poke
             {
+                // TS client-handler.ts:196 `lc.info?.(`already caught up, not sending poke.`)`.
+                tracing::info!("already caught up, not sending poke.");
                 self.release_chain(&mut state);
                 return Ok(());
             }

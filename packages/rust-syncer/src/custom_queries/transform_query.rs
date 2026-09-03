@@ -499,6 +499,13 @@ async fn post_transform_attempts(
                         continue;
                     }
                     let preview = resp.text().await.unwrap_or_default();
+                    // TS fetch.ts:222 `lc.warn?.('fetch from API server returned non-OK status', {url, status, bodyPreview})`.
+                    tracing::warn!(
+                        url = %url,
+                        status = status.as_u16(),
+                        body_preview = %preview,
+                        "fetch from API server returned non-OK status"
+                    );
                     // Port of the ZeroCache `reason: 'http'` TransformFailed
                     // variant (`error.ts` transformFailedBodySchema): carry the
                     // HTTP `status` (+ `bodyPreview`) so a 401/403 is recognizable
@@ -526,6 +533,8 @@ async fn post_transform_attempts(
                         break Ok(v);
                     }
                     Err(e) => {
+                        // TS fetch.ts:294 `lc.warn?.('failed to parse response', …)`.
+                        tracing::warn!(url = %url, error = %e, "failed to parse response");
                         crate::custom::metrics::record_api_attempt(
                             "parse_error",
                             false,

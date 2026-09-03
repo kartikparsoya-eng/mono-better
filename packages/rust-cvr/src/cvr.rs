@@ -452,6 +452,12 @@ impl CVRConfigDrivenUpdater {
             }
             Some(existing) => {
                 if existing != &client_schema {
+                    // TS cvr.ts:283-289 warns with both schemas before throwing.
+                    tracing::warn!(
+                        "New schema {} does not match existing schema {}",
+                        serde_json::to_string(&client_schema).unwrap_or_default(),
+                        serde_json::to_string(existing).unwrap_or_default()
+                    );
                     Err("Provided schema does not match previous schema".to_string())
                 } else {
                     Ok(())
@@ -466,7 +472,9 @@ impl CVRConfigDrivenUpdater {
             if let Some(ref existing) = self.base.cvr.profile_id
                 && !existing.starts_with("cg")
             {
-                // Warning in TS — here we just proceed.
+                // TS cvr.ts:308: profile IDs are expected to change only from
+                // null / the back-filled "cg…" value; anything else is surfaced.
+                tracing::warn!("changing profile ID from {existing} to {profile_id}");
             }
             self.base.cvr.profile_id = Some(profile_id.to_string());
             self.base

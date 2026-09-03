@@ -132,6 +132,19 @@ Anything not listed here and not STALE/WRONG must match TS.
   reproduced at page size 1, `#[should_panic]`). Do NOT lower the env below a
   pass's churn window; it exists for controlled experiments only.
 
+## D-13 · WebSocket per-message compression not offered (`ZERO_WEBSOCKET_COMPRESSION`)
+
+- **TS** (`workers/syncer.ts` `getWebSocketServerOptions`): when `websocketCompression`
+  is enabled (default **false**, zero-config.ts:818) the `ws` server negotiates
+  `permessage-deflate` with the client (optionally with `websocketCompressionOptions`).
+- **Rust** (`ws_server.rs`): tokio-tungstenite 0.24 has no permessage-deflate
+  implementation, so the extension is never offered; a configured
+  `ZERO_WEBSOCKET_COMPRESSION=true` logs "WebSocket compression requested but is not
+  supported by this server" and serves uncompressed.
+- **Why kept (2026-09-03):** library gap, not a port choice. Client-observable only
+  as wire BYTES (frame content/order identical); the prod TS deployment does not
+  enable it. Revisit when tungstenite ships the extension.
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.

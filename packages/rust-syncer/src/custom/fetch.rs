@@ -51,7 +51,14 @@ pub(crate) const BODY_PREVIEW_CAP: usize = 1024;
 /// Read up to `cap` bytes of a response body as a lossy UTF-8 preview. Bounded
 /// so a huge error page can't be buffered into the `PushFailed` frame.
 pub(crate) async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Option<String> {
-    let bytes = resp.bytes().await.ok()?;
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            // TS fetch.ts:73 `lc.warn?.('failed to get body preview', …)`.
+            tracing::warn!(error = %e, "failed to get body preview");
+            return None;
+        }
+    };
     if bytes.is_empty() {
         return None;
     }
