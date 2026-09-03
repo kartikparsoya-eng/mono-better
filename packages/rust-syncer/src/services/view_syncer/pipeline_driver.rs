@@ -360,6 +360,34 @@ impl IvmPipelines {
     }
 
     /// Whether the engine has been initialized.
+    /// Port of TS `PipelineDriver.currentPermissions()` (pipeline-driver.ts:403-418):
+    /// re-read the `{app}.permissions` hash through the CURRENT snapshot
+    /// connection (`this.#snapshotter.current().db`) and reload the doc only
+    /// when the hash changed. TS calls this at its transform sites
+    /// (view-syncer.ts:1553 `#hydrateUnchangedQueries`, :1933
+    /// `#syncQueryPipelineSet`) — never per replica notification, and never
+    /// through a freshly opened connection. The snapshot is pinned, so a
+    /// permissions change becomes visible exactly when `advance` moves the
+    /// snapshot past the replicated change (same as TS).
+    ///
+    /// `None` when no snapshotter is attached (`init_from_connection` tests):
+    /// the caller then keeps the permissions it was configured with.
+    pub fn current_permissions(
+        &self,
+        app_id: &str,
+        current_hash: Option<&str>,
+    ) -> Option<crate::auth::load_permissions::PermissionsReload> {
+        let conn = self.snapshotter.as_ref()?.current_conn().ok()?;
+        let guard = conn.borrow();
+        Some(
+            crate::auth::load_permissions::reload_permissions_if_changed(
+                &guard,
+                app_id,
+                current_hash,
+            ),
+        )
+    }
+
     pub fn initialized(&self) -> bool {
         self.engine.is_some()
     }

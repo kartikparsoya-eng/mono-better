@@ -3148,46 +3148,6 @@ impl ViewSyncerService {
     /// then re-transform + re-hydrate every query under the new rules).
     ///
     /// No-ops for in-memory CGs (no `replica_path`, e.g. unit tests).
-    fn maybe_reload_permissions(&mut self) -> bool {
-        let Some(path) = self.replica_path.as_deref() else {
-            return false;
-        };
-        // READ_ONLY like every other replica reader: the default
-        // `Connection::open` is READ_WRITE|CREATE, which would silently create
-        // an empty db if the replica is missing/swapped at this instant — then
-        // find no permissions and keep serving stale rules instead of surfacing
-        // the problem. Fail cleanly into the warn+return-false path instead.
-        let conn = match crate::db::lite_tables::open_replica_read_only(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    "CG {}: could not open replica to check permissions: {e}",
-                    self.cg_id
-                );
-                return false;
-            }
-        };
-        match crate::auth::load_permissions::reload_permissions_if_changed(
-            &conn,
-            &self.app_id,
-            self.permissions_hash.as_deref(),
-        ) {
-            crate::auth::load_permissions::PermissionsReload::Unchanged => false,
-            crate::auth::load_permissions::PermissionsReload::Changed { permissions, hash } => {
-                tracing::info!(
-                    "CG {}: read-permissions changed (hash {:?} → {:?}); re-transforming queries",
-                    self.cg_id,
-                    self.permissions_hash,
-                    hash
-                );
-                self.permissions = permissions;
-                self.permissions_hash = hash;
-                crate::metrics::Metrics::inc(&self.metrics.permission_reloads);
-                true
-            }
-        }
-    }
-
     /// Change-streamer notification: advance the pipelines to head and poke all
     /// clients. Loads the CVR from the store on first use. A no-store / no-CVR
     /// CG (e.g. tests without PG) logs and skips.
@@ -3254,19 +3214,13 @@ impl ViewSyncerService {
             self.fail_group("Unable to load the client view state");
             return;
         }
-        // Hot-reload permissions before advancing. If the deployed doc changed,
-        // every query's read-permission expansion (and thus its transformation
-        // hash) may differ, so we re-init the pipeline and re-hydrate the whole
-        // CVR under the new rules — the same reset path used for schema drift.
-        // This subsumes the normal advance for this cycle (rehydrate pulls to
-        // head), matching TS, where a permission change forces the query
-        // pipeline set to be re-synced.
-        if self.maybe_reload_permissions() {
-            let cvr = self.cvr.take().unwrap();
-            self.reset_pipelines_and_rehydrate(cvr, "read-permissions changed")
-                .await;
-            return;
-        }
+        // No permissions check here: TS `#advancePipelines` (view-syncer.ts:
+        // 2567-2640) never re-reads permissions; they are re-read at the
+        // transform sites via `PipelineDriver.currentPermissions()` through the
+        // pinned snapshot (see `sync_query_pipeline_set`). Checking per
+        // notification through a freshly opened replica connection cost
+        // ~780 ms per notification on the ART box (9794 notifications, pre-
+        // advance p50 784 ms vs 17 ms for the advance itself, 2026-09-03).
         let cvr = self.cvr.take().unwrap();
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
@@ -4108,25 +4062,30 @@ mod tests {
     /// unchanged, and on a redeploy (new hash) it swaps in the new compiled
     /// permissions, remembers the new hash, and bumps the reload metric. This is
     /// the CG-thread half of the TS `reloadPermissionsIfChanged` hot-reload.
+    /// TS parity: a replica notification never reloads permissions. TS
+    /// `#advancePipelines` (view-syncer.ts:2567-2640) does not touch them; they
+    /// are re-read through the pinned snapshot at the transform sites via
+    /// `PipelineDriver.currentPermissions()` (:1933). Before this port the
+    /// notification path opened a fresh replica connection and reset the
+    /// pipelines on a hash change — this test FAILS on that code (hash flips to
+    /// h2 and permissionReloads becomes 1 during the notification).
     #[test]
-    fn maybe_reload_permissions_swaps_on_redeploy() {
+    fn notification_does_not_reload_permissions_ts_reads_them_at_transform_time() {
         use rusqlite::Connection;
-        let db_path = "/tmp/rust-syncer-perms-reload-test.db";
+        let db_path = "/tmp/rust-syncer-perms-notification-test.db";
         for suffix in ["", "-wal", "-wal2", "-shm"] {
             let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
-        let doc_v1 = r#"{"tables":{}}"#;
         {
             let conn = Connection::open(db_path).unwrap();
             conn.execute_batch(r#"CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);"#)
                 .unwrap();
             conn.execute(
                 r#"INSERT INTO "zero.permissions" (permissions, hash) VALUES (?1, 'h1')"#,
-                rusqlite::params![doc_v1],
+                rusqlite::params![r#"{"tables":{}}"#],
             )
             .unwrap();
         }
-
         let rt = tokio::runtime::Runtime::new().unwrap();
         let factory: Arc<dyn CGServicesFactory> = Arc::new(PermsReloadFactory {
             handle: rt.handle().clone(),
@@ -4149,33 +4108,146 @@ mod tests {
             global,
             count,
         );
-
-        // Same hash → no reload.
-        assert!(!state.maybe_reload_permissions());
-        assert_eq!(state.permissions_hash.as_deref(), Some("h1"));
-        assert_eq!(state.metrics.snapshot()["permissionReloads"], 0);
-
-        // Simulate a redeploy: new doc + new hash committed to the replica.
-        let doc_v2 = r#"{"tables":{"issue":{"row":{"select":[]}}}}"#;
+        // The deployed doc changes on disk (hash h1 → h2) ...
         {
             let conn = Connection::open(db_path).unwrap();
             conn.execute(
                 r#"UPDATE "zero.permissions" SET permissions = ?1, hash = 'h2'"#,
-                rusqlite::params![doc_v2],
+                rusqlite::params![r#"{"tables":{"issue":{"row":{"select":[]}}}}"#],
             )
             .unwrap();
         }
-
-        // Hash moved h1 → h2: reload swaps in the new compiled doc + hash.
-        assert!(state.maybe_reload_permissions());
-        assert_eq!(state.permissions_hash.as_deref(), Some("h2"));
+        // ... and a replica notification arrives for a group with a loaded CVR.
+        state.cvr = Some(empty_cvr("cg1", "00"));
+        rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
         assert_eq!(
-            state.permissions,
-            Some(serde_json::json!({"tables":{"issue":{"row":{"select":[]}}}}))
+            state.permissions_hash.as_deref(),
+            Some("h1"),
+            "a notification must not reload permissions (TS reads them at transform time)"
         );
-        assert_eq!(state.metrics.snapshot()["permissionReloads"], 1);
-
+        assert_eq!(state.permissions, Some(serde_json::json!({"tables": {}})));
+        assert_eq!(state.metrics.snapshot()["permissionReloads"], 0);
         for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    }
+
+    /// TS parity (view-syncer.ts:1933): the transform site re-reads permissions
+    /// through the pipeline's pinned snapshot (`currentPermissions()`) and uses
+    /// the reloaded doc for THIS pass. The engine starts with a stale allow-all
+    /// doc (hash h0) while the replica carries a deny-all doc (hash h1): the
+    /// config pass must hydrate ZERO rows and end on h1. Before this port the
+    /// pass used the permissions it was handed and served both rows — this test
+    /// FAILS on that code.
+    #[test]
+    fn transform_rereads_permissions_through_the_snapshot_at_use_time() {
+        use rusqlite::Connection;
+        let db_path = format!("/tmp/rust-syncer-perms-usetime-{}.db", std::process::id());
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "wal2");
+            let _ = conn.pragma_update(None, "journal_mode", "wal");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE "_zero.replicationConfig" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+                CREATE TABLE "_zero.replicationState" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    stateVersion TEXT NOT NULL);
+                CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "table" TEXT NOT NULL,
+                    "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, "pos" INTEGER NOT NULL,
+                    PRIMARY KEY ("stateVersion","pos"));
+                INSERT INTO "_zero.replicationConfig" VALUES ('singleton','replica-1','[]');
+                INSERT INTO "_zero.replicationState"  VALUES ('singleton','01');
+                CREATE TABLE "issue" (
+                    "id"    "text|NOT_NULL",
+                    "title" "text",
+                    "_0_version" "text",
+                    PRIMARY KEY ("id")
+                );
+                INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+                    ('i1', 'first issue', '01'),
+                    ('i2', 'second issue', '01');
+                CREATE TABLE "app.permissions" (permissions TEXT, hash TEXT);
+                INSERT INTO "app.permissions" (permissions, hash)
+                    VALUES ('{"tables":{"issue":{"row":{"select":[]}}}}', 'h1');
+                "#,
+            )
+            .unwrap();
+        }
+        let specs = crate::compute_table_specs_from_path(&db_path).unwrap();
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(specs, Some(&db_path), "app").unwrap();
+        let mut engine = ViewSyncerService::new(pipelines);
+        engine.app_id = "app".to_string();
+        let allow_all = serde_json::json!({
+            "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+        });
+        engine.permissions = Some(allow_all.clone());
+        engine.permissions_hash = Some("h0".to_string());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ws_sink::WsCommand>();
+        let sink: Arc<dyn rust_cvr::client_handler::WebSocketSink> =
+            Arc::new(crate::ws_sink::DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result_cvr = rt
+            .block_on(engine.config_and_hydrate(
+                empty_cvr("cg1", "01"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![DesiredQuerySpec {
+                    hash: "q_issue".to_string(),
+                    ast: Some(serde_json::json!({"table": "issue"})),
+                    name: None,
+                    args: None,
+                    ttl: None,
+                }],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                Some(&allow_all),
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "01".to_string(),
+                0,
+                0,
+                0,
+            ))
+            .unwrap();
+        assert!(result_cvr.queries.contains_key("q_issue"));
+        assert_eq!(
+            engine.permissions_hash.as_deref(),
+            Some("h1"),
+            "the transform site must have reloaded the replica's permissions (h0 → h1)"
+        );
+        assert_eq!(engine.metrics.snapshot()["permissionReloads"], 1);
+        let mut rows = 0usize;
+        while let Ok(crate::ws_sink::WsCommand::Send { msg: v, .. }) = rx.try_recv() {
+            if v[0] == "pokePart" {
+                rows += v[1]
+                    .get("rowsPatch")
+                    .and_then(|r| r.as_array())
+                    .map(|r| r.len())
+                    .unwrap_or(0);
+            }
+        }
+        assert_eq!(
+            rows, 0,
+            "deny-all permissions read at use time must hydrate no rows (stale allow-all was handed in)"
+        );
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
     }
@@ -8201,6 +8273,36 @@ impl ViewSyncerService {
         // Passing the AST through untransformed here was a fail-OPEN data
         // leak (served the full table; caught by ART G8 via the #158 rider).
         let empty_permissions = serde_json::json!({"tables": {}});
+        // `this.#pipelines.currentPermissions()` at USE time (view-syncer.ts:1933;
+        // AGENTS rule 9 freshness): the doc is re-read through the pinned
+        // snapshot and swapped in only when its hash changed. The `permissions`
+        // parameter stays authoritative for snapshotter-less (test) engines.
+        let refreshed_permissions: Option<serde_json::Value> = match self
+            .pipelines
+            .current_permissions(&self.app_id, self.permissions_hash.as_deref())
+        {
+            Some(crate::auth::load_permissions::PermissionsReload::Changed {
+                permissions,
+                hash,
+            }) => {
+                tracing::info!(
+                    "CG {}: read-permissions changed (hash {:?} → {:?}); transforming with the new doc",
+                    self.cg_id,
+                    self.permissions_hash,
+                    hash
+                );
+                self.permissions = permissions.clone();
+                self.permissions_hash = hash;
+                crate::metrics::Metrics::inc(&self.metrics.permission_reloads);
+                permissions
+            }
+            Some(crate::auth::load_permissions::PermissionsReload::Unchanged) => {
+                self.permissions.clone()
+            }
+            None => None,
+        };
+        let permissions: Option<&serde_json::Value> =
+            refreshed_permissions.as_ref().or(permissions);
         let mut executed: Vec<(String, serde_json::Value, String)> = Vec::new();
         // TS `erroredQueryIDs` = `#processTransformedCustomQueries` return value
         // (`appQueryErrors.map(q => q.id)`, view-syncer.ts:1723) → joined into

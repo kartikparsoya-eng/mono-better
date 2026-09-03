@@ -51,11 +51,17 @@ The freshness-divergence class (per-connection/session mutable state that TS rea
 fresh at use time) is a **rust-syncer seam concern**; rust-cvr and rust-ivm are
 fed computation engines that do not independently own connection/session state.
 Audited the one shared hot-reloadable input:
-- **Permissions** — `router::maybe_reload_permissions` (wired on the advance path,
-  router.rs:3156) reloads on a hash change, refreshes `self.permissions`, and
-  re-transforms; the snapshotter aborts + rehydrates on a permissions-table change
-  (`REASON_PERMISSIONS_CHANGE`, ivm/snapshotter/diff.rs:390). Matches TS
-  (permissions change → re-transform/rehydrate). **Not a stale snapshot.**
+- **Permissions** — read at USE time exactly like TS: `IvmPipelines::current_permissions`
+  (port of `PipelineDriver.currentPermissions()`, pipeline-driver.ts:403) re-reads the
+  `<app>.permissions` hash through the client group's PINNED snapshot connection at the
+  transform site (`sync_query_pipeline_set`, TS view-syncer.ts:1933) and swaps the doc in
+  only when the hash changed; the snapshotter aborts + rehydrates on a permissions-table
+  change during `advance` (`REASON_PERMISSIONS_CHANGE`, ivm/snapshotter/diff.rs, TS
+  snapshotter.ts:511 `'permissions-change'`). There is NO reload on the notification path:
+  the former `maybe_reload_permissions` opened a fresh replica connection per notification
+  (784 ms p50 pre-advance on the ART box, 2026-09-03) and reset the pipelines — removed
+  (commit "read permissions at the transform site through the snapshot"). **Not a stale
+  snapshot.**
 - Schema/table-spec + replica-version are connect/advance-time in both (replica
   version refreshes on advance). No divergence.
 
