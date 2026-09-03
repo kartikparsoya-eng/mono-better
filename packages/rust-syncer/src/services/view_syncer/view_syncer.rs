@@ -3819,6 +3819,7 @@ async fn dispatch_cg_message(
         } => {
             let queue_wait = enqueued_at.elapsed();
             let handled_at = std::time::Instant::now();
+            let handled_cpu = crate::trace::thread_cpu_ms();
             // The frame's message kind (`["changeDesiredQueries", ...]` → the
             // first string), for the trace only.
             let kind = if crate::trace::enabled() {
@@ -3836,9 +3837,10 @@ async fn dispatch_cg_message(
                 crate::trace::note(
                     "cg-inbound",
                     &format!(
-                        "cg={cg_id} kind={kind} queue_wait_ms={:.1} handle_ms={:.1}",
+                        "cg={cg_id} kind={kind} queue_wait_ms={:.1} handle_ms={:.1} handle_cpu_ms={:.1}",
                         queue_wait.as_secs_f64() * 1000.0,
-                        handled_at.elapsed().as_secs_f64() * 1000.0
+                        handled_at.elapsed().as_secs_f64() * 1000.0,
+                        crate::trace::thread_cpu_ms() - handled_cpu
                     ),
                 );
             }
@@ -9092,6 +9094,7 @@ impl ViewSyncerService {
         // together with the row-change count, distinguishes "fetching too many
         // rows" (query-shape / planning) from "slow per-row cold I/O".
         let fetch_started = std::time::Instant::now();
+        let fetch_cpu_started = crate::trace::thread_cpu_ms();
         // A `received` failure (the CVR version-bump invariant) is a recoverable
         // error, not a panic — TS's `#assertNewVersion` throws and aborts the
         // whole pass. Capture the first one, stop feeding the updater (but keep
@@ -9151,11 +9154,12 @@ impl ViewSyncerService {
         crate::trace::note(
             "hydrate-fetch",
             &format!(
-                "cg={} queries={} rows={} fetch_materialize_ms={:.1} process_ms={:.1} yields={} yielded_ms={:.1}",
+                "cg={} queries={} rows={} fetch_materialize_ms={:.1} cpu_ms={:.1} process_ms={:.1} yields={} yielded_ms={:.1}",
                 self.cg_id,
                 queries.len(),
                 processor.total_processed(),
                 fetch_started.elapsed().as_secs_f64() * 1000.0,
+                crate::trace::thread_cpu_ms() - fetch_cpu_started,
                 total_process_time_ms,
                 yields,
                 yielded.as_secs_f64() * 1000.0
