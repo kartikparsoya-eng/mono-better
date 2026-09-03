@@ -634,6 +634,19 @@ fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<s
     transform_errors.push(error);
 }
 
+/// Port of TS `wrapWithProtocolError` (zero-cache/src/types/error-with-level.ts):
+/// an error that is not already a protocol error reaches the client as
+/// `{kind: Internal, message: getErrorMessage(error), origin: ZeroCache}`.
+/// Rust's failure paths carry plain `String` errors, so only the wrapping
+/// branch lives here (the one protocol error a store load can raise,
+/// ClientNotFound, is matched at its sites and passed through unchanged);
+/// the message is the underlying error text, as TS's `getErrorMessage`
+/// yields for an `Error`.
+/// Lives in the consumer because the crate has no `types/` twin module.
+fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {
+    crate::protocol::ErrorBody::basic(crate::protocol::ErrorKind::Internal, message.to_string())
+}
+
 /// Rust-only adapter for the TS union parameter of
 /// `#sendQueryTransformErrorToClients` (`ErroredQuery[] | TransformFailedBody`,
 /// view-syncer.ts:1730): `Failed` = the whole-batch `TransformFailedBody`
@@ -1647,7 +1660,7 @@ impl ViewSyncerService {
                 // syncing. Treat it like every other sync path: fail the group;
                 // clients rehome and the next owner reloads a consistent pair.
                 tracing::error!("CG {}: remove_expired_queries failed: {e}", self.cg_id);
-                self.fail_group("TTL expiry sync failed");
+                self.fail_group(&e.to_string());
             }
         }
     }
@@ -2532,7 +2545,7 @@ impl ViewSyncerService {
             }
             Err(error) => {
                 tracing::error!("CG {}: unable to load CVR: {error}", self.cg_id);
-                self.fail_group("Unable to load the client view state");
+                self.fail_group(&error.to_string());
                 return false;
             }
         }
@@ -2728,7 +2741,7 @@ impl ViewSyncerService {
                 }
                 Err(e) => {
                     tracing::error!("CG {}: config_and_hydrate failed: {e}", self.cg_id);
-                    self.fail_group("Client view synchronization failed");
+                    self.fail_group(&e.to_string());
                 }
             }
         }
@@ -3000,9 +3013,24 @@ impl ViewSyncerService {
         deleted_client_ids: &[String],
         deleted_group_ids: &[String],
     ) {
-        if !matches!(self.ensure_cvr(true).await, Ok(true)) {
-            self.fail_group("Unable to load the client view state");
-            return;
+        match self.ensure_cvr(true).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.fail_group("Unable to load the client view state");
+                return;
+            }
+            // A protocol error passes through TS `wrapWithProtocolError` unchanged:
+            // the store's ClientNotFound reaches the clients as ClientNotFound.
+            Err(LoadCvrError::Store(rust_cvr::cvr_store::CVRStoreError::ClientNotFound(
+                message,
+            ))) => {
+                self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                return;
+            }
+            Err(e) => {
+                self.fail_group(&e.to_string());
+                return;
+            }
         }
 
         // Explicit deletions are acked; a client may not delete itself.
@@ -3051,7 +3079,7 @@ impl ViewSyncerService {
             }
             Err(e) => {
                 tracing::error!("CG {}: delete_clients failed: {e}", self.cg_id);
-                self.fail_group("Client view synchronization failed");
+                self.fail_group(&e.to_string());
             }
         }
         // Mutation-result cleanup for EXPLICIT deleteClients messages is
@@ -3219,9 +3247,24 @@ impl ViewSyncerService {
 
         // A notification can only advance an existing CVR (no create): without a
         // loaded CVR there is nothing to advance.
-        if !matches!(self.ensure_cvr(false).await, Ok(true)) {
-            self.fail_group("Unable to load the client view state");
-            return;
+        match self.ensure_cvr(false).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.fail_group("Unable to load the client view state");
+                return;
+            }
+            // A protocol error passes through TS `wrapWithProtocolError` unchanged:
+            // the store's ClientNotFound reaches the clients as ClientNotFound.
+            Err(LoadCvrError::Store(rust_cvr::cvr_store::CVRStoreError::ClientNotFound(
+                message,
+            ))) => {
+                self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                return;
+            }
+            Err(e) => {
+                self.fail_group(&e.to_string());
+                return;
+            }
         }
         // No permissions check here: TS `#advancePipelines` (view-syncer.ts:
         // 2567-2640) never re-reads permissions; they are re-read at the
@@ -3239,7 +3282,7 @@ impl ViewSyncerService {
                 // TS lets a rejected `getRowRecords()` abort the pass; rust fails
                 // the group so clients rehome onto a consistent reload (I-4).
                 tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
-                self.fail_group("CVR row-record load failed");
+                self.fail_group(&e.to_string());
                 return;
             }
         };
@@ -3289,7 +3332,7 @@ impl ViewSyncerService {
             }
             Err(e) => {
                 tracing::error!("CG {}: advance_and_sync failed: {e}", self.cg_id);
-                self.fail_group("Client view synchronization failed");
+                self.fail_group(&e.to_string());
             }
         }
     }
@@ -3311,7 +3354,7 @@ impl ViewSyncerService {
                 Ok(tables) => self.tables = tables,
                 Err(e) => {
                     tracing::error!("CG {}: schema reload after reset failed: {e}", self.cg_id);
-                    self.fail_group("Replica schema reload failed");
+                    self.fail_group(&e.to_string());
                     return;
                 }
             }
@@ -3419,7 +3462,7 @@ impl ViewSyncerService {
                 Ok(c) => cvr = c,
                 Err(e) => {
                     tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
-                    self.fail_group("Client view rehydration failed");
+                    self.fail_group(&e.to_string());
                     return;
                 }
             }
@@ -3457,11 +3500,26 @@ impl ViewSyncerService {
         self.connection_count.store(0, Ordering::Relaxed);
     }
 
-    /// Permanently fail this CG. Continuing would be unsafe because Rust IVM
-    /// advancement is not rollbackable after the snapshot swaps; a failed CVR
-    /// commit would otherwise cause the next notification to skip that batch.
+    /// Permanently fail this CG: every client gets the error frame and its
+    /// socket closes — TS `#cleanup(err)` → `client.fail(err)` for each client
+    /// (view-syncer.ts:2810), the outcome of any throw out of the
+    /// `#stateChanges` loop or of a timer-driven lock op (`#stateChanges.fail`).
+    ///
+    /// Error kind/message follow TS `wrapWithProtocolError` (see
+    /// [`wrap_with_protocol_error`]): `Internal` + the underlying error text.
+    /// Until 2026-09-03 this sent `Rehome` with a fixed label — a different
+    /// kind (zero-client reconnects immediately on Rehome, backs off on
+    /// Internal) and no diagnostic for the app.
+    ///
+    /// SCOPE NOTE (rust-only, INVENTIONS.md I-6): TS fails only the requesting
+    /// client for a client-initiated lock op (`#runInLockForClient` catch →
+    /// `failConnection` + `client.fail`) and keeps serving the group. Rust also
+    /// tears the group down for those ops because the CVR write-behind (I-6)
+    /// may already have served a version the store never recorded; continuing
+    /// would let the next notification skip that batch. The error the
+    /// requesting client sees is identical to TS.
     fn fail_group(&mut self, message: &str) {
-        self.fail_group_with_error(crate::protocol::ErrorBody::rehome(message));
+        self.fail_group_with_error(wrap_with_protocol_error(message));
     }
 
     /// Like [`fail_group`], but closes every connection with a specific
@@ -4588,6 +4646,75 @@ mod tests {
     /// (count back to 1 — TS deletes + reinserts `{count: 1}`), and records
     /// are per-query. Pins the window-reset branch: a port that only ever
     /// increments would pass the in-window assertions but fail the reset one.
+    /// TS `ClientHandler.fail(e)` → `wrapWithProtocolError(e)`
+    /// (types/error-with-level.ts): a failure the view-syncer cannot serve
+    /// through — here the CVR store's Postgres is unreachable — reaches the
+    /// client as `{kind: Internal, message: getErrorMessage(e), origin:
+    /// ZeroCache}` with the UNDERLYING error text. Rust used to send a
+    /// `Rehome` with a fixed label ("Unable to load the client view state" /
+    /// "Client view synchronization failed"): a different kind (zero-client
+    /// reconnects immediately on Rehome, backs off on Internal) and no
+    /// diagnostic for the app.
+    #[test]
+    fn store_failure_fails_clients_with_internal_like_ts_wrap_with_protocol_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+        // sqlx pools spawn their reaper on construction → needs the runtime context.
+        let pool = rt.block_on(async {
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_millis(300))
+                .connect_lazy("postgres://nobody:nobody@127.0.0.1:1/nowhere")
+                .expect("lazy pool")
+        });
+        state
+            .set_cvr_store(
+                pool,
+                "cvr".to_string(),
+                "cg1".to_string(),
+                "task-0".to_string(),
+            )
+            .expect("set store");
+        state.cvr_pg = true; // production wiring flips this after set_cvr_store (new_with_accepting)
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        // The replication notification runs `ensure_cvr` → `load_cvr` through
+        // the store (TS `#runInLockWithCVR` → `#cvrStore.load()` in the
+        // #stateChanges loop) — the first PG round trip, which fails here.
+        rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
+        let mut errors: Vec<serde_json::Value> = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                WsCommand::Send { msg, .. } if msg[0] == "error" => errors.push(msg[1].clone()),
+                WsCommand::Fail(e) => errors.push(crate::protocol::error_message(&e)[1].clone()),
+                _ => {}
+            }
+        }
+        let e = errors
+            .last()
+            .cloned()
+            .expect("an unreachable CVR store must fail the connection with an error frame");
+        assert_eq!(
+            e["kind"], "Internal",
+            "TS wrapWithProtocolError → kind Internal; got {e}"
+        );
+        assert_eq!(
+            e["origin"], "zeroCache",
+            "TS wrapWithProtocolError sets origin ZeroCache; got {e}"
+        );
+        let msg = e["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.is_empty()
+                && msg != "Unable to load the client view state"
+                && msg != "Client view synchronization failed",
+            "TS sends getErrorMessage(e) — the underlying error text, not a fixed label; got {msg:?}"
+        );
+    }
+
     #[test]
     fn check_for_thrashing_window_and_threshold() {
         let rt = tokio::runtime::Runtime::new().unwrap();

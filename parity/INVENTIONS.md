@@ -176,6 +176,20 @@ guarantees, error semantics) versus TS.
      retry — postgres.js queues, so CVR saturation degrades to latency rather
      than a `fail_group` → rehydrate storm. The retry approximates that with a
      BOUND, so a genuinely dead CVR still fails the group.
+  2b. **Failure scope (2026-09-03).** When a client-initiated lock op fails
+     (initConnection / changeDesiredQueries / deleteClients → rust
+     `config_and_hydrate` / `delete_clients`), TS fails ONLY that client
+     (`#runInLockForClient` catch → `failConnection` + `client.fail(e)`,
+     view-syncer.ts:1237-1250) and keeps serving the group. Rust tears the
+     whole group down (`fail_group`) because the write-behind may already have
+     served a version the store never recorded; continuing would let the next
+     notification skip that batch. Contract: the ERROR every client receives is
+     the TS one — `wrapWithProtocolError` → `{kind: Internal, message:
+     <underlying error>, origin: zeroCache}` (never Rehome; Rehome stays
+     reserved for I-4 shed and TS's own Rehome sites). Pinned by
+     `store_failure_fails_clients_with_internal_like_ts_wrap_with_protocol_error`.
+     Failures inside the advance loop / timer ops fail every client in TS too
+     (`#cleanup(err)`), so those sites are 1:1.
   3. ~~The store does not OWN the `RowRecordCache`~~ — **CLOSED 2026-09-02.**
      `CVRStoreHandle` now holds `row_cache` like TS's `CVRStore.#rowCache`
      (cvr-store.ts:246), builds it in `new()` with TS's default arguments, and

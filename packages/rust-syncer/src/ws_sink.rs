@@ -217,10 +217,12 @@ impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
     fn fail(&self, e: String) {
         // rust-cvr passes a plain message; the accompanying `["error", ..]`
         // frame is delivered separately via `push`. Close with code 3000.
+        // TS `ClientHandler.fail(e)` → `wrapWithProtocolError(e)`: Internal with
+        // origin ZeroCache (types/error-with-level.ts).
         let _ = self.send_command(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
             kind: ErrorKind::Internal,
             message: e,
-            origin: None,
+            origin: Some(crate::protocol::ErrorOrigin::ZeroCache),
         })));
     }
 

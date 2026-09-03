@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **534** · ✅ COVERED **491** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **491/501 = 98%**
+- Rust fns total **535** · ✅ COVERED **492** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **492/502 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -30,7 +30,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 491
+## ✅ COVERED — body pinned to TS fixture — 492
 
 | fn | file | signature |
 |---|---|---|
@@ -436,6 +436,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `str_array` | services/view_syncer/view_syncer.rs | `fn str_array(v: Option<&serde_json::Value>) -> Vec<String> {` |
 | `transform_failure_message` | services/view_syncer/view_syncer.rs | `fn transform_failure_message(body: &serde_json::Value) -> String {` |
 | `update_ttl_clock_in_cvr_without_lock` | services/view_syncer/view_syncer.rs | `fn update_ttl_clock_in_cvr_without_lock(&mut self) {` |
+| `wrap_with_protocol_error` | services/view_syncer/view_syncer.rs | `fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {` |
 | `yield_process` | services/view_syncer/view_syncer.rs | `pub(crate) async fn yield_process() {` |
 | `add_centroid` | tdigest.rs | `pub fn add_centroid(&mut self, c: Centroid) {` |
 | `binary_search` | tdigest.rs | `fn binary_search(high: usize, compare: impl Fn(usize) -> f64) -> usize {` |
