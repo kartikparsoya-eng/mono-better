@@ -113,5 +113,8 @@ python3 "$ROOT/parity/call_guard_parity.py"; chk $? "M2 call-guard parity"
 step "parity — M8 signature differential (mirrored-file twin, 1:1, same parameters)"
 python3 "$ROOT/parity/signature_diff.py"; chk $? "M8 signature differential"
 
+step "parity — M9 alias-note guard (every ledger 📌 alias names an existing rust twin or cites an I-/D-/task/F- id)"
+python3 "$ROOT/parity/alias_guard.py"; chk $? "M9 alias guard"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

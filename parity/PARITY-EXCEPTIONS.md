@@ -145,6 +145,33 @@ Anything not listed here and not STALE/WRONG must match TS.
   as wire BYTES (frame content/order identical); the prod TS deployment does not
   enable it. Revisit when tungstenite ships the extension.
 
+## D-14 · Debug / introspection / observability-only TS helpers not ported
+
+- **TS**: debug decorators and introspection getters on the IVM graph, lap timers,
+  pipeline-lifecycle debug logs, the `pipelineRunID` correlation id.
+- **Rust**: none of it exists; the equivalent visibility comes from `tracing`
+  fields at the call sites and the `zero.*` metrics.
+- **Why kept (2026-09-03):** nothing a client can observe; ledger members (cite
+  this id in their alias note): `addedge`, `decorateinput`, `decoratefilterinput`, `getconstraintsfordebug`, `getfiltersfordebug`, `getsortfordebug`, `getconstraintcostsfordebug`, `getdebuginfo`, `getnodename`, `elapsedlap`, `totalelapsed`, `randomid`, `logquerypipelinelifecycle`.
+
+## D-15 · Node-runtime-only helpers (no rust twin possible)
+
+- **TS**: `errno`-based socket-error classification, `setImmediate` yields, the
+  worker bootstrap, JWK-pair minting for tests.
+- **Rust**: tungstenite/tokio have no errno objects (message-based classification,
+  `has_transient_socket_code` / `is_transient_socket_message`), the executor
+  yields via tokio, the process entry is `main.rs`, keys are only verified.
+- **Why kept (2026-09-03):** platform-bound; members: `startwithoutyielding`, `yieldprocess`, `haserrno`, `hastransientsocketcode`, `createjwkpair`, `runworker`.
+
+## D-16 · Language-idiom mappings (generators, type guards, COW, asserts)
+
+- **TS**: generator drains, `assert*` type guards, WeakSet copy-on-write tracking,
+  memory-source forks, `unreachable`/`assert`.
+- **Rust**: iterators, the type system, `Rc::make_mut`, SQLite-backed sources,
+  `unreachable!()`/`assert!()`.
+- **Why kept (2026-09-03):** same observable behavior by construction; members:
+  `assertarray`, `assertnumber`, `assertmetaentry`, `track`, `owns`, `flipifneeded`, `fork`, `stringify`, `draingenerator`, `unreachable`, `assert`, `logqueryfailure`.
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.

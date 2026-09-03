@@ -19,20 +19,20 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `auth/read-authorizer.ts` (152) | **1:1** | `auth/read_authorizer.rs` (5) |
 | `config/zero-config.ts` (1299) | **1:1** | `config/zero_config.rs` (1), `services/view_syncer/view_syncer.rs` (1) |
 | `custom-queries/transform-query.ts` (290) | **MERGED** | `custom_queries/transform_query.rs` (9) |
-| `custom/fetch.ts` (569) | **SPLIT** | `custom/fetch.rs` (3), `custom/metrics.rs` (3), `custom_queries/transform_query.rs` (3), `protocol/error_reason_enum.rs` (1), `protocol/error.rs` (1) |
+| `custom/fetch.ts` (569) | **SPLIT** | `custom_queries/transform_query.rs` (4), `custom/fetch.rs` (3), `custom/metrics.rs` (3), `protocol/error_reason_enum.rs` (1), `protocol/error.rs` (1) |
 | `custom/metrics.ts` (93) | **MERGED** | `custom/metrics.rs` (3) |
 | `db/lite-tables.ts` (356) | **1:1** | `db/lite_tables.rs` (5), `services/view_syncer/pipeline_driver.rs` (1) |
 | `observability/metrics.ts` (239) | **MERGED** | `custom_queries/transform_query.rs` (1), `workers/syncer.rs` (1), `observability/metrics.rs` (1), `server/otel_start.rs` (1) |
 | `server/otel-start.ts` (107) | **MERGED** | `server/otel_start.rs` (2) |
 | `server/syncer.ts` (295) | **MERGED** | `custom_queries/transform_query.rs` (1) |
 | `services/mutagen/pusher.ts` (712) | **1:1** | `services/mutagen/pusher.rs` (11), `live_count.rs` (1) |
-| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (37) |
+| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (38) |
 | `services/view-syncer/drain-coordinator.ts` (76) | **1:1** | `services/view_syncer/drain_coordinator.rs` (6) |
 | `services/view-syncer/e2e-serving-lag.ts` (82) | **MERGED** | `services/view_syncer/e2e_serving_lag.rs` (6) |
 | `services/view-syncer/inspect-handler.ts` (215) | **1:1** | `services/view_syncer/inspect_handler.rs` (2) |
-| `services/view-syncer/pipeline-driver.ts` (1558) | **MERGED** | `services/view_syncer/pipeline_driver.rs` (18), `server/inspector_delegate.rs` (1), `ws_sink.rs` (1), `tdigest.rs` (1), `services/view_syncer/view_syncer.rs` (1), `services/view_syncer/connection_context_manager.rs` (1), `protocol/error.rs` (1) |
+| `services/view-syncer/pipeline-driver.ts` (1558) | **MERGED** | `services/view_syncer/pipeline_driver.rs` (16), `services/view_syncer/view_syncer.rs` (2), `server/inspector_delegate.rs` (1), `ws_sink.rs` (1), `tdigest.rs` (1), `services/view_syncer/connection_context_manager.rs` (1), `protocol/error.rs` (1) |
 | `services/view-syncer/query-covering.ts` (444) | **MERGED** | `services/view_syncer/query_covering.rs` (25) |
-| `services/view-syncer/view-syncer.ts` (3002) | **MERGED** | `services/view_syncer/view_syncer.rs` (67), `services/view_syncer/query_covering.rs` (2), `custom_queries/transform_query.rs` (1), `services/view_syncer/e2e_serving_lag.rs` (1) |
+| `services/view-syncer/view-syncer.ts` (3002) | **MERGED** | `services/view_syncer/view_syncer.rs` (67), `services/view_syncer/query_covering.rs` (2), `custom_queries/transform_query.rs` (1), `server/inspector_delegate.rs` (1), `services/view_syncer/e2e_serving_lag.rs` (1) |
 | `workers/connect-params.ts` (100) | **1:1** | `workers/connect_params.rs` (2), `ws_server.rs` (1) |
 | `workers/connection.ts` (485) | **1:1** | `workers/connection.rs` (17), `ws_sink.rs` (2), `observability/metrics.rs` (1) |
 | `workers/syncer-ws-message-handler.ts` (283) | **1:1** | `workers/syncer_ws_message_handler.rs` (3) |
@@ -45,6 +45,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 - `custom_queries/transform_query.rs` ⟵ `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`, `services/view-syncer/view-syncer.ts`
 - `observability/metrics.rs` ⟵ `observability/metrics.ts`, `workers/connection.ts`, `workers/syncer.ts`
 - `protocol/error.rs` ⟵ `custom/fetch.ts`, `services/view-syncer/pipeline-driver.ts`
+- `server/inspector_delegate.rs` ⟵ `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 - `server/otel_start.rs` ⟵ `observability/metrics.ts`, `server/otel-start.ts`
 - `services/view_syncer/connection_context_manager.rs` ⟵ `auth/auth.ts`, `services/view-syncer/connection-context-manager.ts`, `services/view-syncer/pipeline-driver.ts`
 - `services/view_syncer/e2e_serving_lag.rs` ⟵ `services/view-syncer/e2e-serving-lag.ts`, `services/view-syncer/view-syncer.ts`
@@ -116,8 +117,6 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `getBodyPreview` (custom/fetch.ts:62) | `BODY_PREVIEW_CAP` (:49) | fuzzy 0.67 |
 | `urlMatch` (custom/fetch.ts:389) | `url_match` (:11) | exact |
 
-🟥 **TS symbols not resolved into this file (1):** `FetchMetricsOptions`
-
 🟦 **Rust-only added here (1):** `read_body_preview`
 
 ### `custom/metrics.rs`  ⟵  `custom/fetch.ts`, `custom/metrics.ts`
@@ -151,7 +150,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `transform` (custom-queries/transform-query.ts:117) | `transform` (:180) | exact |
 | `validate` (custom-queries/transform-query.ts:111) | `validate` (:305) | exact |
 
-🟥 **TS symbols not resolved into this file (13):** `Category`, `LONG_DURATION_HISTOGRAM_BOUNDARIES_S`, `NATIVE_HISTOGRAM_INSTRUMENT_NAMES`, `TransformResponse`, `getMeter`, `getOrCreateGauge`, `getOrCreateHistogram`, `getOrCreateLatencyHistogram`, `getOrCreateUpDownCounter`, `initEventSink`, `recordMs`, `registerSQLiteCorruptionDiagnosticTarget`, `startAnonymousTelemetry`
+🟥 **TS symbols not resolved into this file (14):** `Category`, `FetchMetricsOptions`, `LONG_DURATION_HISTOGRAM_BOUNDARIES_S`, `NATIVE_HISTOGRAM_INSTRUMENT_NAMES`, `TransformResponse`, `getMeter`, `getOrCreateGauge`, `getOrCreateHistogram`, `getOrCreateLatencyHistogram`, `getOrCreateUpDownCounter`, `initEventSink`, `recordMs`, `registerSQLiteCorruptionDiagnosticTarget`, `startAnonymousTelemetry`
 
 🟦 **Rust-only added here (15):** `CACHE_TTL`, `FETCH_MAX_ATTEMPTS`, `HTTP_CLIENT`, `RESERVED_PARAMS`, `TRANSFORM_CACHE`, `TransformedQuery`, `cache_set`, `composed_headers`, `extract_transform_queries`, `post_transform_attempts`, `seed_transform_cache_for_test`, `set_header`, `spawn_http_stub_seq`, `spawn_http_stub_with`, `validation_of`
 
@@ -306,7 +305,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 
 🟦 **Rust-only added here (2):** `NullableVersion`, `Version`
 
-### `server/inspector_delegate.rs`  ⟵  `services/view-syncer/pipeline-driver.ts`
+### `server/inspector_delegate.rs`  ⟵  `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -664,7 +663,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `resolveAuth` | auth/auth.ts:49 | `resolve_auth` services/view_syncer/connection_context_manager.rs:230 | ✅ exact |
 | `pickToken` | auth/auth.ts:126 | `pick_token` services/view_syncer/connection_context_manager.rs:284 | ✅ exact |
 | `isAuthErrorBody` | auth/auth.ts:211 | `is_auth_error_body` custom_queries/transform_query.rs:325 | ✅ exact |
-| `createJwkPair` | auth/jwt.ts:14 | N/A — JWK-pair GENERATION helper (tests/tooling) | 📌 rust only verifies tokens, never mints keys |
+| `createJwkPair` | auth/jwt.ts:14 | N/A — JWK-pair GENERATION helper (tests/tooling) | 📌 rust only verifies tokens, never mints keys (D-15) |
 | `getRemoteKeyset` | auth/jwt.ts:32 | auth/jwt.rs JWKS_CACHE/lookup_cached_jwk | 📌 cached remote JWKS |
 | `tokenConfigOptions` | auth/jwt.ts:41 | — | 🟥 UNRESOLVED |
 | `verifyToken` | auth/jwt.ts:50 | auth/jwt.rs verify_with_jwks / verify_sync cluster | 📌 name-diverged verify path; 1:1 rename pending #163 |
@@ -706,7 +705,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `#requestTransform` | custom-queries/transform-query.ts:188 | `request_transform` custom_queries/transform_query.rs:359 | ✅ exact |
 | `getCacheKey` | custom-queries/transform-query.ts:259 | `get_cache_key` custom_queries/transform_query.rs:585 | ✅ exact |
 | `normalizedHeaders` | custom-queries/transform-query.ts:278 | `normalized_headers` custom_queries/transform_query.rs:578 | ✅ exact |
-| `compileUrlPattern` | custom/fetch.ts:52 | N/A | 📌 no separate compile step; url_match matches the raw pattern inline |
+| `compileUrlPattern` | custom/fetch.ts:52 | custom_queries/transform_query.rs url_match | 📌 no separate compile step; url_match matches the raw pattern inline |
 | `getBodyPreview` | custom/fetch.ts:62 | `BODY_PREVIEW_CAP` custom/fetch.rs:49 | 🔁 rename 0.67 |
 | `FetchMetricsOptions` | custom/fetch.ts:92 | — | 🟥 UNRESOLVED |
 | `fetchFromAPIServer` | custom/fetch.ts:97 | custom_queries/transform_query.rs post_transform | 📌 push-class calls go via services/mutagen/pusher.rs relay POST (I-3) |
@@ -752,10 +751,10 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `getOrCreateGauge` | observability/metrics.ts:218 | — | 🟥 UNRESOLVED |
 | `getInstance` | server/otel-start.ts:23 | N/A — node OtelManager singleton wrapper | 📌 rust init is free fns in server/otel_start.rs |
 | `startOtelAuto` | server/otel-start.ts:30 | server/otel_start.rs init_metrics/metrics_enabled | 📌 rust otel init path; node auto-instr has no rust twin |
-| `randomID` | server/syncer.ts:49 | N/A | 📌 TS pipelineRunID debug-correlation id; not ported |
+| `randomID` | server/syncer.ts:49 | N/A | 📌 TS pipelineRunID debug-correlation id; not ported (D-14) |
 | `getCustomQueryConfig` | server/syncer.ts:53 | `CustomQuerySpec` custom_queries/transform_query.rs:126 | 🔁 rename 0.50 |
-| `runWorker` | server/syncer.ts:74 | N/A — node worker bootstrap | 📌 rust process entry is the invented main/http_server pair |
-| `assert` | server/syncer.ts:79 | Rust assert! macro | 📌 idiom |
+| `runWorker` | server/syncer.ts:74 | N/A — node worker bootstrap | 📌 rust process entry is the invented main/http_server pair (D-15) |
+| `assert` | server/syncer.ts:79 | Rust assert! macro | 📌 idiom (D-16) |
 | `initEventSink` | server/syncer.ts:90 | — | 🟥 UNRESOLVED |
 | `registerSQLiteCorruptionDiagnosticTarget` | server/syncer.ts:95 | — | 🟥 UNRESOLVED |
 | `startAnonymousTelemetry` | server/syncer.ts:282 | — | 🟥 UNRESOLVED |
@@ -842,11 +841,11 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `init` | services/view-syncer/pipeline-driver.ts:325 | `init` services/view_syncer/pipeline_driver.rs:408 | ✅ exact |
 | `initialized` | services/view-syncer/pipeline-driver.ts:334 | `initialized` services/view_syncer/pipeline_driver.rs:391 | ✅ exact |
 | `reset` | services/view-syncer/pipeline-driver.ts:343 | `reset` tdigest.rs:136 | ✅ exact |
-| `#initAndResetCommon` | services/view-syncer/pipeline-driver.ts:354 | services/view_syncer/pipeline_driver.rs reset_pipelines_and_rehydrate | 📌 init/reset common path |
+| `#initAndResetCommon` | services/view-syncer/pipeline-driver.ts:354 | services/view_syncer/view_syncer.rs reset_pipelines_and_rehydrate | 📌 init/reset common path |
 | `replicaVersion` | services/view-syncer/pipeline-driver.ts:386 | pipeline_driver.rs snapshotter current_version | 📌 field/getter |
 | `currentVersion` | services/view-syncer/pipeline-driver.ts:395 | `current_version` services/view_syncer/pipeline_driver.rs:396 | ✅ exact |
 | `currentPermissions` | services/view-syncer/pipeline-driver.ts:403 | `current_permissions` services/view_syncer/pipeline_driver.rs:375 | ✅ exact |
-| `advanceWithoutDiff` | services/view-syncer/pipeline-driver.ts:422 | pipeline_driver.rs advance_without_diff | 📌 ported |
+| `advanceWithoutDiff` | services/view-syncer/pipeline-driver.ts:422 | CROSS-CRATE rust-ivm snapshotter/snapshotter.rs advance_without_diff | 📌 ported |
 | `#ensureCostModelExistsIfEnabled` | services/view-syncer/pipeline-driver.ts:430 | CROSS-CRATE rust-ivm engine ensure_cost_model | 📌 planner cost model (2026-08-29 wiring) |
 | `queries` | services/view-syncer/pipeline-driver.ts:458 | pipeline_driver.rs running_queries/active_query_ids | 📌 split getters |
 | `totalHydrationTimeMs` | services/view-syncer/pipeline-driver.ts:462 | rust-ivm engine total_hydration_time_ms | 📌 ported (cross-crate) |
@@ -869,14 +868,14 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `#push` | services/view-syncer/pipeline-driver.ts:1201 | `push` ws_sink.rs:113 | ✅ exact |
 | `#startAccumulating` | services/view-syncer/pipeline-driver.ts:1223 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 folded into Streamer lifecycle |
 | `#stopAccumulating` | services/view-syncer/pipeline-driver.ts:1233 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 folded into Streamer lifecycle |
-| `#logQueryFailure` | services/view-syncer/pipeline-driver.ts:1240 | inlined | 📌 streamer error callback lives in rust-ivm; failures logged via tracing at the call sites |
+| `#logQueryFailure` | services/view-syncer/pipeline-driver.ts:1240 | inlined | 📌 streamer error callback lives in rust-ivm; failures logged via tracing at the call sites (D-16) |
 | `accumulate` | services/view-syncer/pipeline-driver.ts:1276 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 start/stop folded into the Streamer lifecycle |
 | `stream` | services/view-syncer/pipeline-driver.ts:1285 | CROSS-CRATE rust-ivm streamer/mod | 📌 RowChange streaming lives in the ivm crate's Streamer |
 | `#streamChanges` | services/view-syncer/pipeline-driver.ts:1296 | CROSS-CRATE rust-ivm streamer (:96) | 📌 doc-cited |
 | `#streamNodes` | services/view-syncer/pipeline-driver.ts:1342 | CROSS-CRATE rust-ivm streamer (:159) | 📌 doc-cited |
 | `setOutput` | services/view-syncer/pipeline-driver.ts:1416 | rust-ivm operator set_output | 📌 trait method (cross-crate) |
 | `fetch` | services/view-syncer/pipeline-driver.ts:1428 | `FetchConfig` services/view_syncer/connection_context_manager.rs:146 | 🔁 rename 0.50 |
-| `toAdds` | services/view-syncer/pipeline-driver.ts:1472 | INLINED — rust-ivm engine hydrate emits Adds directly | 📌 no Node→AddChange adaptor needed |
+| `toAdds` | services/view-syncer/pipeline-driver.ts:1472 | CROSS-CRATE rust-ivm engine/mod.rs | 📌 hydrate emits Adds directly; no Node→AddChange adaptor needed (D-16) |
 | `getRowKey` | services/view-syncer/pipeline-driver.ts:1482 | rust-ivm streamer get_row_key | 📌 row-key extraction (cross-crate) |
 | `hydrate` | services/view-syncer/pipeline-driver.ts:1491 | `hydrate` services/view_syncer/pipeline_driver.rs:782 | ✅ exact |
 | `hydrateInternal` | services/view-syncer/pipeline-driver.ts:1505 | `internal` protocol/error.rs:192 | 🔁 rename 0.50 |
@@ -943,7 +942,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `#hydrateUnchangedQueries` | services/view-syncer/view-syncer.ts:1449 | `hydrate_unchanged_queries` services/view_syncer/view_syncer.rs:9732 | ✅ exact |
 | `#processTransformedCustomQueries` | services/view-syncer/view-syncer.ts:1696 | `CustomTransformed` custom_queries/transform_query.rs:141 | 🔁 rename 0.50 |
 | `#sendQueryTransformErrorToClients` | services/view-syncer/view-syncer.ts:1728 | `send_query_transform_error_to_clients` services/view_syncer/view_syncer.rs:8397 | ✅ exact |
-| `#addQueryMaterializationServerMetric` | services/view-syncer/view-syncer.ts:1773 | N/A — InspectorDelegate enrichment | 📌 inspect handler returns empty TDigests; status doc-cited there |
+| `#addQueryMaterializationServerMetric` | services/view-syncer/view-syncer.ts:1773 | server/inspector_delegate.rs add_metric get_metrics_json_for_query | 📌 ported: per-query TDigests (tdigest.rs); the old 'returns empty TDigests' note was stale (2026-09-03) |
 | `#findQueryCoverageShadowHit` | services/view-syncer/view-syncer.ts:1781 | `QueryCoverageShadowHit` services/view_syncer/query_covering.rs:50 | 🔁 rename 0.80 |
 | `#logQueryCoverageShadowSummary` | services/view-syncer/view-syncer.ts:1805 | services/view_syncer/query_covering.rs (:60) | 📌 doc-cited |
 | `#syncQueryPipelineSet` | services/view-syncer/view-syncer.ts:1872 | `sync_query_pipeline_set` services/view_syncer/view_syncer.rs:8888 | ✅ exact |
@@ -981,7 +980,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `handleInitConnection` | workers/connection.ts:190 | `handle_init_connection` workers/connection.rs:292 | ✅ exact |
 | `#handleMessageResult` | workers/connection.ts:234 | workers/connection.rs (:184) handle_result | 📌 doc-cited |
 | `#recordWebSocketError` | workers/connection.ts:282 | `record_websocket_error` observability/metrics.rs:499 | ✅ exact |
-| `#proxyInbound` | workers/connection.ts:289 | workers/connection.rs handle_inbound/forward_inbound | 📌 renamed |
+| `#proxyInbound` | workers/connection.ts:289 | workers/connection.rs handle_inbound | 📌 renamed |
 | `#proxyOutbound` | workers/connection.ts:304 | ws_sink.rs outbound task (I-2) | 📌 per-connection mpsc sender |
 | `#closeWithThrown` | workers/connection.ts:324 | workers/connection.rs close_with_error | 📌 renamed: no thrown objects at the rust WS boundary |
 | `#closeWithError` | workers/connection.ts:331 | `close_with_error` workers/connection.rs:224 | ✅ exact |
@@ -989,7 +988,7 @@ TS origin files: **24**  ·  Rust files: **71** (42 new)
 | `sendError` | workers/connection.ts:356 | `send_error` workers/connection.rs:257 | ✅ exact |
 | `WebSocketLike` | workers/connection.ts:361 | `DirectWebSocketSink` ws_sink.rs:90 | 🔁 rename 0.40 |
 | `findProtocolError` | workers/connection.ts:433 | workers/connection.rs classify_error_log_level | 📌 protocol-error classify |
-| `hasErrno` | workers/connection.ts:443 | N/A | 📌 Node `'errno' in e`; Rust WS stack has no errno |
+| `hasErrno` | workers/connection.ts:443 | N/A | 📌 Node `'errno' in e`; Rust WS stack has no errno (D-15) |
 | `hasTransientSocketCode` | workers/connection.ts:466 | `has_transient_socket_code` workers/connection.rs:342 | ✅ exact |
 | `isTransientSocketMessage` | workers/connection.ts:477 | `is_transient_socket_message` workers/connection.rs:349 | ✅ exact |
 | `withTraceparent` | workers/syncer-ws-message-handler.ts:28 | `with_traceparent` workers/syncer_ws_message_handler.rs:26 | ✅ exact |
