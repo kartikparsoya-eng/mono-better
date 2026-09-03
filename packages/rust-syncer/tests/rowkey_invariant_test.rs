@@ -42,7 +42,7 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(shape.ddl).unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
     let spec = specs
         .iter()
         .find(|s| s.table == shape.table)

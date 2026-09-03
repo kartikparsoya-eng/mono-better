@@ -37,7 +37,7 @@ fn pipelines_over_rows(threshold: Rc<dyn Fn() -> f64>) -> IvmPipelines {
         )
         .unwrap();
     }
-    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
     let mut pipelines = IvmPipelines::new();
     // TS ctor param `yieldThresholdMs` (pipeline-driver.ts:304); installed
     // BEFORE `init` so every TableSource gets `() => this.#shouldYield()`.

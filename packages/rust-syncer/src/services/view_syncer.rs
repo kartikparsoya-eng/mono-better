@@ -5,6 +5,7 @@
 //! `ConnectionContextManager` is NOT fused: it lives in its 1:1 module below
 //! and has been the live single owner of connection/auth state since task
 //! #155 (I-8). The rest map 1:1 to their TS files here.
+pub mod client_schema;
 pub mod connection_context_manager;
 pub mod drain_coordinator;
 pub mod e2e_serving_lag;

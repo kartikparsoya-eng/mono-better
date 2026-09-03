@@ -24,6 +24,7 @@ use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
 use crate::custom_queries::transform_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform,
 };
+use crate::db::specs::LiteTableSpec;
 use crate::server::priority_op::{is_priority_op_running, run_priority_op};
 use crate::services::view_syncer::connection_context_manager::{
     CCMError, ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
@@ -259,6 +260,9 @@ pub struct SyncEngineConfig {
     /// accepted socket; it never serves from partial or fabricated metadata.
     pub initialization_error: Option<String>,
     pub tables: Vec<IvmTableSpec>,
+    /// Every replica table as TS `listTables` reports it (`fullTables` of
+    /// `computeZqlSpecs`) — `check_client_schema` input.
+    pub full_tables: Vec<LiteTableSpec>,
     /// SQLite replica path; `None` selects in-memory sources (test/dev).
     pub replica_path: Option<String>,
     pub app_id: String,
@@ -985,6 +989,7 @@ pub struct ViewSyncerService {
     /// re-initialized on an advance reset (TS `#pipelines.reset` /
     /// `ResetPipelinesSignal` → rehydrate).
     tables: Vec<IvmTableSpec>,
+    full_tables: Vec<LiteTableSpec>,
     replica_path: Option<String>,
     app_id: String,
     /// Compiled read-permissions for this CG's app (loaded from the replica).
@@ -1254,6 +1259,7 @@ impl ViewSyncerService {
         let server_version = config.server_version.clone();
         let metrics = config.metrics.clone();
         let tables = config.tables.clone();
+        let full_tables = config.full_tables.clone();
         let replica_path = config.replica_path.clone();
         let app_id = config.app_id.clone();
         // Engine seat (the former `SyncEngine::new`): pipelines + CVR-store
@@ -1369,6 +1375,7 @@ impl ViewSyncerService {
             replica_version,
             cvr_pg: false,
             tables,
+            full_tables,
             replica_path,
             app_id,
             permissions,
@@ -2573,19 +2580,24 @@ impl ViewSyncerService {
             .get("clientSchema")
             .filter(|value| !value.is_null())
             .cloned();
+        // TS `#initAndResetCommon` → `checkClientSchema(shardID, clientSchema,
+        // tableSpecs, fullTables)` (pipeline-driver.ts:364): the thrown
+        // ProtocolError (Internal | SchemaVersionNotSupported) closes the client.
         if let Some(schema) = client_schema.as_ref()
-            && let Err(message) =
-                crate::db::lite_tables::validate_client_schema(schema, &self.tables)
+            && let Err(body) = crate::services::view_syncer::client_schema::check_client_schema(
+                &self.shard,
+                schema,
+                &self.tables,
+                &self.full_tables,
+            )
         {
             tracing::info!(
-                "CG {}: rejecting incompatible client schema: {message}",
-                self.cg_id
+                "CG {}: rejecting incompatible client schema: {}",
+                self.cg_id,
+                body.message()
             );
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(crate::protocol::ErrorBody::basic(
-                    crate::protocol::ErrorKind::SchemaVersionNotSupported,
-                    message,
-                ));
+                conn.close_with_error(body);
             }
             self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
@@ -3458,7 +3470,9 @@ impl ViewSyncerService {
         // captured at CG creation would rebuild the engine with the same stale
         // table/column set and either reset-loop or serve an obsolete schema.
         if let Some(path) = self.replica_path.as_deref() {
-            match crate::db::lite_tables::compute_table_specs_from_path(path) {
+            match crate::db::lite_tables::open_replica_read_only(path).and_then(|conn| {
+                crate::db::lite_tables::compute_zql_specs(&conn, Some(&mut self.full_tables))
+            }) {
                 Ok(tables) => self.tables = tables,
                 Err(e) => {
                     tracing::error!("CG {}: schema reload after reset failed: {e}", self.cg_id);
@@ -4172,6 +4186,7 @@ mod tests {
             SyncEngineConfig {
                 initialization_error: None,
                 tables: Vec::new(),
+                full_tables: Vec::new(),
                 replica_path: None, // in-memory (no PG, no replica)
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -4216,6 +4231,7 @@ mod tests {
             SyncEngineConfig {
                 initialization_error: None,
                 tables: Vec::new(),
+                full_tables: Vec::new(),
                 replica_path: Some(self.replica_path.clone()),
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -4679,6 +4695,7 @@ mod tests {
             SyncEngineConfig {
                 initialization_error: None,
                 tables: Vec::new(),
+                full_tables: Vec::new(),
                 replica_path: None,
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -6884,6 +6901,7 @@ mod tests {
             SyncEngineConfig {
                 initialization_error: None,
                 tables: vec![issue_table_spec()],
+                full_tables: vec![issue_full_table_spec()],
                 replica_path: None,
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -7564,6 +7582,34 @@ mod tests {
     // client socket. Models the TS view-syncer.pg.test.ts `connect()` +
     // `nextPoke()` pattern.
 
+    /// The `fullTables` twin of `issue_table_spec()` (what `listTables` would
+    /// report for it), so `check_client_schema` sees a synced replica.
+    fn issue_full_table_spec() -> crate::db::specs::LiteTableSpec {
+        use crate::db::specs::{LiteColumnSpec, LiteTableSpec};
+        LiteTableSpec {
+            name: "issue".to_string(),
+            columns: vec![
+                (
+                    "id".to_string(),
+                    LiteColumnSpec {
+                        pos: 1,
+                        data_type: "text|NOT_NULL".to_string(),
+                        not_null: false,
+                    },
+                ),
+                (
+                    "title".to_string(),
+                    LiteColumnSpec {
+                        pos: 2,
+                        data_type: "text".to_string(),
+                        not_null: false,
+                    },
+                ),
+            ],
+            primary_key: None,
+        }
+    }
+
     fn issue_table_spec() -> crate::services::view_syncer::pipeline_driver::IvmTableSpec {
         use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
         IvmTableSpec {
@@ -7587,6 +7633,7 @@ mod tests {
             ]),
             primary_key: vec!["id".to_string()],
             unique_keys: None,
+            all_potential_primary_keys: vec![vec!["id".to_string()]],
             min_row_version: None,
         }
     }
@@ -7607,6 +7654,7 @@ mod tests {
             SyncEngineConfig {
                 initialization_error: None,
                 tables: vec![issue_table_spec()],
+                full_tables: vec![issue_full_table_spec()],
                 replica_path: None, // in-memory sources
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -8115,6 +8163,7 @@ impl ViewSyncerService {
             replica_version: String::new(),
             cvr_pg: false,
             tables: Vec::new(),
+            full_tables: Vec::new(),
             replica_path: None,
             app_id: String::new(),
             permissions: None,
@@ -10963,6 +11012,7 @@ mod engine_tests {
             )]),
             primary_key: vec!["id".to_string()],
             unique_keys: None,
+            all_potential_primary_keys: vec![vec!["id".to_string()]],
             min_row_version: None,
         }
     }

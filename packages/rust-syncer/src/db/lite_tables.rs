@@ -16,6 +16,7 @@
 //! streamer's `_0_version` bumping (ports of TS `listIndexes` /
 //! `TableMetadataTracker.getMinRowVersions`).
 
+use crate::db::specs::{LiteColumnSpec, LiteTableSpec};
 use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -72,125 +73,37 @@ const TEXT_ARRAY_ATTRIBUTE: &str = "|TEXT_ARRAY";
 /// Open the replica and compute its table specs.
 pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, String> {
     let conn = open_replica_read_only(replica_path)?;
-    compute_zql_specs(&conn)
+    compute_zql_specs(&conn, None)
 }
 
-/// Compute table specs from an open replica connection.
-pub fn compute_zql_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, String> {
+/// Compute table specs from an open replica connection. Port of TS
+/// `computeZqlSpecs(lc, db, opts, tableSpecs, fullTables?)` (lite-tables.ts:210):
+/// the returned specs are the syncable tables; `full_tables`, when given, is
+/// cleared and receives EVERY replica table as `listTables` reports it
+/// (unsyncable ones and unsupported columns included) — the `fullTables` map
+/// `checkClientSchema` explains missing tables/columns from.
+pub fn compute_zql_specs(
+    conn: &Connection,
+    mut full_tables: Option<&mut Vec<LiteTableSpec>>,
+) -> Result<Vec<IvmTableSpec>, String> {
     let table_names = list_tables(conn)?;
     // Read unique indexes + minRowVersion once, then attach per table.
     let unique_indexes = list_unique_indexes(conn)?;
     let min_row_versions = read_min_row_versions(conn)?;
     let mut specs = Vec::with_capacity(table_names.len());
+    if let Some(full) = full_tables.as_deref_mut() {
+        full.clear();
+    }
     for table in table_names {
-        if let Some(spec) = read_table_spec(conn, &table, &unique_indexes, &min_row_versions)? {
+        let (full_table, spec) = read_table_spec(conn, &table, &unique_indexes, &min_row_versions)?;
+        if let Some(full) = full_tables.as_deref_mut() {
+            full.push(full_table);
+        }
+        if let Some(spec) = spec {
             specs.push(spec);
         }
     }
     Ok(specs)
-}
-
-/// Validate the client-declared schema against the syncable replica schema.
-/// This covers the read-path invariants enforced by TS `checkClientSchema`:
-/// referenced tables/columns must exist, value types must agree, and the client
-/// primary key must correspond to a replicated unique key.
-pub fn validate_client_schema(
-    client_schema: &serde_json::Value,
-    specs: &[IvmTableSpec],
-) -> Result<(), String> {
-    let tables = client_schema
-        .get("tables")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| "client schema must contain a tables object".to_string())?;
-    if specs.is_empty() {
-        return Err(
-            "No tables have been synced from upstream. Check the upstream replication setup."
-                .to_string(),
-        );
-    }
-    let by_name: HashMap<&str, &IvmTableSpec> =
-        specs.iter().map(|s| (s.table.as_str(), s)).collect();
-    let mut errors = Vec::new();
-    for (table_name, client_table) in tables {
-        let Some(server) = by_name.get(table_name.as_str()) else {
-            errors.push(format!(
-                "The \"{table_name}\" table is not replicated or syncable."
-            ));
-            continue;
-        };
-        let Some(columns) = client_table
-            .get("columns")
-            .and_then(serde_json::Value::as_object)
-        else {
-            errors.push(format!("The \"{table_name}\" table has no columns object."));
-            continue;
-        };
-        for (column, client_column) in columns {
-            match server.columns.get(column) {
-                None => errors.push(format!(
-                    "The \"{table_name}\".\"{column}\" column is not replicated or supported."
-                )),
-                Some(server_column) => {
-                    let client_type = client_column
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
-                    if client_type != server_column.r#type {
-                        errors.push(format!(
-                            "The \"{table_name}\".\"{column}\" type \"{}\" does not match client type \"{client_type}\".",
-                            server_column.r#type
-                        ));
-                    }
-                }
-            }
-        }
-        let client_pk: Option<Vec<String>> = client_table
-            .get("primaryKey")
-            .and_then(serde_json::Value::as_array)
-            .map(|keys| {
-                keys.iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            });
-        let Some(mut client_pk) = client_pk else {
-            errors.push(format!(
-                "The \"{table_name}\" table's client schema does not specify a primary key."
-            ));
-            continue;
-        };
-        client_pk.sort();
-        let candidates: Vec<Vec<String>> = server
-            .unique_keys
-            .clone()
-            .unwrap_or_else(|| vec![server.primary_key.clone()])
-            .into_iter()
-            .filter(|key| {
-                key == &server.primary_key
-                    || key.iter().all(|column| {
-                        server
-                            .columns
-                            .get(column)
-                            .is_some_and(|schema| !schema.optional)
-                    })
-            })
-            .collect();
-        if !candidates.iter().any(|key| {
-            let mut key = key.clone();
-            key.sort();
-            key == client_pk
-        }) {
-            errors.push(format!(
-                "The \"{table_name}\" table's primary key <{}> is not a replicated unique key.",
-                client_pk.join(",")
-            ));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("\n"))
-    }
 }
 
 /// Read the UNIQUE indexes for every syncable table, grouped as
@@ -309,27 +222,34 @@ fn list_tables(conn: &Connection) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// Build the spec for one table. Returns `None` if the table has no
-/// ZQL-supported columns (e.g. it would be unsyncable).
+/// Build the spec for one table: the full `LiteTableSpec` (TS `listTables`
+/// row group — every column, declared PK) plus the syncable `IvmTableSpec`,
+/// `None` if the table has no ZQL-supported columns or no usable row key.
 fn read_table_spec(
     conn: &Connection,
     table: &str,
     unique_indexes: &HashMap<String, Vec<Vec<String>>>,
     min_row_versions: &HashMap<String, String>,
-) -> Result<Option<IvmTableSpec>, String> {
+) -> Result<(LiteTableSpec, Option<IvmTableSpec>), String> {
     // pragma_table_info via table-valued function; bind the table name.
     let mut stmt = conn
-        .prepare("SELECT name, type, pk FROM pragma_table_info(?1)")
+        .prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info(?1)")
         .map_err(|e| format!("prepare table_info({table}): {e}"))?;
     let rows = stmt
         .query_map([table], |row| {
             Ok((
                 row.get::<_, String>(0)?, // column name
                 row.get::<_, String>(1)?, // declared (lite) type string
-                row.get::<_, i64>(2)?,    // pk position (0 = not part of pk)
+                row.get::<_, i64>(2)?,    // notnull flag
+                row.get::<_, i64>(3)?,    // pk position (0 = not part of pk)
             ))
         })
         .map_err(|e| format!("query table_info({table}): {e}"))?;
+    let mut full_table = LiteTableSpec {
+        name: table.to_string(),
+        columns: Vec::new(),
+        primary_key: None,
+    };
 
     let mut columns = std::collections::HashMap::new();
     // The kept columns in `pragma_table_info` (declared / `cid`) order. TS builds
@@ -347,8 +267,23 @@ fn read_table_spec(
     let mut declared_pk: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for r in rows {
-        let (col_name, lite_type, pk_pos) = r.map_err(|e| format!("read column: {e}"))?;
+        let (col_name, lite_type, not_null, pk_pos) = r.map_err(|e| format!("read column: {e}"))?;
+        // TS `listTables` (lite-tables.ts:100-124): every column with its raw
+        // lite type, and the declared PK by `pk` position, `''`-padded.
+        full_table.columns.push((
+            col_name.clone(),
+            LiteColumnSpec {
+                pos: full_table.columns.len() + 1,
+                data_type: lite_type.clone(),
+                not_null: not_null != 0,
+            },
+        ));
         if pk_pos > 0 {
+            let pk = full_table.primary_key.get_or_insert_with(Vec::new);
+            while (pk.len() as i64) < pk_pos {
+                pk.push(String::new());
+            }
+            pk[(pk_pos - 1) as usize] = col_name.clone();
             declared_pk.insert(col_name.clone());
         }
         let Some(zql_type) = lite_type_to_zql_value_type(&lite_type) else {
@@ -370,7 +305,7 @@ fn read_table_spec(
     }
 
     if columns.is_empty() {
-        return Ok(None);
+        return Ok((full_table, None));
     }
 
     // A declared-PK column is non-null even if the lite type omitted `|NOT_NULL`
@@ -406,7 +341,7 @@ fn read_table_spec(
     if keys.is_empty() {
         // No usable row key → table is not syncable (TS skips it with a debug log:
         // "not syncing table ... has no primary key").
-        return Ok(None);
+        return Ok((full_table, None));
     }
 
     // Pick the "best" key: fewest columns, then lexicographic. Port of TS `keyCmp`.
@@ -419,14 +354,19 @@ fn read_table_spec(
         Some(all_unique)
     };
 
-    Ok(Some(IvmTableSpec {
-        table: table.to_string(),
-        columns,
-        column_order,
-        primary_key,
-        unique_keys,
-        min_row_version: min_row_versions.get(table).cloned(),
-    }))
+    Ok((
+        full_table,
+        Some(IvmTableSpec {
+            table: table.to_string(),
+            columns,
+            column_order,
+            primary_key,
+            unique_keys,
+            // TS `allPotentialPrimaryKeys: keys` — the sorted candidate list.
+            all_potential_primary_keys: keys,
+            min_row_version: min_row_versions.get(table).cloned(),
+        }),
+    ))
 }
 
 /// Map a lite type string to a ZQL value type, or `None` if unsupported.
@@ -537,58 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn validates_client_schema_against_replica_specs() {
-        let spec = IvmTableSpec {
-            table: "users".to_string(),
-            column_order: Vec::new(),
-            columns: HashMap::from([
-                (
-                    "id".to_string(),
-                    IvmColumnSchema {
-                        r#type: "string".to_string(),
-                        optional: false,
-                    },
-                ),
-                (
-                    "email".to_string(),
-                    IvmColumnSchema {
-                        r#type: "string".to_string(),
-                        optional: true,
-                    },
-                ),
-            ]),
-            primary_key: vec!["id".to_string()],
-            unique_keys: Some(vec![vec!["id".to_string()], vec!["email".to_string()]]),
-            min_row_version: None,
-        };
-        let valid = serde_json::json!({
-            "tables": {"users": {"columns": {"id": {"type": "string"}}, "primaryKey": ["id"]}}
-        });
-        assert!(validate_client_schema(&valid, std::slice::from_ref(&spec)).is_ok());
-
-        let nullable_unique_key = serde_json::json!({
-            "tables": {"users": {
-                "columns": {"email": {"type": "string"}},
-                "primaryKey": ["email"]
-            }}
-        });
-        assert!(
-            validate_client_schema(&nullable_unique_key, std::slice::from_ref(&spec))
-                .unwrap_err()
-                .contains("not a replicated unique key")
-        );
-
-        let wrong = serde_json::json!({
-            "tables": {"users": {"columns": {"id": {"type": "number"}}, "primaryKey": ["id"]}}
-        });
-        assert!(
-            validate_client_schema(&wrong, &[spec])
-                .unwrap_err()
-                .contains("does not match")
-        );
-    }
-
-    #[test]
     fn reads_replica_table_specs() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -615,11 +503,39 @@ mod tests {
         conn.execute_batch(r#"CREATE TABLE "keyless" ("a" "text|NOT_NULL");"#)
             .unwrap();
 
-        let specs = compute_zql_specs(&conn).unwrap();
+        let mut full_tables = vec![LiteTableSpec::default()];
+        let specs = compute_zql_specs(&conn, Some(&mut full_tables)).unwrap();
         assert_eq!(
             specs.len(),
             1,
             "only the keyed user table should be included"
+        );
+        // TS `fullTables` (cleared, then every non-system table, syncable or
+        // not, with ALL columns and raw lite types) — the map `checkClientSchema`
+        // reads to explain a missing table/column.
+        let mut names: Vec<&str> = full_tables.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["keyless", "users"]);
+        let full_users = full_tables.iter().find(|t| t.name == "users").unwrap();
+        let cols: Vec<(&str, &str, usize)> = full_users
+            .columns
+            .iter()
+            .map(|(c, s)| (c.as_str(), s.data_type.as_str(), s.pos))
+            .collect();
+        assert_eq!(
+            cols,
+            vec![
+                ("id", "text|NOT_NULL", 1),
+                ("name", "varchar", 2),
+                ("age", "int8|NOT_NULL", 3),
+                ("meta", "jsonb", 4),
+                ("raw", "bytea", 5),
+            ]
+        );
+        assert_eq!(full_users.primary_key, None, "no SQL PRIMARY KEY declared");
+        assert_eq!(
+            specs[0].all_potential_primary_keys,
+            vec![vec!["id".to_string()]]
         );
         let users = &specs[0];
         assert_eq!(users.table, "users");
@@ -678,7 +594,7 @@ mod tests {
         )
         .unwrap();
 
-        let specs = compute_zql_specs(&conn).unwrap();
+        let specs = compute_zql_specs(&conn, None).unwrap();
         assert_eq!(specs.len(), 1);
         let users = &specs[0];
 
@@ -739,7 +655,7 @@ mod tests {
         )
         .unwrap();
 
-        let specs = compute_zql_specs(&conn).unwrap();
+        let specs = compute_zql_specs(&conn, None).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].table, "myapp.widgets");
         assert_eq!(specs[0].min_row_version.as_deref(), Some("3def"));

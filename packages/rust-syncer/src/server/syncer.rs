@@ -65,7 +65,12 @@ impl CGServicesFactory for RealServicesFactory {
                 }
             };
         // Read the syncable table specs + read-permissions from the replica.
-        let tables = match crate::compute_table_specs_from_path(&self.config.replica_file) {
+        // TS `#initAndResetCommon`: `computeZqlSpecs(lc, db, opts, tableSpecs, fullTables)`
+        // — the syncable specs AND every replica table (`checkClientSchema` input).
+        let mut full_tables = Vec::new();
+        let tables = match crate::db::lite_tables::open_replica_read_only(&self.config.replica_file)
+            .and_then(|conn| crate::compute_zql_specs(&conn, Some(&mut full_tables)))
+        {
             Ok(tables) => tables,
             Err(error) => {
                 initialization_errors.push(format!(
@@ -136,6 +141,7 @@ impl CGServicesFactory for RealServicesFactory {
             initialization_error: (!initialization_errors.is_empty())
                 .then(|| initialization_errors.join("; ")),
             tables,
+            full_tables,
             replica_path: Some(self.config.replica_file.clone()),
             app_id: app_id.clone(),
             replica_version,

@@ -63,6 +63,10 @@ pub struct IvmTableSpec {
     /// PK plus any unique indexes; drives scalar-subquery resolution. Defaults
     /// to `[primary_key]` when `None`.
     pub unique_keys: Option<Vec<Vec<String>>>,
+    /// TS `tableSpec.allPotentialPrimaryKeys` (lite-tables.ts:293): every unique
+    /// key over non-null synced columns, shortest first — the set a client
+    /// `primaryKey` must match (`checkClientSchema`).
+    pub all_potential_primary_keys: Vec<Vec<String>>,
     pub min_row_version: Option<String>,
 }
 
@@ -1658,6 +1662,7 @@ mod tests {
             ]),
             primary_key: vec!["id".to_string()],
             unique_keys: None,
+            all_potential_primary_keys: vec![vec!["id".to_string()]],
             min_row_version: None,
         }
     }

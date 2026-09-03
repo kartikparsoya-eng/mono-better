@@ -27,7 +27,7 @@
 //! ∃ col ∈ client.primaryKey  such that  col ∉ rust.chosen_primary_key
 //! ```
 //!
-//! Crucially, `validate_client_schema` (replica_schema.rs:97) only checks that
+//! Crucially, `check_client_schema` (client_schema.rs, TS checkClientSchema) only checks that
 //! the client PK is *some* replicated unique key — it never checks that the
 //! client PK equals the `keyCmp[0]` key that is actually used to emit the
 //! rowKey. A table can therefore pass validation and still poison the CVR. This
@@ -44,7 +44,7 @@
 //! # schema is read (sqlite_master + pragmas) — no table data is scanned, so a
 //! # large replica is fine.
 //! export TEST_REPLICA_DB=/path/to/replica.db
-//! # The client-declared schema, in the same JSON shape validate_client_schema
+//! # The client-declared schema, in the same JSON shape check_client_schema
 //! # consumes: {"tables": {"<name>": {"columns": {...}, "primaryKey": [..]}}}.
 //! # This is the schema the client sends on connect.
 //! export TEST_CLIENT_SCHEMA=/path/to/client-schema.json
@@ -56,7 +56,8 @@
 
 use std::collections::BTreeSet;
 
-use rust_syncer::db::lite_tables::{compute_table_specs_from_path, validate_client_schema};
+use rust_syncer::db::lite_tables::{compute_zql_specs, open_replica_read_only};
+use rust_syncer::services::view_syncer::client_schema::check_client_schema;
 use rust_syncer::services::view_syncer::pipeline_driver::IvmTableSpec;
 
 /// The client PK columns declared for a table, keyed by table name.
@@ -99,8 +100,10 @@ fn rowkey_oracle_pins_diverging_table() {
     };
 
     // Real production key selection over the real replica schema.
-    let specs: Vec<IvmTableSpec> =
-        compute_table_specs_from_path(&replica).expect("compute_table_specs_from_path failed");
+    let mut full_tables = Vec::new();
+    let specs: Vec<IvmTableSpec> = open_replica_read_only(&replica)
+        .and_then(|conn| compute_zql_specs(&conn, Some(&mut full_tables)))
+        .expect("compute_zql_specs failed");
     let spec_by_name: std::collections::HashMap<&str, &IvmTableSpec> =
         specs.iter().map(|s| (s.table.as_str(), s)).collect();
 
@@ -112,9 +115,13 @@ fn rowkey_oracle_pins_diverging_table() {
 
     // Show what the existing validation says — it is expected to PASS even for
     // the poisoned table, which is the whole point (the validation gap).
-    match validate_client_schema(&client_schema, &specs) {
-        Ok(()) => eprintln!("validate_client_schema: OK (as expected — it does not catch this)"),
-        Err(e) => eprintln!("validate_client_schema: reported:\n{e}"),
+    let shard = rust_cvr::shards::ShardID {
+        app_id: std::env::var("TEST_APP_ID").unwrap_or_else(|_| "zero".to_string()),
+        shard_num: 0,
+    };
+    match check_client_schema(&shard, &client_schema, &specs, &full_tables) {
+        Ok(()) => eprintln!("check_client_schema: OK (as expected — it does not catch this)"),
+        Err(e) => eprintln!("check_client_schema: reported:\n{}", e.message()),
     }
 
     let mut crashers: Vec<String> = Vec::new(); // client PK col missing from rust key → client crash

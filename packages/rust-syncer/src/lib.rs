@@ -56,8 +56,9 @@ pub use auth::read_authorizer::{
 };
 pub use db::lite_tables::{
     ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
-    read_replica_versions_from_path, validate_client_schema,
+    read_replica_versions_from_path,
 };
+pub use db::specs::{LiteColumnSpec, LiteTableSpec};
 pub use http_server::{
     HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
 };

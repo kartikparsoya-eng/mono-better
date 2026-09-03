@@ -1,0 +1,757 @@
+{
+  "tableSpecs": {
+    "empty": {},
+    "withDotted": {
+      "users": {
+        "zqlSpec": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "org": {
+            "type": "string"
+          },
+          "_0_version": {
+            "type": "string"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "id"
+            ],
+            [
+              "email",
+              "org"
+            ]
+          ]
+        }
+      },
+      "hr.people": {
+        "zqlSpec": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "id"
+            ]
+          ]
+        }
+      },
+      "zero_0.clients": {
+        "zqlSpec": {
+          "clientGroupID": {
+            "type": "string"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "clientGroupID"
+            ]
+          ]
+        }
+      },
+      "zero.permissions": {
+        "zqlSpec": {
+          "lock": {
+            "type": "boolean"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "lock"
+            ]
+          ]
+        }
+      }
+    },
+    "publicOnly": {
+      "users": {
+        "zqlSpec": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "org": {
+            "type": "string"
+          },
+          "_0_version": {
+            "type": "string"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "id"
+            ],
+            [
+              "email",
+              "org"
+            ]
+          ]
+        }
+      },
+      "zero_0.clients": {
+        "zqlSpec": {
+          "clientGroupID": {
+            "type": "string"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "clientGroupID"
+            ]
+          ]
+        }
+      },
+      "zero.permissions": {
+        "zqlSpec": {
+          "lock": {
+            "type": "boolean"
+          }
+        },
+        "tableSpec": {
+          "allPotentialPrimaryKeys": [
+            [
+              "lock"
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "fullTables": {
+    "empty": {},
+    "all": {
+      "users": {
+        "columns": {
+          "id": {
+            "dataType": "text|NOT_NULL"
+          },
+          "name": {
+            "dataType": "varchar"
+          },
+          "email": {
+            "dataType": "text|NOT_NULL"
+          },
+          "org": {
+            "dataType": "text|NOT_NULL"
+          },
+          "blob": {
+            "dataType": "bytea"
+          },
+          "_0_version": {
+            "dataType": "text"
+          }
+        }
+      },
+      "hr.people": {
+        "columns": {
+          "id": {
+            "dataType": "text|NOT_NULL"
+          }
+        }
+      },
+      "zero_0.clients": {
+        "columns": {
+          "clientGroupID": {
+            "dataType": "text|NOT_NULL"
+          }
+        }
+      },
+      "zero.permissions": {
+        "columns": {
+          "lock": {
+            "dataType": "bool|NOT_NULL"
+          }
+        }
+      },
+      "keyless": {
+        "columns": {
+          "a": {
+            "dataType": "text|NOT_NULL"
+          }
+        }
+      },
+      "badpk": {
+        "columns": {
+          "k": {
+            "dataType": "bytea|NOT_NULL"
+          },
+          "v": {
+            "dataType": "text"
+          }
+        },
+        "primaryKey": [
+          "k"
+        ]
+      },
+      "twobad": {
+        "columns": {
+          "k": {
+            "dataType": "bytea|NOT_NULL"
+          },
+          "j": {
+            "dataType": "jsonb|NOT_NULL"
+          },
+          "z": {
+            "dataType": "xml"
+          }
+        },
+        "primaryKey": [
+          "k",
+          "z"
+        ]
+      }
+    },
+    "publicOnly": {
+      "users": {
+        "columns": {
+          "id": {
+            "dataType": "text|NOT_NULL"
+          },
+          "name": {
+            "dataType": "varchar"
+          },
+          "email": {
+            "dataType": "text|NOT_NULL"
+          },
+          "org": {
+            "dataType": "text|NOT_NULL"
+          },
+          "blob": {
+            "dataType": "bytea"
+          },
+          "_0_version": {
+            "dataType": "text"
+          }
+        }
+      },
+      "zero_0.clients": {
+        "columns": {
+          "clientGroupID": {
+            "dataType": "text|NOT_NULL"
+          }
+        }
+      },
+      "zero.permissions": {
+        "columns": {
+          "lock": {
+            "dataType": "bool|NOT_NULL"
+          }
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "nothing synced → Internal",
+      "tableSpecs": "empty",
+      "fullTables": "empty",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "Internal",
+        "message": "No tables have been synced from upstream. Please check that the ZERO_UPSTREAM_DB has been properly set."
+      }
+    },
+    {
+      "name": "valid",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": null
+    },
+    {
+      "name": "valid alternate key, any order",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "email": {
+                "type": "string"
+              },
+              "org": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "org",
+              "email"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": null
+    },
+    {
+      "name": "valid empty client schema",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {}
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": null
+    },
+    {
+      "name": "missing table, unknown everywhere, no dot",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "ghost": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"ghost\" table does not exist or is not one of the replicated tables: \"hr.people\",\"users\"."
+      }
+    },
+    {
+      "name": "missing dotted table, synced list has a dot → no tip",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "hr.ghost": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"hr.ghost\" table does not exist or is not one of the replicated tables: \"hr.people\",\"users\"."
+      }
+    },
+    {
+      "name": "missing dotted table, only public synced → tip",
+      "tableSpecs": "publicOnly",
+      "fullTables": "publicOnly",
+      "clientSchema": {
+        "tables": {
+          "hr.ghost": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"hr.ghost\" table does not exist or is not one of the replicated tables: \"users\". Note that zero does not sync tables from non-public schemas by default. Make sure you have defined a custom ZERO_APP_PUBLICATION to sync tables from non-public schemas."
+      }
+    },
+    {
+      "name": "missing table known to replica, unsupported pk column",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "badpk": {
+            "columns": {
+              "v": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "k"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"badpk\" table's primary key contains unsupported columns: \"k\" (bytea|NOT_NULL). These columns must use Zero-supported data types to sync the table to the client."
+      }
+    },
+    {
+      "name": "missing table known to replica, two unsupported pk columns",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "twobad": {
+            "columns": {
+              "j": {
+                "type": "json"
+              }
+            },
+            "primaryKey": [
+              "k",
+              "z"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"twobad\" table's primary key contains unsupported columns: \"k\" (bytea|NOT_NULL), \"z\" (xml). These columns must use Zero-supported data types to sync the table to the client."
+      }
+    },
+    {
+      "name": "missing table known to replica, no key",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "keyless": {
+            "columns": {
+              "a": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "a"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"keyless\" table is missing a primary key or non-null unique index and thus cannot be synced to the client"
+      }
+    },
+    {
+      "name": "missing column of unsupported type",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              },
+              "blob": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\".\"blob\" column cannot be synced because it is of an unsupported data type \"bytea\""
+      }
+    },
+    {
+      "name": "missing column, unknown",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              },
+              "nope": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\".\"nope\" column does not exist or is not one of the replicated columns: \"email\",\"id\",\"name\",\"org\"."
+      }
+    },
+    {
+      "name": "type mismatch",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "number"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\".\"id\" column's upstream type \"string\" does not match the client type \"number\""
+      }
+    },
+    {
+      "name": "no client primary key",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\" table's client schema does not specify a primary key."
+      }
+    },
+    {
+      "name": "client primary key not a unique index",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "name"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\" table's primaryKey <name> is not associated with a non-null unique index."
+      }
+    },
+    {
+      "name": "client primary key superset of a unique index",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "users": {
+            "columns": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id",
+              "name"
+            ]
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"users\" table's primaryKey <id,name> is not associated with a non-null unique index."
+      }
+    },
+    {
+      "name": "many errors: missing tables sorted, then tables sorted, columns in client order",
+      "tableSpecs": "withDotted",
+      "fullTables": "all",
+      "clientSchema": {
+        "tables": {
+          "zzz": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          },
+          "users": {
+            "columns": {
+              "name": {
+                "type": "number"
+              },
+              "id": {
+                "type": "number"
+              },
+              "nope": {
+                "type": "string"
+              },
+              "blob": {
+                "type": "json"
+              }
+            },
+            "primaryKey": [
+              "name"
+            ]
+          },
+          "aaa": {
+            "columns": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "primaryKey": [
+              "id"
+            ]
+          },
+          "hr.people": {
+            "columns": {
+              "id": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "shard": {
+        "appID": "zero",
+        "shardNum": 0
+      },
+      "expected": {
+        "kind": "SchemaVersionNotSupported",
+        "message": "The \"aaa\" table does not exist or is not one of the replicated tables: \"hr.people\",\"users\".\nThe \"zzz\" table does not exist or is not one of the replicated tables: \"hr.people\",\"users\".\nThe \"hr.people\".\"id\" column's upstream type \"string\" does not match the client type \"number\"\nThe \"hr.people\" table's client schema does not specify a primary key.\nThe \"users\".\"blob\" column cannot be synced because it is of an unsupported data type \"bytea\"\nThe \"users\".\"nope\" column does not exist or is not one of the replicated columns: \"email\",\"id\",\"name\",\"org\".\nThe \"users\".\"name\" column's upstream type \"string\" does not match the client type \"number\"\nThe \"users\".\"id\" column's upstream type \"string\" does not match the client type \"number\"\nThe \"users\" table's primaryKey <name> is not associated with a non-null unique index."
+      }
+    }
+  ]
+}
