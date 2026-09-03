@@ -176,7 +176,12 @@ guarantees, error semantics) versus TS.
   delivering our close; `ws_server::elide` is the TS-golden port, pinned by
   `elide_byte_count` + the long-reason case in `writer_close_codes_follow_the_ts_path`)
   and the TS warn line `closing connection to client with error` (log-signature
-  parity for the prod A/B). No frame reordering vs the sync push path.
+  parity for the prod A/B). No frame reordering vs the sync push path. The
+  Rehome body itself must be valita-parseable by zero-client: unset optionals
+  (`minBackoffMs`/`maxBackoffMs`/`reconnectParams`) are ABSENT, never `null`
+  (2026-09-04: rust emitted `null` → client `InvalidMessage` disconnect instead
+  of a backoff; `protocol/error.rs`, pinned by `error_body_wire_parity_against_ts`
+  + `constructors_omit_unset_optional_fields`).
 - **Tests:** `ws_server` frame-order tests +
   `ws_server::tests::slow_client_shed_closes_with_rehome_error_then_close_1011`
   (shed → Rehome error frame then close 3000; non-vacuous — a bare close fails it).

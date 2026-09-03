@@ -1,0 +1,208 @@
+[
+  {
+    "variant": "Basic",
+    "body": {
+      "kind": "Internal",
+      "message": "boom"
+    }
+  },
+  {
+    "variant": "Basic",
+    "body": {
+      "kind": "SchemaVersionNotSupported",
+      "message": "schema",
+      "origin": "zeroCache"
+    }
+  },
+  {
+    "variant": "Basic",
+    "body": {
+      "kind": "Unauthorized",
+      "message": "no",
+      "origin": "server"
+    }
+  },
+  {
+    "variant": "Backoff",
+    "body": {
+      "kind": "Rehome",
+      "message": "shed"
+    }
+  },
+  {
+    "variant": "Backoff",
+    "body": {
+      "kind": "Rebalance",
+      "message": "move",
+      "minBackoffMs": 100,
+      "maxBackoffMs": 5000,
+      "reconnectParams": {
+        "a": "1",
+        "b": "two"
+      },
+      "origin": "zeroCache"
+    }
+  },
+  {
+    "variant": "Backoff",
+    "body": {
+      "kind": "ServerOverloaded",
+      "message": "busy",
+      "maxBackoffMs": 30000
+    }
+  },
+  {
+    "variant": "PushFailedServer",
+    "body": {
+      "kind": "PushFailed",
+      "mutationIDs": [
+        {
+          "clientID": "c1",
+          "id": 7
+        }
+      ],
+      "message": "db",
+      "origin": "server",
+      "reason": "database"
+    }
+  },
+  {
+    "variant": "PushFailedServer",
+    "body": {
+      "kind": "PushFailed",
+      "details": {
+        "code": "ooo",
+        "n": null
+      },
+      "mutationIDs": [
+        {
+          "clientID": "c1",
+          "id": 7
+        },
+        {
+          "clientID": "c2",
+          "id": 8
+        }
+      ],
+      "message": "mutation was out of order",
+      "origin": "server",
+      "reason": "oooMutation"
+    }
+  },
+  {
+    "variant": "PushFailedHttp",
+    "body": {
+      "kind": "PushFailed",
+      "mutationIDs": [
+        {
+          "clientID": "c1",
+          "id": 7
+        }
+      ],
+      "message": "Failed to push: 401",
+      "origin": "zeroCache",
+      "reason": "http",
+      "status": 401
+    }
+  },
+  {
+    "variant": "PushFailedHttp",
+    "body": {
+      "kind": "PushFailed",
+      "details": "x",
+      "mutationIDs": [],
+      "message": "Failed to push: 500",
+      "origin": "zeroCache",
+      "reason": "http",
+      "status": 500,
+      "bodyPreview": "<html>"
+    }
+  },
+  {
+    "variant": "PushFailedZeroCache",
+    "body": {
+      "kind": "PushFailed",
+      "mutationIDs": [
+        {
+          "clientID": "c1",
+          "id": 7
+        }
+      ],
+      "message": "timed out",
+      "origin": "zeroCache",
+      "reason": "timeout"
+    }
+  },
+  {
+    "variant": "PushFailedZeroCache",
+    "body": {
+      "kind": "PushFailed",
+      "details": [
+        1,
+        "two"
+      ],
+      "mutationIDs": [
+        {
+          "clientID": "c1",
+          "id": 7
+        }
+      ],
+      "message": "Failed to parse response from API server",
+      "origin": "zeroCache",
+      "reason": "parse"
+    }
+  },
+  {
+    "variant": "TransformFailedServer",
+    "body": {
+      "kind": "TransformFailed",
+      "queryIDs": [
+        "q1"
+      ],
+      "message": "parse",
+      "origin": "server",
+      "reason": "parse"
+    }
+  },
+  {
+    "variant": "TransformFailedHttp",
+    "body": {
+      "kind": "TransformFailed",
+      "queryIDs": [
+        "q1",
+        "q2"
+      ],
+      "message": "Failed to transform queries: 503",
+      "origin": "zeroCache",
+      "reason": "http",
+      "status": 503
+    }
+  },
+  {
+    "variant": "TransformFailedHttp",
+    "body": {
+      "kind": "TransformFailed",
+      "details": {
+        "retry": true
+      },
+      "queryIDs": [],
+      "message": "Failed to transform queries: 401",
+      "origin": "zeroCache",
+      "reason": "http",
+      "status": 401,
+      "bodyPreview": "Unauthorized"
+    }
+  },
+  {
+    "variant": "TransformFailedZeroCache",
+    "body": {
+      "kind": "TransformFailed",
+      "queryIDs": [
+        "q1"
+      ],
+      "message": "internal",
+      "origin": "zeroCache",
+      "reason": "internal"
+    }
+  }
+]

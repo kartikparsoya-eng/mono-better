@@ -172,6 +172,23 @@ Anything not listed here and not STALE/WRONG must match TS.
 - **Why kept (2026-09-03):** same observable behavior by construction; members:
   `assertarray`, `assertnumber`, `assertmetaentry`, `track`, `owns`, `flipifneeded`, `fork`, `stringify`, `draingenerator`, `unreachable`, `assert`, `logqueryfailure`.
 
+## D-17 · valita wire schemas → serde types
+
+- **TS**: `v.object(...)` / `v.union(...)` schema values (`errorBodySchema`,
+  `astSchema`, `primaryKeySchema`, `queryResponseSchema`, `permissionsConfigSchema`,
+  `jsonSchema`, …) imported as VALUES and applied with `v.parse` / `.try`.
+- **Rust**: serde `Deserialize`/`Serialize` derives on the mirrored struct, or a
+  plain `serde_json::Value` where TS only validates shape.
+- **Why kept (2026-09-04):** a schema value has no callable twin; the shape IS the
+  contract. Where the union is discriminated (`errorBodySchema` by `kind` then
+  `origin`/`reason`) the rust `Deserialize` mirrors the discrimination explicitly
+  (`protocol/error.rs`) — serde's untagged first-fit is NOT equivalent (it bound
+  Backoff bodies to `Basic` and dropped `minBackoffMs`). Optional fields
+  (`.optional()`) must be ABSENT when unset — valita rejects `null` — so every
+  `Option` carries `skip_serializing_if`. Pinned by `error-wire-fixture.json`
+  (one TS-validated body per union member, round-tripped).
+- **Members:** the `(D-17)` entries of `parity_ledger.HELPER_ALIASES` (M10).
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.
