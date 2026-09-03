@@ -62,7 +62,7 @@ struct QueuedPush {
 struct PushTarget {
     client_id: String,
     /// The socket that sent the push. A failure is delivered only if this is
-    /// still the client's current socket (see `send_error_if_current`).
+    /// still the client's current socket (see `fail_if_current`).
     ws_id: String,
     mutation_ids: Vec<MutationID>,
     /// The connection-context revision the relayed auth was read at (TS
@@ -322,7 +322,7 @@ impl PusherService {
                                         body_preview: preview,
                                     },
                                 );
-                                sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                                fail_downstream(&sinks, &t.client_id, &t.ws_id, &err);
                             }
                         }
                         Err(e) => {
@@ -339,7 +339,7 @@ impl PusherService {
                                         reason: ErrorReason::Internal,
                                     },
                                 );
-                                sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                                fail_downstream(&sinks, &t.client_id, &t.ws_id, &err);
                             }
                         }
                     }
@@ -465,7 +465,7 @@ impl PusherDispatch for PusherService {
         // it re-pushes — the same recovery as a failed POST.
         // Capture the failure target BEFORE moving the payload into the queue:
         // a drainer-side POST failure (non-2xx / network) surfaces a PushFailed
-        // frame to this exact socket via `send_error_if_current`.
+        // frame to this exact socket via `fail_if_current`.
         let mutation_ids = mutation_ids_of(body);
         let payload = Self::relay_body(selector, body, headers, client_group_id);
         let combine_key = combine_key_of(selector, body, &payload);
@@ -511,7 +511,7 @@ impl PusherDispatch for PusherService {
     /// the relay architecture there is no pusher downstream — mutation
     /// results reach the client through the CVR's `lmids`/`mutationResults`
     /// queries (poke path), and superseded-socket delivery is prevented by
-    /// `send_error_if_current` on the failure path. See INVENTIONS.md I-3.
+    /// `fail_if_current` on the failure path. See INVENTIONS.md I-3.
     fn init_connection(&self, _selector: &ConnectionSelector) {}
 
     fn ack_mutation_responses(
@@ -596,6 +596,22 @@ impl PusherDispatch for PusherService {
             "mutation-results cleanup (bulk)",
         );
     }
+}
+
+/// Port of TS `Pusher#failDownstream` (pusher.ts:612-617): a push the API
+/// server rejected (`PushFailedHttp`, non-2xx) or that never reached it
+/// (`PushFailedZeroCache`) FAILS the client's downstream — the error frame,
+/// then the socket closes (`downstream.fail` → `closeWithError`,
+/// types/streams.ts:88-93). The client reconnects with fresh auth and
+/// re-pushes from its lmid; TS never leaves a push-failed socket open. Rust
+/// adds only the `ws_id` guard (`ConnectionSinks::fail_if_current`, I-3).
+fn fail_downstream(
+    sinks: &ConnectionSinks,
+    client_id: &str,
+    ws_id: &str,
+    error_body: &crate::protocol::ErrorBody,
+) -> bool {
+    sinks.fail_if_current(client_id, ws_id, error_body)
 }
 
 #[cfg(test)]
@@ -906,15 +922,18 @@ mod tests {
             .await
             .expect("push failure frame not delivered in time")
             .expect("channel closed");
+        // TS `#failDownstream` (pusher.ts:612): the error frame AND the close
+        // (`WsCommand::Fail`) — never a bare Send that leaves the socket open.
         match frame {
-            WsCommand::Send { msg, .. } => {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
                 assert_eq!(msg[0], "error");
                 assert_eq!(msg[1]["kind"], "PushFailed");
                 assert_eq!(msg[1]["status"], 500);
                 assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
                 assert_eq!(msg[1]["body_preview"], "nope");
             }
-            _ => panic!("expected a non-closing error Send frame"),
+            _ => panic!("expected WsCommand::Fail (error frame + close), got a non-closing frame"),
         }
     }
 
@@ -949,8 +968,11 @@ mod tests {
             .await
             .expect("push failure frame not delivered in time")
             .expect("channel closed");
+        // TS `#failDownstream`: error frame + close, not a bare Send.
         match frame {
-            WsCommand::Send { msg, .. } => {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
+                assert_eq!(msg[0], "error");
                 assert_eq!(msg[1]["kind"], "PushFailed");
                 assert!(
                     msg[1]["message"]
@@ -961,7 +983,7 @@ mod tests {
                     msg[1]["message"]
                 );
             }
-            _ => panic!("expected an error Send frame"),
+            _ => panic!("expected WsCommand::Fail (error frame + close), got a non-closing frame"),
         }
     }
 

@@ -628,7 +628,7 @@ pub(crate) struct ConnectionInfo {
 /// of a POST failure long after the message-handling path has returned). Wraps
 /// the router's live connection map, so delivery follows the exact
 /// insert/remove lifecycle already maintained for `ConnectionInfo` — no second
-/// structure to leak. Delivery is `ws_id`-guarded (see `send_error_if_current`).
+/// structure to leak. Delivery is `ws_id`-guarded (see `fail_if_current`).
 #[derive(Clone)]
 pub struct ConnectionSinks(Arc<Mutex<HashMap<String, ConnectionInfo>>>);
 
@@ -640,16 +640,23 @@ impl ConnectionSinks {
         Self(Arc::new(Mutex::new(HashMap::new())))
     }
 
-    /// Send a non-fatal error frame to `client_id`'s CURRENT socket iff it is
-    /// still `ws_id`. Never closes the connection. Returns whether delivered.
+    /// FAIL `client_id`'s CURRENT socket iff it is still `ws_id`: send the
+    /// error frame and CLOSE the connection (`WsCommand::Fail`) — exactly what
+    /// TS `#failDownstream` → `downstream.fail(...)` → `closeWithError` does
+    /// (pusher.ts:612-617, types/streams.ts:88-93). Returns whether delivered.
     ///
-    /// The `ws_id` guard matters: by the time a relay POST fails the client may
+    /// Until 2026-09-03 this only sent the frame and left the socket open; the
+    /// client's NEXT push then died with `InvalidConnectionRequest` ("Connection
+    /// auth state was not available") — a different error kind and a later
+    /// disconnect than TS (frame-capture #3, cg art-trcd59a3b0e154).
+    ///
+    /// The `ws_id` guard is the rust-only addition (INVENTIONS.md I-3): by the time a relay POST fails the client may
     /// have reconnected (new socket, same `client_id`). The replacement
     /// connection re-pushes anything above the server lmid on reconnect, so
     /// failing the *new* socket for the *old* socket's push would be a spurious
     /// disconnect. Rust is deliberately stricter here than TS (which routes by
     /// `clientID` only) — a documented, strictly-safer divergence.
-    pub fn send_error_if_current(
+    pub fn fail_if_current(
         &self,
         client_id: &str,
         ws_id: &str,
@@ -670,7 +677,7 @@ impl ConnectionSinks {
             }
             // guard dropped here — never hold the lock across the push
         };
-        sink.push(crate::protocol::error_message(error));
+        sink.fail(error.clone());
         true
     }
 }

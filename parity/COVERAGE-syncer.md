@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **533** · ✅ COVERED **490** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **490/500 = 98%**
+- Rust fns total **534** · ✅ COVERED **491** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **491/501 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -30,7 +30,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 490
+## ✅ COVERED — body pinned to TS fixture — 491
 
 | fn | file | signature |
 |---|---|---|
@@ -234,6 +234,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `delete_client_mutations` | services/mutagen/pusher.rs | `fn delete_client_mutations(` |
 | `enqueue_payload` | services/mutagen/pusher.rs | `fn enqueue_payload(&self, push: QueuedPush, what: &str) -> bool {` |
 | `enqueue_push` | services/mutagen/pusher.rs | `fn enqueue_push(` |
+| `fail_downstream` | services/mutagen/pusher.rs | `fn fail_downstream(` |
 | `init_connection` | services/mutagen/pusher.rs | `fn init_connection(&self, _selector: &ConnectionSelector) {}` |
 | `mutation_ids_of` | services/mutagen/pusher.rs | `fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {` |
 | `queue_cap` | services/mutagen/pusher.rs | `fn queue_cap() -> i64 {` |
@@ -491,6 +492,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `compute_serving_lag_stats_ms` | workers/syncer.rs | `pub fn compute_serving_lag_stats_ms<'a>(` |
 | `create_connection` | workers/syncer.rs | `pub async fn create_connection(&self, ctx: ConnectionContext) {` |
 | `drain` | workers/syncer.rs | `pub async fn drain(&self) {` |
+| `fail_if_current` | workers/syncer.rs | `pub fn fail_if_current(` |
 | `find_first_unserved_index` | workers/syncer.rs | `pub fn find_first_unserved_index(` |
 | `get_or_create_cg` | workers/syncer.rs | `pub(crate) fn get_or_create_cg(&self, client_group_id: &str) -> Result<Arc<CGHandle>, S…` |
 | `lower_bound_replica_ready_time_ms` | workers/syncer.rs | `pub fn lower_bound_replica_ready_time_ms(` |
@@ -501,7 +503,6 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `prune_replica_ready_states` | workers/syncer.rs | `pub fn prune_replica_ready_states(` |
 | `record_replica_ready_state` | workers/syncer.rs | `pub fn record_replica_ready_state(&self, watermark: &str, replica_ready_time_ms: i64) {` |
 | `remove_view_syncer` | workers/syncer.rs | `pub fn remove_view_syncer(&self, cg_id: &str) {` |
-| `send_error_if_current` | workers/syncer.rs | `pub fn send_error_if_current(` |
 | `serving_lag_registry` | workers/syncer.rs | `pub fn serving_lag_registry(&self) -> Arc<crate::workers::syncer::ServingLagRegistry> {` |
 | `stats` | workers/syncer.rs | `pub fn stats(&self) -> ServingLagStats {` |
 | `upper_bound_watermark` | workers/syncer.rs | `pub fn upper_bound_watermark(replica_ready_states: &[ReplicaReadyState], watermark: &st…` |

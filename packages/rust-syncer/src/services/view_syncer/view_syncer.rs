@@ -3882,9 +3882,9 @@ mod tests {
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::schema::types::version_from_string;
 
-    /// `send_error_if_current` delivers only to the client's CURRENT socket:
-    /// a matching ws_id gets the error frame; a stale ws_id or unknown client
-    /// is dropped (the reconnected socket re-pushes on its own).
+    /// `fail_if_current` fails only the client's CURRENT socket: a matching
+    /// ws_id gets the error frame + close (TS `#failDownstream`); a stale ws_id
+    /// or unknown client is dropped (the reconnected socket re-pushes on its own).
     #[test]
     fn connection_sinks_deliver_only_to_current_socket() {
         use crate::protocol::{ErrorBody, ErrorKind};
@@ -3894,16 +3894,17 @@ mod tests {
         let err = ErrorBody::basic(ErrorKind::PushFailed, "boom".to_string());
 
         // Stale ws_id → dropped, nothing delivered.
-        assert!(!sinks.send_error_if_current("cA", "ws0", &err));
+        assert!(!sinks.fail_if_current("cA", "ws0", &err));
         // Unknown client → dropped.
-        assert!(!sinks.send_error_if_current("cZ", "ws1", &err));
+        assert!(!sinks.fail_if_current("cZ", "ws1", &err));
         assert!(rx.try_recv().is_err(), "no frame for stale/unknown targets");
 
-        // Current ws_id → delivered as an ["error", …] frame (not a close).
-        assert!(sinks.send_error_if_current("cA", "ws1", &err));
+        // Current ws_id → FAILED: error frame + close (TS `downstream.fail` →
+        // `closeWithError`), never a bare Send that leaves the socket open.
+        assert!(sinks.fail_if_current("cA", "ws1", &err));
         match rx.try_recv() {
-            Ok(WsCommand::Send { msg, .. }) => assert_eq!(msg[0], "error"),
-            _ => panic!("expected an error Send frame on the current socket"),
+            Ok(WsCommand::Fail(e)) => assert_eq!(crate::protocol::error_message(&e)[0], "error"),
+            _ => panic!("expected WsCommand::Fail (error + close) on the current socket"),
         }
     }
 

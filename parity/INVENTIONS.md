@@ -126,6 +126,19 @@ guarantees, error semantics) versus TS.
   So snapshotting them is faithful. `userPushHeaders` (customHeaders) ARE
   refreshable and live in the shared `push_override` cell.
 
+- **Failure semantics (2026-09-03):** a relay failure (`PushFailedHttp` non-2xx,
+  `PushFailedZeroCache` network error) FAILS the client's downstream exactly like
+  TS `#failDownstream` (pusher.ts:612 → `downstream.fail` → `closeWithError`,
+  types/streams.ts:88): error frame, then close. Before this, rust only sent the
+  frame and left the socket open, so the client's next push died with
+  `InvalidConnectionRequest` (frame-capture #3). The only rust addition is the
+  `ws_id` guard in `ConnectionSinks::fail_if_current` (a superseded socket's
+  failure never closes the replacement). Pinned by pusher.rs
+  `drainer_surfaces_push_failed_http_on_non_2xx` /
+  `drainer_surfaces_push_failed_zerocache_on_network_error` (assert
+  `WsCommand::Fail`, not `Send`) and view_syncer.rs
+  `connection_sinks_deliver_only_to_current_socket`.
+
 ## I-4 — ws_sink writer/reader tasks + slow-client shed
 - **Files:** `ws_server.rs` (`run_ws_writer`/`run_ws_reader`), `ws_sink.rs`.
 - **No TS twin:** TS `ws.send` + backpressure via the runtime; rust splits the
