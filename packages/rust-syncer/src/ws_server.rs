@@ -48,12 +48,19 @@ const DEFAULT_DOWNSTREAM_QUEUE_HWM: i64 = 4096;
 /// `ZERO_WS_DOWNSTREAM_BYTE_HWM` (0 disables byte shedding — rollout escape hatch).
 const DEFAULT_DOWNSTREAM_BYTE_HWM: i64 = 256 * 1024 * 1024;
 
-/// Server-side liveness: close a connection that has sent NOTHING for this
-/// long. zero-client pings every ~5s, so 60s = 12 missed pings; a half-open
-/// socket (pulled cable, sleeping laptop) otherwise queues pokes until the OS
-/// TCP timeout (~15-30 min) — or forever against a zero-window peer. Env
-/// override: `ZERO_WS_LIVENESS_TIMEOUT_MS` (0 disables).
-const DEFAULT_LIVENESS_TIMEOUT_MS: u64 = 60_000;
+/// Server-side liveness close — Rust-only, OPT-IN, OFF by default
+/// (parity/INVENTIONS.md I-14). TS never closes an idle client socket: the
+/// syncer's `connection.ts` only keeps the 6s downstream `pong` keepalive
+/// (`DOWNSTREAM_MSG_INTERVAL_MS`, ported below), and TS's heartbeat close
+/// (`sendPingsForLiveness`, types/ws.ts:26) is applied only to its internal
+/// streams (types/streams.ts:155/264), never to clients. A 60s default here
+/// closed 50 of 344 sessions (code 1001 "liveness timeout") in the 2026-09-03
+/// ART replay — clients that send no app-level `ping` — and cost 1/3 of the
+/// pokes vs TS. `ZERO_WS_LIVENESS_TIMEOUT_MS=<ms>` opts in for deployments that
+/// want half-open sockets (pulled cable, sleeping laptop, zero-window peer)
+/// closed before the OS TCP timeout; zero-client pings every ~5s, so 60000 =
+/// 12 missed pings. 0 (the default) disables it.
+const DEFAULT_LIVENESS_TIMEOUT_MS: u64 = 0;
 
 fn downstream_queue_hwm() -> i64 {
     std::env::var("ZERO_WS_DOWNSTREAM_HWM")
@@ -452,9 +459,10 @@ async fn run_ws_writer(
                 }
             }
             _ = keepalive_interval.tick() => {
-                // Liveness: a client that has sent NOTHING (zero-client pings
-                // every ~5s) for the timeout is half-open — close it rather than
-                // queue pokes against a dead socket until the OS TCP timeout.
+                // Opt-in liveness close (I-14; off by default = TS behaviour):
+                // a client that has sent NOTHING (zero-client pings every ~5s)
+                // for the timeout is half-open — close it rather than queue
+                // pokes against a dead socket until the OS TCP timeout.
                 if liveness_timeout > 0 {
                     let idle_ms = now_epoch_ms() - last_inbound.load(Ordering::Relaxed);
                     if idle_ms > liveness_timeout as i64 {
@@ -976,5 +984,40 @@ mod tests {
             other => panic!("expected close 3000 after the Rehome error, got {other:?}"),
         }
         let _ = server.await;
+    }
+}
+
+#[cfg(test)]
+mod liveness_default_tests {
+    use super::*;
+
+    /// I-14: with no operator opt-in the server never closes an idle client
+    /// (TS parity — connection.ts has no idle close). Non-vacuous: a 60_000
+    /// default makes the first assertion fail. Env is read at call time, so
+    /// the opt-in parse is checked in the same test (no cross-test env race).
+    #[test]
+    fn liveness_close_is_disabled_by_default_and_opt_in_via_env() {
+        // SAFETY: single-threaded within this test; restored below.
+        unsafe { std::env::remove_var("ZERO_WS_LIVENESS_TIMEOUT_MS") };
+        assert_eq!(
+            liveness_timeout_ms(),
+            0,
+            "default must be 0 (disabled): TS never closes an idle client socket"
+        );
+        unsafe { std::env::set_var("ZERO_WS_LIVENESS_TIMEOUT_MS", "250") };
+        assert_eq!(
+            liveness_timeout_ms(),
+            250,
+            "operator opt-in must be honoured"
+        );
+        unsafe { std::env::set_var("ZERO_WS_LIVENESS_TIMEOUT_MS", "0") };
+        assert_eq!(liveness_timeout_ms(), 0, "explicit 0 disables");
+        unsafe { std::env::set_var("ZERO_WS_LIVENESS_TIMEOUT_MS", "junk") };
+        assert_eq!(
+            liveness_timeout_ms(),
+            0,
+            "unparseable falls back to the default (disabled)"
+        );
+        unsafe { std::env::remove_var("ZERO_WS_LIVENESS_TIMEOUT_MS") };
     }
 }

@@ -72,7 +72,7 @@ source; maintainer citations are in HTML comments.
 | `ZERO_SYNCER_SHARDS` | `(host_cores * 2).clamp(16, 64)` | See "Why 2x host cores" below. |
 | `MAX_CLIENT_GROUPS` | 1000 | Memory **backstop**, not a normal-operation limit. Overflow → client gets a retryable `Rehome`, never a hard reject. Tune to per-instance memory budget. <!-- main.rs:111-122, router.rs:585-607 --> |
 | `ZERO_WS_DOWNSTREAM_HWM` | 4096 frames | Slow-client shed threshold (per connection, frame count). <!-- ws_server.rs:34-55 --> |
-| `ZERO_WS_LIVENESS_TIMEOUT_MS` | 60000 | Close a connection that sent nothing for this long (~12 missed client pings). `0` disables. <!-- ws_server.rs:43-62 --> |
+| `ZERO_WS_LIVENESS_TIMEOUT_MS` | 0 (off) | Opt-in (no TS twin, INVENTIONS.md I-14): close a connection that sent nothing for this long, e.g. `60000` ≈ 12 missed client pings. Default `0` = TS behaviour, never close an idle client. <!-- ws_server.rs DEFAULT_LIVENESS_TIMEOUT_MS --> |
 | `PUSHER_QUEUE_CAP` | 1024 | Max queued relay pushes; newest dropped past cap. <!-- push_relay.rs:40-54 --> |
 | `ZERO_WEBSOCKET_MAX_PAYLOAD_BYTES` | 10 MiB | Same env the TS config layer reads — one knob for both syncers; enforced at the tungstenite layer. <!-- main.rs:495-503, ws_server.rs:30-32 --> |
 | `ZERO_ADMIN_PASSWORD` | unset | Gates `/statz`, `/heapz`, and the inspector protocol. **Caveat**: must be an ENV VAR on the zero-cache process. The TS `--admin-password` CLI flag never becomes an env var, so it does NOT reach rust — with no password, production requests are denied (`NODE_ENV=development` allows). <!-- main.rs:123-125, http_server.rs:65-108 --> |

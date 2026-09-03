@@ -561,3 +561,30 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   53 s + 11 s. Pokes/dedup_puts unchanged (3275/9664).
 - **Known gap:** initial-connect p95 is still 1.33× TS (616 vs 465 ms) — the
   per-pass PG/HTTP round-trip gap (I-12/I-13 do not touch it).
+
+## I-14 — opt-in server-side liveness close of idle clients (`ZERO_WS_LIVENESS_TIMEOUT_MS`)
+- **Files:** `rust-syncer/src/ws_server.rs` (`DEFAULT_LIVENESS_TIMEOUT_MS`,
+  `liveness_timeout_ms`, the `keepalive_interval` arm that sends close 1001
+  "liveness timeout"), `rust-syncer/OPERATIONS.md` (env table).
+- **What is ported 1:1 (not invented):** the 6s downstream `pong` keepalive
+  (`DOWNSTREAM_MSG_INTERVAL_MS`, workers/connection.ts:57-67) — the only
+  liveness mechanism TS runs on a client socket.
+- **What has no TS twin (the invention):** closing a client that has sent no
+  frame for a configured time. TS applies its heartbeat-terminate
+  (`sendPingsForLiveness`, types/ws.ts:26) only to internal streams
+  (types/streams.ts:155/264); `connection.ts` / `syncer.ts` never close an
+  idle client. Before 2026-09-03 rust shipped this ON at 60s and unregistered:
+  the xyne ART 5m replay (clients without app-level pings) lost 50/344
+  sessions to code 1001 and delivered 3275 pokes vs TS 4854, 1826 puts vs
+  2172 — a client-observable divergence hidden behind `errors=0` because the
+  harness only counts error frames.
+- **Contract:** (a) with the default configuration a client that sends
+  nothing is never closed by the server — exactly TS; (b) the close exists
+  only when an operator sets `ZERO_WS_LIVENESS_TIMEOUT_MS>0`, and then a
+  client sending any frame within the window is never closed; (c) the
+  `pong` keepalive cadence is unaffected either way.
+- **Tests:** `ws_server.rs`
+  `liveness_close_is_disabled_by_default_and_opt_in_via_env` (fails with the
+  old 60_000 default). (a) end-to-end is measured by the ART head-to-head:
+  rust pokes/puts must equal TS's for the same trace.
+- **Known gap:** none.
