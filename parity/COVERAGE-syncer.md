@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **543** · ✅ COVERED **500** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **500/510 = 98%**
+- Rust fns total **544** · ✅ COVERED **501** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **501/511 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -30,7 +30,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 500
+## ✅ COVERED — body pinned to TS fixture — 501
 
 | fn | file | signature |
 |---|---|---|
@@ -439,6 +439,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `stop_lap` | services/view_syncer/view_syncer.rs | `fn stop_lap(&self) {` |
 | `stop_ttl_clock_interval` | services/view_syncer/view_syncer.rs | `fn stop_ttl_clock_interval(&mut self) {` |
 | `str_array` | services/view_syncer/view_syncer.rs | `fn str_array(v: Option<&serde_json::Value>) -> Vec<String> {` |
+| `sync_query_pipeline_set_inputs` | services/view_syncer/view_syncer.rs | `fn sync_query_pipeline_set_inputs(` |
 | `transform_failure_message` | services/view_syncer/view_syncer.rs | `fn transform_failure_message(body: &serde_json::Value) -> String {` |
 | `update_ttl_clock_in_cvr_without_lock` | services/view_syncer/view_syncer.rs | `fn update_ttl_clock_in_cvr_without_lock(&mut self) {` |
 | `wrap_with_protocol_error` | services/view_syncer/view_syncer.rs | `fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {` |

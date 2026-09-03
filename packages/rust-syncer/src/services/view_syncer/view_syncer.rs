@@ -2021,6 +2021,54 @@ impl ViewSyncerService {
     /// (The two periodic-revalidation close sites above inline the same shape
     /// against `fail_connection`; they predate this method and are left as-is to
     /// keep this fix scoped to the background-retransform path.)
+    /// The inputs `sync_query_pipeline_set` needs beyond the CVR, resolved the
+    /// way the config pass resolves them (`handle_desired_queries`): the
+    /// deployed permissions, the connection's JWT claims, its custom-query
+    /// context, the pipelines' current state version and the replica version.
+    /// `conn` is TS's `connCtx` argument; `None` is TS
+    /// `mustGetBackgroundConnectionContext()` (view-syncer.ts:1906-1908).
+    fn sync_query_pipeline_set_inputs(
+        &mut self,
+        cvr: &CVR,
+        conn: Option<(&str, &str)>,
+    ) -> (
+        Option<serde_json::Value>,
+        serde_json::Value,
+        Option<CustomQueryContext>,
+        String,
+        String,
+    ) {
+        let ctx = {
+            let ccm = lock_unpoisoned(&self.ccm);
+            match conn {
+                Some((client_id, ws_id)) => ccm
+                    .must_get_connection_context(&CcmConnectionSelector {
+                        client_id: client_id.to_string(),
+                        ws_id: ws_id.to_string(),
+                    })
+                    .ok(),
+                None => ccm.get_background_connection_context(),
+            }
+        };
+        let auth_data = ctx
+            .as_ref()
+            .and_then(|c| c.auth.as_ref())
+            .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let custom_ctx = ctx.as_ref().and_then(custom_query_context_from);
+        let state_version = self
+            .pipelines()
+            .current_version()
+            .unwrap_or_else(|| cvr.version.state_version.clone());
+        (
+            self.permissions.clone(),
+            auth_data,
+            custom_ctx,
+            state_version,
+            self.replica_version.clone(),
+        )
+    }
+
     fn fail_maintenance_connection(
         &mut self,
         conn_ctx: &CcmConnectionContext,
@@ -3101,10 +3149,17 @@ impl ViewSyncerService {
         let ttl_clock = self.get_ttl_clock(now);
         // Staged clone: `&mut self` receiver vs `&self.shard` arg.
         let shard = self.shard.clone();
+        let caller_ws_id = self
+            .registered_ws
+            .get(caller_client_id)
+            .cloned()
+            .unwrap_or_default();
         match self
             .delete_clients(
                 cvr,
                 &shard,
+                caller_client_id,
+                &caller_ws_id,
                 &delete_ids,
                 &ack_ids,
                 deleted_group_ids,
@@ -10212,33 +10267,42 @@ impl ViewSyncerService {
         if expired.is_empty() {
             return Ok((cvr, 0));
         }
-        let state_version = cvr.version.state_version.clone();
-        let replica_version = cvr.replica_version.clone().unwrap_or_default();
-        // A removal-only query-driven pass: track_queries(removed) emits the
-        // got-query `del` patches + bumps the config version, remove_query
-        // tears each pipeline down, and `finish` → delete_unreferenced_rows
-        // pokes the now-orphaned rows away.
-        let (result, pokers) = self
-            .hydrate_and_sync(
+        // TS `#removeExpiredQueries` (view-syncer.ts:635-652): `if
+        // (this.#pipelinesSynced) await this.#syncQueryPipelineSet(lc, cvr,
+        // 'missing', undefined)` — a FULL re-sync from the CVR, not a targeted
+        // removal: the expired queries fall out through the sync's
+        // `removeQueriesQueryIds`, and any CVR query absent from the pipelines
+        // is (re-)added, transforming only the missing custom ones. `connCtx`
+        // is undefined → the background connection's context.
+        if !self.pipelines_synced {
+            return Ok((cvr, 0));
+        }
+        let (permissions, auth_data, custom_ctx, state_version, replica_version) =
+            self.sync_query_pipeline_set_inputs(&cvr, None);
+        let original_client_versions: std::collections::HashMap<String, NullableCVRVersion> = self
+            .get_clients(client_ids)
+            .iter()
+            .map(|c| (c.ws_id.clone(), c.version()))
+            .collect();
+        let shard = self.shard.clone();
+        let cvr = self
+            .sync_query_pipeline_set(
                 cvr,
+                CustomQueryTransformMode::Missing,
+                client_ids,
+                &shard,
+                permissions.as_ref(),
+                &auth_data,
+                custom_ctx.as_ref(),
                 state_version,
                 replica_version,
-                &[],
-                &expired,
-                client_ids,
-                &[],
                 last_connect_time,
                 last_active,
                 ttl_clock,
-                // Removal-only pass: no queries are added, so the same-hash
-                // force-bump never fires — no drifted set to thread.
-                &std::collections::HashSet::new(),
+                original_client_versions,
             )
             .await?;
-        // Expiry removals need no catch-up (connected clients are current, and
-        // nothing was hydrated) — end the poke directly.
-        pokers.end(result.cvr.version.clone());
-        Ok((result.cvr, expired.len()))
+        Ok((cvr, expired.len()))
     }
 
     /// Delete clients from the CVR: each client's desired queries are marked
@@ -10256,6 +10320,8 @@ impl ViewSyncerService {
         &mut self,
         cvr: CVR,
         shard: &ShardID,
+        caller_client_id: &str,
+        caller_ws_id: &str,
         delete_client_ids: &[String],
         ack_client_ids: &[String],
         ack_group_ids: &[String],
@@ -10310,6 +10376,39 @@ impl ViewSyncerService {
                 cfg.base.orig.clone()
             };
             pokers.end(cfg_cvr.version.clone());
+        }
+
+        // TS `#updateCVRConfig` (view-syncer.ts:1160-1167): once the config
+        // change is flushed and poked, `if (this.#pipelinesSynced) await
+        // this.#syncQueryPipelineSet(lc, this.#cvr, 'missing', connCtx)` with
+        // the CALLER's connection context (`deleteClients` hands
+        // `mustGetConnectionContext(selector)` to `#handleConfigUpdate`,
+        // view-syncer.ts:1046). Runs BEFORE the ack, as in TS.
+        if self.pipelines_synced {
+            let (permissions, auth_data, custom_ctx, state_version, replica_version) = self
+                .sync_query_pipeline_set_inputs(&cfg_cvr, Some((caller_client_id, caller_ws_id)));
+            let original_client_versions: std::collections::HashMap<String, NullableCVRVersion> =
+                self.get_clients(poke_ws_ids)
+                    .iter()
+                    .map(|c| (c.ws_id.clone(), c.version()))
+                    .collect();
+            cfg_cvr = self
+                .sync_query_pipeline_set(
+                    cfg_cvr,
+                    CustomQueryTransformMode::Missing,
+                    poke_ws_ids,
+                    shard,
+                    permissions.as_ref(),
+                    &auth_data,
+                    custom_ctx.as_ref(),
+                    state_version,
+                    replica_version,
+                    last_connect_time,
+                    last_active,
+                    ttl_clock,
+                    original_client_versions,
+                )
+                .await?;
         }
 
         // Broadcast the deleteClients ack (TS acks only explicit client-requested
@@ -11242,6 +11341,7 @@ mod engine_tests {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
+        engine.replica_version = "v1".to_string(); // CVRs below are at replica v1
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
@@ -11339,11 +11439,216 @@ mod engine_tests {
         );
     }
 
+    /// Port parity for TS `deleteClients` → `#handleConfigUpdate(…, 'missing')`
+    /// → `#updateCVRConfig` (view-syncer.ts:1032-1049, 1160-1167): once the
+    /// config change is flushed and poked, the pipeline set is RE-SYNCED from
+    /// the CVR. A query only the deleted client desired with `ttl: 0` is
+    /// expired by that sync (`removeQueriesQueryIds`): its pipeline goes, its
+    /// rows leave the CVR and the remaining clients get the del patches NOW —
+    /// not on a later expiry tick. Rust's dedicated `delete_clients` flushed and
+    /// poked but never re-synced, so the orphaned pipeline kept running.
+    #[tokio::test]
+    async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        // The test CVRs are at replica "v1"; the sync-set updater asserts the
+        // engine's replica version is not older (TS `#pipelines.replicaVersion`).
+        engine.replica_version = "v1".to_string();
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
+        let sink2: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx2));
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink1);
+        engine.register_client("client2", "ws2", "cg1", &shard, None, sink2);
+        let both = vec!["ws1".to_string(), "ws2".to_string()];
+        let desire = |hash: &str, ttl: Option<i64>| DesiredQuerySpec {
+            hash: hash.to_string(),
+            ast: Some(serde_json::json!({"table": "users"})),
+            name: None,
+            args: None,
+            ttl,
+        };
+        let cvr = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &both,
+                &shard,
+                vec![desire("q1", Some(0))],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let cvr = engine
+            .config_and_hydrate(
+                cvr,
+                "client2",
+                &both,
+                &shard,
+                vec![desire("q2", None)],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(engine.pipelines().has_query("q1") && engine.pipelines().has_query("q2"));
+
+        // client2 deletes client1: q1 (ttl 0, desired only by client1) expires.
+        let cvr = engine
+            .delete_clients(
+                cvr,
+                &shard,
+                "client2",
+                "ws2",
+                &["client1".to_string()],
+                &["client1".to_string()],
+                &[],
+                &["ws2".to_string()],
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(!cvr.clients.contains_key("client1"));
+        assert!(
+            !engine.pipelines().has_query("q1"),
+            "TS re-syncs the pipeline set after deleteClients (#updateCVRConfig): the \
+             expired q1 must be gone, not left running until an expiry tick"
+        );
+        assert!(
+            engine.pipelines().has_query("q2"),
+            "q2 is still desired by client2"
+        );
+    }
+
+    /// TS `#removeExpiredQueries` (view-syncer.ts:635-652) is a FULL
+    /// `#syncQueryPipelineSet(lc, cvr, 'missing')`, not a targeted removal:
+    /// besides dropping the expired queries it re-adds any CVR query absent
+    /// from the pipelines (e.g. one whose last transform errored and was
+    /// removed). Rust's targeted `hydrate_and_sync(dels = expired)` never
+    /// re-added such a query.
+    #[tokio::test]
+    async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        // The test CVRs are at replica "v1"; the sync-set updater asserts the
+        // engine's replica version is not older (TS `#pipelines.replicaVersion`).
+        engine.replica_version = "v1".to_string();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+        let ws = vec!["ws1".to_string()];
+        let desire = |hash: &str, ttl: Option<i64>| DesiredQuerySpec {
+            hash: hash.to_string(),
+            ast: Some(serde_json::json!({"table": "users"})),
+            name: None,
+            args: None,
+            ttl,
+        };
+        let cvr = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &ws,
+                &shard,
+                vec![desire("q1", Some(1000)), desire("q2", None)],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        // Inactivate q1 (ttl 1000 starts ticking).
+        let cvr = engine
+            .config_and_hydrate(
+                cvr,
+                "client1",
+                &ws,
+                &shard,
+                Vec::new(),
+                vec!["q1".to_string()],
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        // A pipeline that lost q2 while the CVR still desires it (TS: an
+        // errored transform removes the pipeline; the CVR keeps the query).
+        engine
+            .pipelines
+            .remove_query("q2", "test: simulate a dropped pipeline");
+        assert!(!engine.pipelines().has_query("q2"));
+
+        let (_cvr, removed) = engine
+            .remove_expired_queries(cvr, &ws, 0, 0, 2000)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1, "q1 expired");
+        assert!(!engine.pipelines().has_query("q1"));
+        assert!(
+            engine.pipelines().has_query("q2"),
+            "the 'missing' sync must re-add a CVR query absent from the pipelines (TS #syncQueryPipelineSet)"
+        );
+    }
+
     #[tokio::test]
     async fn expired_query_is_removed_after_ttl_elapses() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
+        // The test CVRs are at replica "v1"; the sync-set updater asserts the
+        // engine's replica version is not older (TS `#pipelines.replicaVersion`).
+        engine.replica_version = "v1".to_string();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
@@ -12231,6 +12536,8 @@ mod engine_tests {
             .delete_clients(
                 cvr,
                 &shard,
+                "client1",
+                "ws1",
                 &["client2".to_string()],
                 &["client2".to_string()],
                 &[],
