@@ -1328,10 +1328,10 @@ pub struct CollectOutput {
 
 #[derive(Clone)]
 struct CollectStreamConfig {
-    query_id: String,
-    schema: SourceSchema,
-    primary_keys: HashMap<String, Vec<String>>,
-    table_specs: HashMap<String, crate::streamer::TableSpecInfo>,
+    query_id: Rc<str>,
+    schema: Rc<SourceSchema>,
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
+    table_specs: Rc<HashMap<String, crate::streamer::TableSpecInfo>>,
 }
 
 impl CollectOutput {
@@ -1354,10 +1354,10 @@ impl CollectOutput {
         table_specs: HashMap<String, crate::streamer::TableSpecInfo>,
     ) {
         self.stream_config = Some(CollectStreamConfig {
-            query_id,
-            schema,
-            primary_keys,
-            table_specs,
+            query_id: Rc::from(query_id.as_str()),
+            schema: Rc::new(schema),
+            primary_keys: Rc::new(primary_keys),
+            table_specs: Rc::new(table_specs),
         });
     }
 }
@@ -1366,14 +1366,14 @@ impl Output for CollectOutput {
     fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
         crate::ivm::trace::recv("source#1", &change);
         if let Some(config) = &self.stream_config {
-            let mut streamer = crate::streamer::Streamer::new(
+            let mut streamer = crate::streamer::Streamer::new_shared(
                 config.primary_keys.clone(),
                 config.table_specs.clone(),
             );
-            streamer.accumulate(
-                &config.query_id,
-                &config.schema,
-                std::slice::from_ref(&change),
+            streamer.accumulate_shared(
+                config.query_id.clone(),
+                config.schema.clone(),
+                vec![change],
             );
             self.row_changes.extend(streamer.stream_rows());
         } else {

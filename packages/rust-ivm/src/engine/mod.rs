@@ -75,6 +75,10 @@ pub(crate) struct Built {
     pub pipeline: Shared<dyn Input>,
     pub collector: Shared<CollectOutput>,
     pub schema: SourceSchema,
+    /// `query_id` / `schema` shared with the per-node streamer accumulation
+    /// (no per-node deep clone of the nested relationship schemas).
+    pub query_id_rc: Rc<str>,
+    pub schema_rc: Rc<SourceSchema>,
     pub timer: Instant,
     pub companion_rows: Vec<(String, Vec<String>, Row)>,
     pub companions: Vec<CompanionBuilt>,
@@ -922,6 +926,8 @@ impl Engine {
                 transformed_ast: resolved.ast,
                 pipeline,
                 collector,
+                query_id_rc: Rc::from(q.query_id.as_str()),
+                schema_rc: Rc::new(schema.clone()),
                 schema,
                 timer,
                 build_ms: clock.now_ms() - build_start_ms,
@@ -2155,10 +2161,10 @@ impl Iterator for HydrateStream {
                         Some(StreamItem::Data(node)) => {
                             let change = crate::ivm::change::make_add_change(node);
                             let b = &self.built[self.idx];
-                            self.streamer.accumulate(
-                                &b.query_id,
-                                &b.schema,
-                                std::slice::from_ref(&change),
+                            self.streamer.accumulate_shared(
+                                b.query_id_rc.clone(),
+                                b.schema_rc.clone(),
+                                vec![change],
                             );
                             self.streaming = Some(self.streamer.stream());
                         }

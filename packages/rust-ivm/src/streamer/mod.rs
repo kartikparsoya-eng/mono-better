@@ -11,6 +11,7 @@
 //! - EDIT emits node with empty relationships (no recursion)
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
@@ -67,17 +68,31 @@ pub struct TableSpecInfo {
 /// every node's relationships and forwarding the `'yield'`s those child
 /// streams produce (:1361-1364). The rust-only `is_hidden` flag (EXISTS
 /// relationship rows, see `is_exists_condition_rel`) rides along.
+///
+/// Schemas are shared, never cloned per node: a frame holds the query's root
+/// `Rc<SourceSchema>` plus the relationship path down to its own schema
+/// (`schema_at`), because `SourceSchema.relationships` nests child schemas
+/// inline and a deep clone per node cost more than the fetch itself.
 pub struct Streamer {
-    primary_keys: HashMap<String, Vec<String>>,
-    table_specs: HashMap<String, TableSpecInfo>,
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
+    table_specs: Rc<HashMap<String, TableSpecInfo>>,
     /// TS `#changes: [queryID, schema, changes][]`.
-    changes: Vec<(String, SourceSchema, Vec<Change>)>,
+    changes: Vec<(Rc<str>, Rc<SourceSchema>, Vec<Change>)>,
 }
 
 impl Streamer {
     pub fn new(
         primary_keys: HashMap<String, Vec<String>>,
         table_specs: HashMap<String, TableSpecInfo>,
+    ) -> Self {
+        Self::new_shared(Rc::new(primary_keys), Rc::new(table_specs))
+    }
+
+    /// `new` over already-shared maps (the per-push collector path creates a
+    /// `Streamer` per change).
+    pub fn new_shared(
+        primary_keys: Rc<HashMap<String, Vec<String>>>,
+        table_specs: Rc<HashMap<String, TableSpecInfo>>,
     ) -> Self {
         Streamer {
             primary_keys,
@@ -88,8 +103,22 @@ impl Streamer {
 
     /// Port of TS `Streamer.accumulate()` (:1276-1283).
     pub fn accumulate(&mut self, query_id: &str, schema: &SourceSchema, changes: &[Change]) {
-        self.changes
-            .push((query_id.to_string(), schema.clone(), changes.to_vec()));
+        self.accumulate_shared(
+            Rc::from(query_id),
+            Rc::new(schema.clone()),
+            changes.to_vec(),
+        );
+    }
+
+    /// `accumulate` without copying: the hydrate path calls it once per node
+    /// with the query's shared id / schema and the node's own change.
+    pub fn accumulate_shared(
+        &mut self,
+        query_id: Rc<str>,
+        schema: Rc<SourceSchema>,
+        changes: Vec<Change>,
+    ) {
+        self.changes.push((query_id, schema, changes));
     }
 
     /// Port of TS `Streamer.stream()` (:1285-1294): a lazy walk of everything
@@ -99,10 +128,11 @@ impl Streamer {
         let mut stack = Vec::new();
         // Frames are pushed in reverse so the first accumulated triple is on
         // top of the stack.
-        for (query_id, schema, changes) in std::mem::take(&mut self.changes).into_iter().rev() {
+        for (query_id, root, changes) in std::mem::take(&mut self.changes).into_iter().rev() {
             stack.push(Frame::Changes {
                 query_id,
-                schema,
+                root,
+                path: Rc::from(Vec::new()),
                 changes: changes.into_iter(),
                 hidden: false,
             });
@@ -127,20 +157,40 @@ impl Streamer {
     }
 }
 
+/// The schema `path` relationships down from `root` (each step is a
+/// relationship name the walk found in the parent's `relationships`).
+fn schema_at<'a>(root: &'a SourceSchema, path: &[String]) -> &'a SourceSchema {
+    path.iter().fold(root, |schema, rel| {
+        schema
+            .relationships
+            .get(rel)
+            .expect("streamer path was built from existing relationships")
+    })
+}
+
+fn extend_path(path: &Rc<[String]>, rel: &str) -> Rc<[String]> {
+    let mut next = Vec::with_capacity(path.len() + 1);
+    next.extend_from_slice(path);
+    next.push(rel.to_string());
+    Rc::from(next)
+}
+
 /// One generator frame of the TS recursion.
 enum Frame {
     /// `#streamChanges(queryID, schema, changes)` (:1297-1337).
     Changes {
-        query_id: String,
-        schema: SourceSchema,
+        query_id: Rc<str>,
+        root: Rc<SourceSchema>,
+        path: Rc<[String]>,
         changes: std::vec::IntoIter<Change>,
         hidden: bool,
     },
     /// `#streamNodes(queryID, schema, op, nodes)` (:1341-1385): the node
     /// stream being walked.
     Nodes {
-        query_id: String,
-        schema: SourceSchema,
+        query_id: Rc<str>,
+        root: Rc<SourceSchema>,
+        path: Rc<[String]>,
         op: ChangeType,
         nodes: crate::ivm::stream::NodeStream,
         hidden: bool,
@@ -148,8 +198,9 @@ enum Frame {
     /// The `for (const [relationship, children] of Object.entries(relationships))`
     /// loop (:1380-1383) of an emitted node.
     Relationships {
-        query_id: String,
-        schema: SourceSchema,
+        query_id: Rc<str>,
+        root: Rc<SourceSchema>,
+        path: Rc<[String]>,
         op: ChangeType,
         node: Node,
         rel_idx: usize,
@@ -159,8 +210,8 @@ enum Frame {
 
 /// The lazy `Streamer.stream()` generator.
 pub struct StreamerStream {
-    primary_keys: HashMap<String, Vec<String>>,
-    table_specs: HashMap<String, TableSpecInfo>,
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
+    table_specs: Rc<HashMap<String, TableSpecInfo>>,
     stack: Vec<Frame>,
 }
 
@@ -174,10 +225,12 @@ impl Iterator for StreamerStream {
             match frame {
                 Frame::Changes {
                     query_id,
-                    schema,
+                    root,
+                    path,
                     changes,
                     hidden,
                 } => {
+                    let schema = schema_at(root, path);
                     // We do not sync rows gathered by the permissions system to
                     // the client (:1302-1306).
                     if schema.system == System::Permissions {
@@ -188,18 +241,21 @@ impl Iterator for StreamerStream {
                         self.stack.pop();
                         continue;
                     };
-                    let (query_id, schema, hidden) = (query_id.clone(), schema.clone(), *hidden);
+                    let (query_id, root, path, hidden) =
+                        (query_id.clone(), root.clone(), path.clone(), *hidden);
                     let next = match change {
                         Change::Add(node) => Frame::Nodes {
                             query_id,
-                            schema,
+                            root,
+                            path,
                             op: ChangeType::Add,
                             nodes: crate::ivm::stream::from_vec(vec![node]),
                             hidden,
                         },
                         Change::Remove(node) => Frame::Nodes {
                             query_id,
-                            schema,
+                            root,
+                            path,
                             op: ChangeType::Remove,
                             nodes: crate::ivm::stream::from_vec(vec![node]),
                             hidden,
@@ -208,7 +264,8 @@ impl Iterator for StreamerStream {
                         // (:1329-1331) — no recursion.
                         Change::Edit { node, .. } => Frame::Nodes {
                             query_id,
-                            schema,
+                            root,
+                            path,
                             op: ChangeType::Edit,
                             nodes: crate::ivm::stream::from_vec(vec![Node {
                                 row: node.row.clone(),
@@ -220,16 +277,15 @@ impl Iterator for StreamerStream {
                         // CHILD: recurse into the child schema with the child
                         // change (:1319-1327).
                         Change::Child { node: _, child } => {
-                            let Some(child_schema) =
-                                schema.relationships.get(&child.relationship_name).cloned()
-                            else {
+                            if !schema.relationships.contains_key(&child.relationship_name) {
                                 continue;
-                            };
+                            }
                             let child_hidden =
                                 hidden || is_exists_condition_rel(&child.relationship_name);
                             Frame::Changes {
                                 query_id,
-                                schema: child_schema,
+                                root,
+                                path: extend_path(&path, &child.relationship_name),
                                 changes: vec![child.change.as_ref().clone()].into_iter(),
                                 hidden: child_hidden,
                             }
@@ -239,11 +295,13 @@ impl Iterator for StreamerStream {
                 }
                 Frame::Nodes {
                     query_id,
-                    schema,
+                    root,
+                    path,
                     op,
                     nodes,
                     hidden,
                 } => {
+                    let schema = schema_at(root, path);
                     // We do not sync rows gathered by the permissions system
                     // (:1352-1356).
                     if schema.system == System::Permissions {
@@ -260,29 +318,22 @@ impl Iterator for StreamerStream {
                             let op = *op;
                             let hidden = *hidden;
                             let table = &schema.table_name;
-                            let pk = self
-                                .primary_keys
-                                .get(table)
-                                .cloned()
-                                .unwrap_or_else(|| schema.primary_key.clone());
+                            let row_key = match self.primary_keys.get(table) {
+                                Some(pk) => get_row_key(pk, &node.row),
+                                None => get_row_key(&schema.primary_key, &node.row),
+                            };
                             let spec = self.table_specs.get(table);
-                            let row_key = get_row_key(&pk, &node.row);
                             // minRowVersion bumping: for non-REMOVE, bump
                             // _0_version up to spec.minRowVersion (:1361-1371).
-                            let row = if op != ChangeType::Remove {
-                                bump_row_version(&node.row, spec)
-                            } else {
-                                node.row.clone()
-                            };
                             // REMOVE carries no row (TS: row: undefined).
                             let row_opt = if op == ChangeType::Remove {
                                 None
                             } else {
-                                Some(row)
+                                Some(bump_row_version(&node.row, spec))
                             };
                             let rc = RowChange {
                                 change_type: op,
-                                query_id: query_id.clone(),
+                                query_id: query_id.to_string(),
                                 table: table.clone(),
                                 row_key,
                                 row: row_opt,
@@ -292,7 +343,8 @@ impl Iterator for StreamerStream {
                             // (:1380-1383), in `rel_order` for determinism.
                             let rels = Frame::Relationships {
                                 query_id: query_id.clone(),
-                                schema: schema.clone(),
+                                root: root.clone(),
+                                path: path.clone(),
                                 op,
                                 node,
                                 rel_idx: 0,
@@ -305,25 +357,28 @@ impl Iterator for StreamerStream {
                 }
                 Frame::Relationships {
                     query_id,
-                    schema,
+                    root,
+                    path,
                     op,
                     node,
                     rel_idx,
                     hidden,
                 } => {
-                    let Some(rel_name) = node.rel_order.get(*rel_idx).cloned() else {
+                    let Some(rel_name) = node.rel_order.get(*rel_idx) else {
                         self.stack.pop();
                         continue;
                     };
                     *rel_idx += 1;
-                    if let Some(rel_fn) = node.relationships.get(&rel_name)
-                        && let Some(child_schema) = schema.relationships.get(&rel_name)
+                    let schema = schema_at(root, path);
+                    if let Some(rel_fn) = node.relationships.get(rel_name)
+                        && schema.relationships.contains_key(rel_name)
                     {
                         let stream = rel_fn();
-                        let child_hidden = *hidden || is_exists_condition_rel(&rel_name);
+                        let child_hidden = *hidden || is_exists_condition_rel(rel_name);
                         let next = Frame::Nodes {
                             query_id: query_id.clone(),
-                            schema: child_schema.clone(),
+                            root: root.clone(),
+                            path: extend_path(path, rel_name),
                             op: *op,
                             nodes: stream,
                             hidden: child_hidden,
