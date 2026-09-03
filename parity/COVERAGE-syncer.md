@@ -2,15 +2,16 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **544** · ✅ COVERED **501** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **501/511 = 98%**
+- Rust fns total **546** · ✅ COVERED **502** · 🟥 GAP (pure, untested) **11** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **502/513 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
-## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 10
+## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 11
 
 | fn | file | signature |
 |---|---|---|
+| `deserialize` | protocol/error.rs | `fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {` |
 | `init_metrics` | server/otel_start.rs | `pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {` |
 | `metrics_enabled` | server/otel_start.rs | `fn metrics_enabled() -> bool {` |
 | `add_centroid_list` | tdigest.rs | `pub fn add_centroid_list(&mut self, centroid_list: Vec<Centroid>) {` |
@@ -30,7 +31,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 501
+## ✅ COVERED — body pinned to TS fixture — 502
 
 | fn | file | signature |
 |---|---|---|
@@ -131,7 +132,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `validate` | custom_queries/transform_query.rs | `pub async fn validate(` |
 | `validation_of` | custom_queries/transform_query.rs | `fn validation_of(response: &Value) -> ConnectionValidation {` |
 | `compute_table_specs_from_path` | db/lite_tables.rs | `pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, S…` |
-| `compute_zql_specs` | db/lite_tables.rs | `pub fn compute_zql_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, String> {` |
+| `compute_zql_specs` | db/lite_tables.rs | `pub fn compute_zql_specs(` |
 | `list_tables` | db/lite_tables.rs | `fn list_tables(conn: &Connection) -> Result<Vec<String>, String> {` |
 | `list_unique_indexes` | db/lite_tables.rs | `fn list_unique_indexes(conn: &Connection) -> Result<HashMap<String, Vec<Vec<String>>>, …` |
 | `lite_table_name` | db/lite_tables.rs | `fn lite_table_name(schema: &str, table: &str) -> String {` |
@@ -141,8 +142,8 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `read_replica_versions` | db/lite_tables.rs | `pub fn read_replica_versions(conn: &Connection) -> Result<ReplicaVersions, String> {` |
 | `read_replica_versions_from_path` | db/lite_tables.rs | `pub fn read_replica_versions_from_path(replica_path: &str) -> Result<ReplicaVersions, S…` |
 | `read_table_spec` | db/lite_tables.rs | `fn read_table_spec(` |
-| `validate_client_schema` | db/lite_tables.rs | `pub fn validate_client_schema(` |
 | `zql_type_for_upstream` | db/lite_tables.rs | `fn zql_type_for_upstream(pg_type: &str) -> Option<&'static str> {` |
+| `column` | db/specs.rs | `pub fn column(&self, name: &str) -> Option<&LiteColumnSpec> {` |
 | `census_handler` | http_server.rs | `async fn census_handler() -> impl IntoResponse {` |
 | `check_admin_auth` | http_server.rs | `fn check_admin_auth(` |
 | `dec` | live_count.rs | `pub fn dec(c: &AtomicI64) {` |
@@ -249,6 +250,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `ivm_value_to_json` | services/run_ast.rs | `pub(crate) fn ivm_value_to_json(v: &Value) -> serde_json::Value {` |
 | `rows_by_source_to_json` | services/run_ast.rs | `fn rows_by_source_to_json(src: &rust_ivm::builder::debug_delegate::RowsBySource) -> Row…` |
 | `run_ast` | services/run_ast.rs | `pub fn run_ast(` |
+| `check_client_schema` | services/view_syncer/client_schema.rs | `pub fn check_client_schema(` |
 | `auth_equals` | services/view_syncer/connection_context_manager.rs | `pub fn auth_equals(a: Option<&Auth>, b: Option<&Auth>) -> bool {` |
 | `build_fetch_context` | services/view_syncer/connection_context_manager.rs | `fn build_fetch_context(` |
 | `close_connection` | services/view_syncer/connection_context_manager.rs | `pub fn close_connection(&mut self, selector: &ConnectionSelector) -> Option<ConnectionC…` |

@@ -38,7 +38,11 @@ CRATES = {
         # TS origin files that were actually ported INTO rust-cvr.
         # NOTE: query-covering.ts is intentionally excluded — it is ported into
         # packages/rust-syncer/src/query_covering.rs, not rust-cvr.
+        # shared/src helpers that carry BEHAVIOR are mirrored under rust-cvr
+        # `shared/` (rule 3; rust-ivm/syncer reach them through the crate dep).
+        "ts_label_rewrites": [("packages/shared/src/", "shared/")],
         "ts_files": [
+            "packages/shared/src/string-compare.ts",
             f"{V}/cvr.ts",
             f"{V}/cvr-store.ts",
             f"{V}/row-record-cache.ts",
@@ -56,7 +60,9 @@ CRATES = {
         # expected, not drift.
         "infra_rust": {"hash.rs", "tracer.rs", "otel_metrics.rs", "live_count.rs",
                        "parity_check.rs", "row_key.rs", "lib.rs",
-                       "change_processor.rs", "ttl.rs", "shards.rs"},
+                       "change_processor.rs", "ttl.rs", "shards.rs",
+                       # module declaration file for the shared/ mirror dir
+                       "shared.rs"},
         # TS files that are pure structure (DDL builders + zod codecs). Their fns
         # became inline SQL / serde derives, so they are NOT behavioral gaps.
         "structural_ts": {"schema/cvr.ts", "schema/types.ts"},
@@ -327,6 +333,7 @@ CRATES = {
             f"{ZC}/workers/connection.ts",
             f"{ZC}/workers/syncer.ts",
             f"{ZC}/workers/syncer-ws-message-handler.ts",
+            f"{ZC}/services/view-syncer/client-schema.ts",
             f"{ZC}/services/view-syncer/connection-context-manager.ts",
             f"{ZC}/services/view-syncer/drain-coordinator.ts",
             f"{ZC}/services/view-syncer/e2e-serving-lag.ts",
@@ -348,7 +355,7 @@ CRATES = {
         # Serving-loop / transform algorithms — a missing behavioral symbol here
         # is HIGH risk. Structural/DDL/type files are LOW risk (see structural_ts).
         "core_ts": {
-            "view-syncer.ts", "pipeline-driver.ts", "connection.ts",
+            "view-syncer.ts", "pipeline-driver.ts", "connection.ts", "client-schema.ts",
             "read-authorizer.ts", "syncer-ws-message-handler.ts",
             "connection-context-manager.ts", "jwt.ts", "transform-query.ts",
             "query-covering.ts", "drain-coordinator.ts", "e2e-serving-lag.ts",
@@ -359,6 +366,9 @@ CRATES = {
             "http_server.rs", "lib.rs", "live_count.rs", "metrics.rs",
             "otel.rs", "trace.rs", "ws_sink.rs", "ws_server.rs", "main.rs",
             "protocol.rs",
+            # db/specs.rs: the LiteTableSpec/LiteColumnSpec subset of TS
+            # db/specs.ts (types only; the zod/DDL half has no rust consumer).
+            "specs.rs",
         },
         # Pure structure (lite-table type maps). Their fns became serde/match
         # tables, so they are NOT behavioral gaps.
@@ -579,6 +589,143 @@ STRUCTURAL_KINDS = {"type", "interface", "const", "enum"}
 # Name normalization: collapse camelCase and snake_case to one canonical key.
 #   mergeRefCounts -> mergerefcounts ; merge_ref_counts -> mergerefcounts
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# M10 helper-import aliases (parity/helper_imports.py). Key = `<ts path relative
+# to packages/>::<imported symbol>` (`*` = namespace/default import). Value =
+# (rust TARGET | non-code resolution, NOTE) under the M9 verification rules —
+# a named .rs file must exist and every identifier must occur in it; a non-code
+# resolution must cite an I-/D-/GAP-/task/F- id. GAP-n ids are the OPEN gaps
+# table in ZERO-DIVERGENCE-PLAN.md.
+# ---------------------------------------------------------------------------
+HELPER_ALIASES = {
+    # ── @rocicorp/otel + tracer: spans/timers are D-14 (observability-only) ──
+    "otel/src/enabled.ts::otelEnabled": ("server/otel_start.rs", "exporter enablement env probe (D-14)"),
+    "otel/src/enabled.ts::otelLogsEnabled": ("server/otel_start.rs", "exporter enablement env probe (D-14)"),
+    "otel/src/enabled.ts::otelMetricsEnabled": ("server/otel_start.rs", "Port of TS otelMetricsEnabled() (D-14)"),
+    "otel/src/enabled.ts::otelTracesEnabled": ("server/otel_start.rs", "exporter enablement env probe (D-14)"),
+    "otel/src/log-options.ts::logOptions": ("N/A", "LogContext level/format options → tracing env filter, config/zero_config.rs (D-15)"),
+    "otel/src/maybe-time.ts::timeSampled": ("N/A", "sampled span timing around table-source fetch (D-14)"),
+    "otel/src/span.ts::manualSpan": ("N/A", "otel span emission (D-14)"),
+    "otel/src/span.ts::startAsyncSpan": ("N/A", "otel span emission (D-14)"),
+    "otel/src/span.ts::startSpan": ("N/A", "otel span emission (D-14)"),
+    "zero-cache/src/services/view-syncer/tracer.ts::tracer": ("N/A", "otel tracer handle; rust tracer.rs / trace.rs no-op spans (D-14)"),
+    # ── shared/src language idioms (D-16) ──
+    "shared/src/arrays.ts::areEqual": ("ivm/exists.rs no_size_reuse", "slice == (D-16)"),
+    "shared/src/asserts.ts::assert": ("N/A", "Rust assert!/panic! (D-16)"),
+    "shared/src/asserts.ts::assertArray": ("N/A", "match on Value::Array / as_array().expect (D-16)"),
+    "shared/src/asserts.ts::assertNumber": ("N/A", "match on Value::F64 (D-16)"),
+    "shared/src/asserts.ts::assertString": ("CROSS-CRATE rust-ivm builder/like.rs get_like_predicate", "panic with TS invalidType message on non-string lhs (like.ts:10)"),
+    "shared/src/asserts.ts::unreachable": ("N/A", "Rust exhaustive match / unreachable! (D-16)"),
+    "shared/src/bigint-json.ts::jsonValueSchema": ("schema/types.rs", "valita JSON value → serde_json::Value (D-17)"),
+    "shared/src/bigint-json.ts::stringify": ("N/A", "JSON.stringify with BigInt → serde_json::to_string (D-16)"),
+    "shared/src/btree-set.ts::BTreeSet": ("ivm/memory_source.rs", "std BTreeMap-backed ordered rows (D-16)"),
+    "shared/src/cache.ts::TimedCache": ("custom_queries/transform_query.rs TRANSFORM_CACHE CACHE_TTL", "5s TTL cache, process-wide keyed by full request identity (transform_query.rs:32)"),
+    "shared/src/custom-key-map.ts::CustomKeyMap": ("N/A", "HashMap keyed by row_key.rs row_id_string (D-16)"),
+    "shared/src/custom-key-set.ts::CustomKeySet": ("N/A", "HashSet keyed by row_key.rs row_id_string (D-16)"),
+    "shared/src/deep-merge.ts::deepMerge": ("N/A", "server-side defineQueries registry merge; rust-ivm query/query_registry.rs is the engine-side registry only (D-16)"),
+    "shared/src/deep-merge.ts::isPlainObject": ("N/A", "server-side defineQueries registry merge; rust-ivm query/query_registry.rs (D-16)"),
+    "shared/src/error.ts::getErrorMessage": ("N/A", "Display of the error value (`{e}`) — custom_queries/transform_query.rs, custom/fetch.rs (D-16)"),
+    "shared/src/has-own.ts::hasOwn": ("N/A", "HashMap::contains_key — ivm/take.rs, ivm/memory_source.rs (D-16)"),
+    "shared/src/iterables.ts::once": ("N/A", "std::iter::once (D-16)"),
+    "shared/src/iterables.ts::some": ("N/A", "Iterator::any — cvr.rs, cvr_store.rs (D-16)"),
+    "shared/src/iterables.ts::toSorted": ("CROSS-CRATE rust-cvr shared/string_compare.rs string_compare", "collect + sort_by(string_compare) (D-16)"),
+    "shared/src/json-schema.ts::jsonSchema": ("schema/types.rs", "valita JSON → serde_json::Value (D-17)"),
+    "shared/src/json.ts::assertJSONValue": ("N/A", "Value is JSON by construction — client_handler.rs (D-16)"),
+    "shared/src/json.ts::deepEqual": ("cvr_store.rs", "derived Eq on RowRecord (cvr_store.rs:716); query_covering.rs Value == (D-16)"),
+    "shared/src/must.ts::must": ("N/A", "Option::expect / unwrap (D-16)"),
+    "shared/src/object-traversal.ts::getValueAtPath": ("N/A", "server-side defineQueries registry lookup; rust-ivm query/query_registry.rs (D-16)"),
+    "shared/src/objects.ts::assignProperty": ("N/A", "map insert — ivm/view_apply_change.rs (D-16)"),
+    "shared/src/objects.ts::mapValues": ("N/A", "iterator map/collect — ivm/catch.rs (D-16)"),
+    "shared/src/options.ts::flagToEnv": ("config/zero_config.rs", "env-driven option parse (D-15)"),
+    "shared/src/options.ts::parseOptions": ("config/zero_config.rs", "env-driven option parse (D-15)"),
+    "shared/src/queue.ts::Queue": ("services/mutagen/pusher.rs", "I-3 mpsc channel replaces the async Queue"),
+    "shared/src/rand.ts::randInt": ("N/A", "log-only request/worker ids (D-14)"),
+    "shared/src/resolved-promises.ts::promiseVoid": ("N/A", "resolved future sentinel (D-16)"),
+    "shared/src/sentinels.ts::emptyArray": ("N/A", "&[] sentinel (D-16)"),
+    "shared/src/sentinels.ts::identity": ("N/A", "|x| x (D-16)"),
+    "shared/src/set-utils.ts::equals": ("N/A", "HashSet == — services/view_syncer/client_schema.rs (D-16)"),
+    "shared/src/set-utils.ts::difference": ("N/A", "HashSet::difference — cvr.rs (D-16)"),
+    "shared/src/set-utils.ts::intersection": ("N/A", "HashSet::intersection — cvr.rs (D-16)"),
+    "shared/src/set-utils.ts::union": ("N/A", "HashSet::union — cvr.rs (D-16)"),
+    "shared/src/sleep.ts::sleep": ("N/A", "tokio::time::sleep (D-16)"),
+    "shared/src/sorted-entries.ts::sortedEntries": ("custom_queries/transform_query.rs normalized_headers", "sorted header entries for the cache key"),
+    "shared/src/testing.ts::assertTesting": ("N/A", "test-only guard; #[cfg(test)] (D-16)"),
+    "shared/src/valita.ts::*": ("N/A", "valita schema library → serde derives (D-17)"),
+    # ── zero-cache config / process / Node runtime (D-15) ──
+    "zero-cache/src/config/network.ts::DEFAULT_PREFERRED_PREFIXES": ("N/A", "multi-NIC address preference for the Node http server (D-15)"),
+    "zero-cache/src/config/normalize.ts::assertNormalized": ("config/zero_config.rs", "config normalization (D-15)"),
+    "zero-cache/src/config/normalize.ts::isDevelopmentMode": ("services/view_syncer/inspect_handler.rs dev_mode", "NODE_ENV=development admin-password bypass (inspect_handler.rs:61)"),
+    "zero-cache/src/db/mode-enum.ts::*": ("N/A", "TransactionPool Mode enum; INLINED READONLY tx in cvr_store.rs (D-16)"),
+    "zero-cache/src/db/postgres-type-class-enum.ts::*": ("N/A", "elemPgTypeClass on LiteColumnSpec; not consulted by the read path — GAP-1"),
+    "zero-cache/src/db/run-transaction.ts::runTx": ("INLINED cvr_store.rs (:772)", "doc-cited SET LOCAL pair"),
+    "zero-cache/src/db/sqlite-corruption.ts::registerSQLiteCorruptionDiagnosticTarget": ("N/A", "Node process diagnostic hook (D-15)"),
+    "zero-cache/src/db/statements.ts::StatementRunner": ("N/A", "prepared-statement cache over better-sqlite3; rusqlite prepare_cached (D-16)"),
+    "zero-cache/src/db/transaction-pool.ts::TransactionPool": ("INLINED cvr_store.rs (:1687)", "doc-cited READONLY pool"),
+    "zero-cache/src/db/warmup.ts::warmupConnections": ("main.rs", "best-effort pool warmup before ready (main.rs:246) (D-15)"),
+    "zero-cache/src/observability/events.ts::initEventSink": ("N/A", "Node event sink bootstrap (D-15)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::recordConnectionAttempted": ("N/A", "anonymous telemetry counter (D-14)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::recordConnectionSuccess": ("N/A", "anonymous telemetry counter (D-14)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::recordMutation": ("N/A", "anonymous telemetry counter (D-14)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::recordRowsSynced": ("N/A", "anonymous telemetry counter (D-14)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::setActiveClientGroupsGetter": ("N/A", "anonymous telemetry gauge (D-14)"),
+    "zero-cache/src/server/anonymous-otel-start.ts::startAnonymousTelemetry": ("N/A", "anonymous telemetry bootstrap (D-14)"),
+    "zero-cache/src/server/logging.ts::createLogContext": ("N/A", "LogContext construction → tracing subscriber (D-15)"),
+    "zero-cache/src/server/otel-diag-logger.ts::setupOtelDiagnosticLogger": ("N/A", "otel diag logger (D-14)"),
+    "zero-cache/src/services/life-cycle.ts::exitAfter": ("N/A", "Node worker lifecycle (D-15)"),
+    "zero-cache/src/services/life-cycle.ts::runUntilKilled": ("N/A", "Node worker lifecycle (D-15)"),
+    "zero-cache/src/services/mutagen/mutagen.ts::MutagenService": ("N/A", "CRUD mutagen; rust relays custom pushes only — I-3"),
+    "zero-cache/src/services/runner.ts::ServiceRunner": ("workers/cg_executor.rs CGHandle", "per-CG executor replaces the ServiceRunner map — I-1"),
+    "zero-cache/src/types/pg.ts::connectPgClient": ("N/A", "postgres.js client; sqlx PgPool in main.rs (D-15)"),
+    "zero-cache/src/types/processes.ts::parentWorker": ("N/A", "Node worker IPC (D-15)"),
+    "zero-cache/src/types/processes.ts::singleProcessMode": ("N/A", "Node worker IPC (D-15)"),
+    "zero-cache/src/types/subscription.ts::Subscription": ("ws_sink.rs", "per-connection downstream channel + writer task — I-4"),
+    "zero-cache/src/types/websocket-handoff.ts::installWebSocketReceiver": ("N/A", "Node socket handoff between dispatcher and worker (D-15)"),
+    "zero-cache/src/workers/replicator.ts::createNotifierFrom": ("N/A", "replicator worker IPC; rust-ivm snapshotter polls the replica (D-15)"),
+    "zero-cache/src/workers/replicator.ts::replicaFileModeSchema": ("N/A", "replicator worker args (D-15)"),
+    "zero-cache/src/workers/replicator.ts::replicaFileName": ("N/A", "replicator worker args (D-15)"),
+    "zero-cache/src/workers/replicator.ts::subscribeTo": ("N/A", "replicator worker IPC (D-15)"),
+    "zero/package.json::*": ("N/A", "package version string for the `connected` frame/otel — INLINED main.rs (D-15)"),
+    # ── replica schema helpers ──
+    "zero-cache/src/services/replicator/schema/column-metadata.ts::ColumnMetadataStore": ("ABSENT", "_zero.column_metadata precedence over pragma types not read — GAP-1"),
+    "zero-cache/src/services/replicator/schema/column-metadata.ts::metadataToLiteTypeString": ("ABSENT", "_zero.column_metadata precedence over pragma types not read — GAP-1"),
+    "zero-cache/src/services/replicator/schema/replication-state.ts::getSubscriptionState": ("db/lite_tables.rs read_replica_versions", "replicaVersion from _zero.replicationConfig"),
+    "zero-cache/src/services/replicator/schema/table-metadata.ts::TableMetadataTracker": ("db/lite_tables.rs read_min_row_versions", "getMinRowVersions"),
+    "zero-cache/src/types/error-with-level.ts::ProtocolErrorWithLevel": ("N/A", "log level attached at throw sites; rust derives it from kind — workers/connection.rs classify_error_log_level (D-14)"),
+    "zero-cache/src/types/error-with-level.ts::getLogLevel": ("workers/connection.rs classify_error_log_level", "level from ErrorBody kind (D-14)"),
+    "zero-cache/src/types/lite.ts::isArray": ("N/A", "elemPgTypeClass derivation; not consulted by the read path — GAP-1"),
+    "zero-cache/src/types/lite.ts::isEnum": ("N/A", "elemPgTypeClass derivation; not consulted by the read path — GAP-1"),
+    "zero-cache/src/types/lite.ts::mapLiteDataTypeToZqlSchemaValue": ("db/lite_tables.rs lite_type_to_zql_value_type", "pipe-notation lite type → zql value type"),
+    "zero-cache/src/types/lite.ts::nullableUpstream": ("db/lite_tables.rs NOT_NULL_ATTRIBUTE", "INLINED in read_table_spec"),
+    "zero-cache/src/types/shards.ts::ALLOWED_APP_ID_CHARACTERS": ("ABSENT", "appID charset validation at config load — GAP-2"),
+    "zero-cache/src/types/shards.ts::INVALID_APP_ID_MESSAGE": ("ABSENT", "appID charset validation at config load — GAP-2"),
+    "zero-cache/src/types/shards.ts::getShardID": ("config/zero_config.rs", "ShardID assembled from app_id + shard_num at config load"),
+    "zero-cache/src/types/state-version.ts::majorVersionToString": ("INLINED schema/types.rs (:55)", "doc-cited"),
+    "zero-cache/src/types/state-version.ts::stateVersionFromString": ("INLINED schema/types.rs (:151)", "doc-cited validation"),
+    "zero-cache/src/types/url-params.ts::URLParams": ("workers/connect_params.rs get_string get_integer get_boolean", "URL parameter helpers (connect_params.rs:123)"),
+    # ── zero-protocol / zero-schema valita schemas → serde types (D-17) ──
+    "zero-protocol/src/ast.ts::astSchema": ("CROSS-CRATE rust-ivm builder/ast.rs Ast", "valita → serde struct (D-17)"),
+    "zero-protocol/src/ast.ts::planIdSymbol": ("CROSS-CRATE rust-ivm builder/ast.rs plan_id", "symbol-keyed property → struct field (D-16)"),
+    "zero-protocol/src/ast.ts::toStaticParam": ("N/A", "client fluent-builder symbol method; rust-ivm query/expression.rs (D-16)"),
+    "zero-protocol/src/client-schema.ts::clientSchemaSchema": ("cvr.rs set_client_schema", "valita → serde_json::Value (D-17)"),
+    "zero-protocol/src/data.ts::rowSchema": ("client_handler.rs ensure_safe_json", "valita → Value (D-17), F-CH-1"),
+    "zero-protocol/src/error.ts::ProtocolError": ("protocol/error.rs ErrorBody", "thrown error class → ErrorBody Result (D-16)"),
+    "zero-protocol/src/error.ts::errorBodySchema": ("protocol/error.rs ErrorBody", "valita union → kind-discriminated Deserialize (error-wire-fixture.json) (D-17)"),
+    "zero-protocol/src/error.ts::isProtocolError": ("N/A", "instanceof guard → Result::Err(ErrorBody) (D-16)"),
+    "zero-protocol/src/mutate-server.ts::mutateResponseSchema": ("services/mutagen/pusher.rs", "valita → serde (D-17)"),
+    "zero-protocol/src/mutation-type-enum.ts::*": ("N/A", "MutationType enum; rust relays custom pushes only — I-3"),
+    "zero-protocol/src/mutation.ts::mutationResultSchema": ("client_handler.rs normalize_mutation_result", "valita → Value (D-17)"),
+    "zero-protocol/src/primary-key.ts::primaryKeySchema": ("N/A", "valita → Vec<String> (D-17)"),
+    "zero-protocol/src/primary-key.ts::primaryKeyValueRecordSchema": ("client_handler.rs make_row_patch", "valita → Value (D-17), client_handler.rs:741"),
+    "zero-protocol/src/push.ts::pushErrorSchema": ("protocol/push.rs", "valita → serde (D-17)"),
+    "zero-protocol/src/query-server.ts::queryResponseSchema": ("custom_queries/transform_query.rs validation_of", "valita → Value (D-17)"),
+    "zero-schema/src/compiled-permissions.ts::permissionsConfigSchema": ("auth/load_permissions.rs load_permissions", "valita → Value (D-17)"),
+    # ── zqlite internals ──
+    "zqlite/src/internal/sql-inline.ts::compileInline": ("sqlite/sqlite_cost_model.rs inline_sql", "probe SQL with inlined literals"),
+    "zqlite/src/internal/sql.ts::compile": ("sqlite/query_builder.rs", "SQL text + params builder (D-16)"),
+    "zqlite/src/internal/sql.ts::sql": ("sqlite/query_builder.rs", "sql`` template → String builder (D-16)"),
+    "zqlite/src/internal/statement-cache.ts::StatementCache": ("snapshotter/snapshotter.rs", "rusqlite prepare_cached; DEFAULT_MAX_CACHED_STATEMENTS (snapshotter.rs:24) (D-16)"),
+}
+
 def canon(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 

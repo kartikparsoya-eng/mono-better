@@ -27,7 +27,7 @@ from parity_ledger import CRATES  # noqa: E402
 BASELINE = 0
 
 NON_CODE = re.compile(r"^(N/A|INLINED|ABSENT|IDENTITY|Rust |JS |TS |—)", re.I)
-CITATION = re.compile(r"\bI-\d+\b|\bD-\d+\b|task #\d+|\bF-[A-Z0-9-]+\b|[\w/-]+\.rs\b|[\w/-]+\.ts:\d+|\b[0-9a-f]{7,10}\b|\(cross-crate\)|INVENTIONS|PARITY-EXCEPTIONS")
+CITATION = re.compile(r"\bI-\d+\b|\bD-\d+\b|\bGAP-\d+\b|task #\d+|\bF-[A-Z0-9-]+\b|[\w/-]+\.rs\b|[\w/-]+\.ts:\d+|\b[0-9a-f]{7,10}\b|\(cross-crate\)|INVENTIONS|PARITY-EXCEPTIONS")
 FILE_RE = re.compile(r"([A-Za-z0-9_/-]+\.rs)")
 IDENT_RE = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Za-z0-9]+)\b")
 SKIP_IDENTS = {"CROSS", "CRATE", "INLINED", "ABSENT", "IDENTITY", "Rust", "N"}
@@ -52,7 +52,7 @@ def candidates(crate, rel):
     """Files whose path ends with `rel` (a basename or a suffix path), in this
     crate first, then the other rust crates (`CROSS-CRATE rust-<x>` targets)."""
     out = []
-    for c in [crate] + [x for x in ("cvr", "ivm", "syncer") if x != crate]:
+    for c in ([crate] if crate else []) + [x for x in ("cvr", "ivm", "syncer") if x != crate]:
         for q in tree(c):
             if q.endswith("/" + rel) or q.endswith("/" + os.path.basename(rel)):
                 out.append((c, q))
@@ -71,7 +71,7 @@ def check(crate, ts, target, note):
     stripped = FILE_RE.sub(" ", t)
     stripped = re.sub(r"rust-(cvr|ivm|syncer)", " ", stripped)
     idents = [i for i in IDENT_RE.findall(stripped) if i not in SKIP_IDENTS]
-    search_crates = crates_named(t) or [crate]
+    search_crates = crates_named(t) or ([crate] if crate else ["cvr", "ivm", "syncer"])
     if files:
         cands = candidates(crate, files[0])
         if not cands:

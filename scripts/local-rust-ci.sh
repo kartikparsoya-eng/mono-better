@@ -116,5 +116,8 @@ python3 "$ROOT/parity/signature_diff.py"; chk $? "M8 signature differential"
 step "parity — M9 alias-note guard (every ledger 📌 alias names an existing rust twin or cites an I-/D-/task/F- id)"
 python3 "$ROOT/parity/alias_guard.py"; chk $? "M9 alias guard"
 
+step "parity — M10 helper-import ledger (every shared/types helper a ported file imports has a rust twin or a verified alias)"
+python3 "$ROOT/parity/helper_imports.py"; chk $? "M10 helper-import ledger"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

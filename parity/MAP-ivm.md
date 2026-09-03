@@ -2,8 +2,8 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **593**, Rust **1007** · resolved pairs **395** (exact 353 + fuzzy 42) + aliases 73
-- 🟥 TS UNRESOLVED: **129** (**60** behavioral ⇒ investigate · 69 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **612**
+- symbols: TS **593**, Rust **1010** · resolved pairs **395** (exact 353 + fuzzy 42) + aliases 73
+- 🟥 TS UNRESOLVED: **129** (**60** behavioral ⇒ investigate · 69 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **615**
 
 > ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `#allColumns` (sqlite/table-source.ts), `asQueryImpl` (query/query-impl.ts), `asQueryInternals` (query/query-internals.ts), `#bytes` (sqlite/db.ts), `canUseUpdate` (sqlite/table-source.ts), `#checkpoint` (sqlite/database-storage.ts), `cmpLit` (query/expression.ts), `constraintsToSQL` (sqlite/query-builder.ts), `createQuery` (query/query-registry.ts), `DeepMerge` (query/query-registry.ts), `defineQueries` (query/query-registry.ts), `defineQueriesWithType` (query/query-registry.ts), `defineQuery` (query/query-registry.ts), `defineQueryWithType` (query/query-registry.ts), `deserializePKToConstraint` (ivm/cap.ts), `eb` (query/expression.ts), `filterFalse` (query/expression.ts), `filtersToSQL` (sqlite/query-builder.ts), `filterTrue` (query/expression.ts), `filterUndefined` (query/expression.ts), `fromSQLiteType` (sqlite/table-source.ts), `fromSQLiteTypes` (sqlite/table-source.ts), `getJsType` (sqlite/query-builder.ts), `getQuery` (query/query-registry.ts), `#getRowStmt` (sqlite/table-source.ts), `#getStatementsFor` (sqlite/table-source.ts), `getUniqueIndexes` (sqlite/table-source.ts), `inTransaction` (sqlite/db.ts), `isOneHop` (query/query-impl.ts), `isParameterReference` (query/expression.ts), `isQuery` (query/query-registry.ts), `isQueryDefinition` (query/query-registry.ts), `isQueryRegistry` (query/query-registry.ts), `isTwoHop` (query/query-impl.ts), `logIfSlow` (sqlite/db.ts), `#mapFromSQLiteTypes` (sqlite/table-source.ts), `materializeImpl` (query/query-delegate-base.ts), `#maybeCheckpoint` (sqlite/database-storage.ts), `mb` (sqlite/db.ts), `mustGetQuery` (query/query-registry.ts), `newQuery` (query/query-delegate.ts), `newQueryImpl` (query/query-impl.ts), `nonPrimaryValues` (sqlite/table-source.ts), `normalizeParser` (query/named.ts), `normalizeTTL` (query/ttl.ts), `pragma` (sqlite/db.ts), `preloadImpl` (query/query-delegate-base.ts), `prepare` (sqlite/db.ts), `#requestToSQL` (sqlite/table-source.ts), `safeIntegers` (sqlite/db.ts), `sargableLeadingStartBound` (sqlite/query-builder.ts), `syncedQueryImpl` (query/named.ts), `throwQueryNotRunnable` (query/query-impl.ts), `titleCase` (query/validate-input.ts), `toSQLiteType` (sqlite/query-builder.ts), `toSQLiteTypeName` (sqlite/table-source.ts), `toSQLiteTypes` (sqlite/table-source.ts), `transaction` (sqlite/db.ts), `unsafeMode` (sqlite/db.ts), `withValidation` (query/named.ts)
 
@@ -211,7 +211,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `getLikePredicate` (builder/like.ts:4) | `get_like_predicate` (:15) | exact |
 | `SimplePredicate` (builder/filter.ts:13) | `SimplePredicate` (:10) | exact |
 
-🟦 **Rust-only added here (2):** `is_special_regex_char`, `pattern_to_regex`
+🟦 **Rust-only added here (4):** `is_special_regex_char`, `non_string_lhs_asserts_like_ts`, `pattern_is_coerced_with_js_string_semantics`, `pattern_to_regex`
 
 ### `engine/mod.rs`  ⟵  `ivm/change-type-enum.ts`, `ivm/memory-source.ts`, `ivm/source.ts`, `sqlite/table-source.ts`
 
@@ -298,34 +298,34 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `Constraint` (ivm/constraint.ts:13) | `Constraint` (:7) | exact |
-| `constraintEquals` (ivm/constraint.ts:185) | `constraint_equals` (:154) | exact |
-| `constraintMatchesPrimaryKey` (ivm/constraint.ts:46) | `constraint_matches_primary_key` (:39) | exact |
-| `constraintMatchesRow` (ivm/constraint.ts:17) | `constraint_matches_row` (:15) | exact |
-| `constraintsAreCompatible` (ivm/constraint.ts:34) | `constraints_are_compatible` (:27) | exact |
-| `extractColumn` (ivm/constraint.ts:147) | `extract_column` (:112) | exact |
-| `keyMatchesPrimaryKey` (ivm/constraint.ts:53) | `key_matches_primary_key` (:76) | exact |
-| `MultiConstraint` (ivm/operator.ts:61) | `MultiConstraint` (:12) | exact |
-| `primaryKeyConstraintFromFilters` (ivm/constraint.ts:114) | `primary_key_constraint_from_filters` (:125) | exact |
-| `pullSimpleAndComponents` (ivm/constraint.ts:91) | `pull_simple_and_components` (:96) | exact |
-| `rowMatchesPK` (ivm/memory-source.ts:976) | `row_matches_multi_constraints` (:59) | fuzzy 0.40 |
+| `Constraint` (ivm/constraint.ts:13) | `Constraint` (:8) | exact |
+| `constraintEquals` (ivm/constraint.ts:185) | `constraint_equals` (:157) | exact |
+| `constraintMatchesPrimaryKey` (ivm/constraint.ts:46) | `constraint_matches_primary_key` (:40) | exact |
+| `constraintMatchesRow` (ivm/constraint.ts:17) | `constraint_matches_row` (:16) | exact |
+| `constraintsAreCompatible` (ivm/constraint.ts:34) | `constraints_are_compatible` (:28) | exact |
+| `extractColumn` (ivm/constraint.ts:147) | `extract_column` (:115) | exact |
+| `keyMatchesPrimaryKey` (ivm/constraint.ts:53) | `key_matches_primary_key` (:78) | exact |
+| `MultiConstraint` (ivm/operator.ts:61) | `MultiConstraint` (:13) | exact |
+| `primaryKeyConstraintFromFilters` (ivm/constraint.ts:114) | `primary_key_constraint_from_filters` (:128) | exact |
+| `pullSimpleAndComponents` (ivm/constraint.ts:91) | `pull_simple_and_components` (:99) | exact |
+| `rowMatchesPK` (ivm/memory-source.ts:976) | `row_matches_multi_constraints` (:61) | fuzzy 0.40 |
 
 ### `ivm/data.rs`  ⟵  `ivm/data.ts`, `ivm/memory-source.ts`, `ivm/source-change-index-enum.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `Comparator` (ivm/data.ts:89) | `Comparator` (:288) | exact |
+| `Comparator` (ivm/data.ts:89) | `Comparator` (:308) | exact |
 | `compareValues` (ivm/data.ts:32) | `compare_values` (:131) | exact |
-| `drainStreams` (ivm/data.ts:120) | `drain_streams` (:381) | exact |
-| `makeBoundComparator` (ivm/memory-source.ts:997) | `make_partial_bound_comparator` (:318) | fuzzy 0.75 |
-| `makeComparator` (ivm/data.ts:91) | `make_comparator` (:292) | exact |
-| `Node` (ivm/data.ts:10) | `Node` (:344) | exact |
-| `ROW` (ivm/source-change-index-enum.ts:2) | `Row` (:271) | exact |
-| `valuesEqual` (ivm/data.ts:112) | `values_equal` (:199) | exact |
+| `drainStreams` (ivm/data.ts:120) | `drain_streams` (:401) | exact |
+| `makeBoundComparator` (ivm/memory-source.ts:997) | `make_partial_bound_comparator` (:338) | fuzzy 0.75 |
+| `makeComparator` (ivm/data.ts:91) | `make_comparator` (:312) | exact |
+| `Node` (ivm/data.ts:10) | `Node` (:364) | exact |
+| `ROW` (ivm/source-change-index-enum.ts:2) | `Row` (:291) | exact |
+| `valuesEqual` (ivm/data.ts:112) | `values_equal` (:219) | exact |
 
 🟥 **TS symbols not resolved into this file (2):** `NormalizedValue`, `OLD_ROW`
 
-🟦 **Rust-only added here (16):** `MAX_SAFE`, `SortOrder`, `Value`, `cloned_json_preserves_reference_identity`, `comparator_errors_match_javascript_messages`, `deserialize`, `eq`, `independently_parsed_json_is_not_equal_or_orderable`, `is_null`, `js_json_string`, `js_stringify_value`, `js_stringify_value_matches_json_stringify`, `js_typeof`, `js_value_string`, `serialize`, `set_relationship`
+🟦 **Rust-only added here (17):** `MAX_SAFE`, `SortOrder`, `Value`, `cloned_json_preserves_reference_identity`, `comparator_errors_match_javascript_messages`, `deserialize`, `eq`, `independently_parsed_json_is_not_equal_or_orderable`, `invalid_type`, `is_null`, `js_json_string`, `js_stringify_value`, `js_stringify_value_matches_json_stringify`, `js_typeof`, `js_value_string`, `serialize`, `set_relationship`
 
 ### `ivm/exists.rs`  ⟵  `ivm/exists.ts`
 
@@ -1364,7 +1364,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `expandChange` | ivm/catch.ts:93 | `expand_change` ivm/catch.rs:119 | ✅ exact |
 | `expandNode` | ivm/catch.ts:125 | `expand_node` ivm/catch.rs:142 | ✅ exact |
 | `TYPE` | ivm/change-index-enum.ts:1 | — | 🟥 UNRESOLVED |
-| `Node` | ivm/data.ts:10 | `Node` ivm/data.rs:344 | ✅ exact |
+| `Node` | ivm/data.ts:10 | `Node` ivm/data.rs:364 | ✅ exact |
 | `OLD_NODE` | ivm/change-index-enum.ts:3 | `old_node` ivm/change.rs:72 | ✅ exact |
 | `ChildData` | ivm/change.ts:7 | `ChildData` ivm/change.rs:21 | ✅ exact |
 | `ChangeIndex` | ivm/change-index.ts:5 | — | 🟥 UNRESOLVED |
@@ -1382,25 +1382,25 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `makeRemoveChange` | ivm/change.ts:65 | `make_remove_change` ivm/change.rs:85 | ✅ exact |
 | `makeChildChange` | ivm/change.ts:69 | `make_child_change` ivm/change.rs:89 | ✅ exact |
 | `makeEditChange` | ivm/change.ts:73 | `make_edit_change` ivm/change.rs:93 | ✅ exact |
-| `Constraint` | ivm/constraint.ts:13 | `Constraint` ivm/constraint.rs:7 | ✅ exact |
-| `constraintMatchesRow` | ivm/constraint.ts:17 | `constraint_matches_row` ivm/constraint.rs:15 | ✅ exact |
-| `constraintsAreCompatible` | ivm/constraint.ts:34 | `constraints_are_compatible` ivm/constraint.rs:27 | ✅ exact |
-| `constraintMatchesPrimaryKey` | ivm/constraint.ts:46 | `constraint_matches_primary_key` ivm/constraint.rs:39 | ✅ exact |
-| `keyMatchesPrimaryKey` | ivm/constraint.ts:53 | `key_matches_primary_key` ivm/constraint.rs:76 | ✅ exact |
-| `pullSimpleAndComponents` | ivm/constraint.ts:91 | `pull_simple_and_components` ivm/constraint.rs:96 | ✅ exact |
-| `primaryKeyConstraintFromFilters` | ivm/constraint.ts:114 | `primary_key_constraint_from_filters` ivm/constraint.rs:125 | ✅ exact |
-| `extractColumn` | ivm/constraint.ts:147 | `extract_column` ivm/constraint.rs:112 | ✅ exact |
+| `Constraint` | ivm/constraint.ts:13 | `Constraint` ivm/constraint.rs:8 | ✅ exact |
+| `constraintMatchesRow` | ivm/constraint.ts:17 | `constraint_matches_row` ivm/constraint.rs:16 | ✅ exact |
+| `constraintsAreCompatible` | ivm/constraint.ts:34 | `constraints_are_compatible` ivm/constraint.rs:28 | ✅ exact |
+| `constraintMatchesPrimaryKey` | ivm/constraint.ts:46 | `constraint_matches_primary_key` ivm/constraint.rs:40 | ✅ exact |
+| `keyMatchesPrimaryKey` | ivm/constraint.ts:53 | `key_matches_primary_key` ivm/constraint.rs:78 | ✅ exact |
+| `pullSimpleAndComponents` | ivm/constraint.ts:91 | `pull_simple_and_components` ivm/constraint.rs:99 | ✅ exact |
+| `primaryKeyConstraintFromFilters` | ivm/constraint.ts:114 | `primary_key_constraint_from_filters` ivm/constraint.rs:128 | ✅ exact |
+| `extractColumn` | ivm/constraint.ts:147 | `extract_column` ivm/constraint.rs:115 | ✅ exact |
 | `SetOfConstraint` | ivm/constraint.ts:162 | `constraint_to_json` planner/planner_debug.rs:177 | 🔁 rename 0.50 |
 | `#indexOf` | ivm/constraint.ts:169 | sqlite/sqlite_stat_fanout.rs find_index_for_columns | 📌 index lookup by columns |
 | `has` | ivm/constraint.ts:173 | `has` ivm/memory_source.rs:184 | ✅ exact |
-| `constraintEquals` | ivm/constraint.ts:185 | `constraint_equals` ivm/constraint.rs:154 | ✅ exact |
+| `constraintEquals` | ivm/constraint.ts:185 | `constraint_equals` ivm/constraint.rs:157 | ✅ exact |
 | `compareValues` | ivm/data.ts:32 | `compare_values` ivm/data.rs:131 | ✅ exact |
 | `NormalizedValue` | ivm/data.ts:78 | — | 🟥 UNRESOLVED |
 | `normalizeUndefined` | ivm/data.ts:85 | ivm/data.rs | 📌 inlined (undefined->null) |
-| `Comparator` | ivm/data.ts:89 | `Comparator` ivm/data.rs:288 | ✅ exact |
-| `makeComparator` | ivm/data.ts:91 | `make_comparator` ivm/data.rs:292 | ✅ exact |
-| `valuesEqual` | ivm/data.ts:112 | `values_equal` ivm/data.rs:199 | ✅ exact |
-| `drainStreams` | ivm/data.ts:120 | `drain_streams` ivm/data.rs:381 | ✅ exact |
+| `Comparator` | ivm/data.ts:89 | `Comparator` ivm/data.rs:308 | ✅ exact |
+| `makeComparator` | ivm/data.ts:91 | `make_comparator` ivm/data.rs:312 | ✅ exact |
+| `valuesEqual` | ivm/data.ts:112 | `values_equal` ivm/data.rs:219 | ✅ exact |
+| `drainStreams` | ivm/data.ts:120 | `drain_streams` ivm/data.rs:401 | ✅ exact |
 | `Exists` | ivm/exists.ts:21 | `Exists` ivm/exists.rs:38 | ✅ exact |
 | `setFilterOutput` | ivm/exists.ts:67 | `set_filter_output` ivm/exists.rs:181 | ✅ exact |
 | `beginFilter` | ivm/exists.ts:71 | `begin_filter` ivm/exists.rs:187 | ✅ exact |
@@ -1472,8 +1472,8 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `overlaysForFilterPredicate` | ivm/memory-source.ts:859 | sqlite/table_source.rs | 📌 -> SQLite |
 | `generateWithOverlayInner` | ivm/memory-source.ts:872 | INLINED ivm/source.rs apply_source_overlays | 📌 generator → iterator |
 | `generateWithOverlayInnerUnordered` | ivm/memory-source.ts:952 | INLINED ivm/source.rs apply_source_overlays | 📌 unordered overlay arm |
-| `rowMatchesPK` | ivm/memory-source.ts:976 | `row_matches_multi_constraints` ivm/constraint.rs:59 | 🔁 rename 0.40 |
-| `makeBoundComparator` | ivm/memory-source.ts:997 | `make_partial_bound_comparator` ivm/data.rs:318 | 🔁 rename 0.75 |
+| `rowMatchesPK` | ivm/memory-source.ts:976 | `row_matches_multi_constraints` ivm/constraint.rs:61 | 🔁 rename 0.40 |
+| `makeBoundComparator` | ivm/memory-source.ts:997 | `make_partial_bound_comparator` ivm/data.rs:338 | 🔁 rename 0.75 |
 | `compareBounds` | ivm/memory-source.ts:1023 | `compare` ivm/view.rs:74 | 🔁 rename 0.50 |
 | `generateRows` | ivm/memory-source.ts:1040 | INLINED ivm/source.rs fetch scan walk | 📌 generator → iterator |
 | `stringify` | ivm/memory-source.ts:1050 | N/A | 📌 TS memory-source key stringify; Rust uses SQLite keys (D-16) |
@@ -1483,7 +1483,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `cloneData` | ivm/memory-storage.ts:47 | ivm/memory_storage.rs | 📌 inlined clone |
 | `InputBase` | ivm/operator.ts:14 | `InputBase` ivm/operator.rs:44 | ✅ exact |
 | `Input` | ivm/operator.ts:26 | `Input` ivm/operator.rs:49 | ✅ exact |
-| `MultiConstraint` | ivm/operator.ts:61 | `MultiConstraint` ivm/constraint.rs:12 | ✅ exact |
+| `MultiConstraint` | ivm/operator.ts:61 | `MultiConstraint` ivm/constraint.rs:13 | ✅ exact |
 | `FetchRequest` | ivm/operator.ts:63 | `FetchRequest` ivm/operator.rs:24 | ✅ exact |
 | `Start` | ivm/operator.ts:84 | `Start` ivm/operator.rs:33 | ✅ exact |
 | `Output` | ivm/operator.ts:93 | `Output` ivm/operator.rs:54 | ✅ exact |
@@ -1518,7 +1518,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `ChildChangeRecord` | ivm/snitch.ts:212 | — | 🟥 UNRESOLVED |
 | `EditChangeRecord` | ivm/snitch.ts:218 | — | 🟥 UNRESOLVED |
 | `LogType` | ivm/snitch.ts:224 | `LogType` ivm/snitch.rs:16 | ✅ exact |
-| `ROW` | ivm/source-change-index-enum.ts:2 | `Row` ivm/data.rs:271 | ✅ exact |
+| `ROW` | ivm/source-change-index-enum.ts:2 | `Row` ivm/data.rs:291 | ✅ exact |
 | `OLD_ROW` | ivm/source-change-index-enum.ts:3 | — | 🟥 UNRESOLVED |
 | `SourceChangeIndex` | ivm/source-change-index.ts:5 | `push_to_source_change` replay.rs:298 | 🔁 rename 0.50 |
 | `SourceChangeAdd` | ivm/source.ts:9 | `source_change_to_change` ivm/memory_source.rs:467 | 🔁 rename 0.67 |

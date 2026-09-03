@@ -553,12 +553,54 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
 --enforce-structure` + `bash scripts/local-rust-ci.sh` == PASS.
 
 ### In flight (this session)
-- [ ] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4`
-      (`RUST_SYNCER_IMAGE=… SYNCER_SHARDS=200 run-rust-syncer-release.sh
-      --mode release --skip-code`); log: `/tmp/art-l9.log`.
-- [ ] **Push** the L9 series to `origin` (mono → kartikparsoya-eng/mono-better;
-      `git push --no-verify` if the GitGuardian hook false-positives).
-      11 commits: 1970feeb7 (3c-iii) … 3cb3d7036 (Part 5).
+- [x] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4` — superseded
+      by the later gates (7b6746587 G32-G42, 6f2ce89fe sweep, 1e919acdb frame
+      gate; see memory/GATE-OBSERVATIONS.md). The 2026-09-04 fixes below are
+      NOT yet ART-gated (box offline since 2026-09-03 15:10 UTC).
+- [x] **Push** the L9 series to `origin` — done (origin/rust-cvr-v1.0.0 tracks
+      every commit through 0b73cfc3b).
+
+### 2026-09-04 — M10 helper-import ledger + what it surfaced (all fixed, TS-golden)
+The L1 ledger only saw files in `CRATES[*]["ts_files"]`; helpers a ported file
+IMPORTS from `shared/src/*`, `zero-cache/src/types/*`, `zero-protocol/src/*`
+were invisible (the `types/ws.ts::elide` class). `parity/helper_imports.py`
+(M10) lists every VALUE import from an unledgered file and requires a rust twin
+by name or a `HELPER_ALIASES` entry verified by the M9 rules. First run:
+159 imports, 113 without a twin. Classified into D-14/D-15/D-16/D-17 + I-n
+aliases, leaving these REAL divergences, each fixed with a test proven
+failing-first:
+- [x] **`errorBodySchema` wire shape** (`protocol/error.rs`): every `Option`
+      field serialized as `null` when unset — valita `.optional()` rejects
+      `null`, so a rust `Rehome` (shed/close) body made zero-client disconnect
+      with `InvalidMessage` instead of backing off; and serde untagged first-fit
+      bound Backoff bodies to `Basic` / http bodies to `*Server`, dropping
+      `minBackoffMs`/`status`/`bodyPreview` on parse. Now: `skip_serializing_if`
+      + a kind→origin/reason discriminated `Deserialize` mirroring the TS union.
+      Golden: `error-wire-fixture.json` (16 valita-validated bodies, one per
+      union member with optionals present AND absent, round-tripped).
+- [x] **`checkClientSchema`** was ported as `validate_client_schema` with
+      different messages, missing branches (no `fullTables`: unsupported-PK /
+      keyless / non-public-schema tip / unsupported-column explanations), the
+      wrong kind for "nothing synced" (SchemaVersionNotSupported vs Internal),
+      and unsorted iteration. Now 1:1 in `services/view_syncer/client_schema.rs`
+      over `computeZqlSpecs(.., fullTables)` (`db/specs.rs` LiteTableSpec +
+      `IvmTableSpec.all_potential_primary_keys`). Golden:
+      `client-schema-fixture.json` (17 cases run through the REAL TS function).
+- [x] **`stringCompare`** (JS `<` = UTF-16 code-unit order) was `str::cmp`
+      (UTF-8/code-point order) at cvr.ts:376/447 desiredQueryIDs, row-key.ts:31
+      `normalizedKeyOrder`, constraint.ts:65 — orders differ when a
+      supplementary char meets U+E000–FFFF. Ported to
+      `rust-cvr/src/shared/string_compare.rs`.
+- [x] **`like.ts`**: `String(pattern)` coercion (rust panicked on a non-string
+      pattern) and `assertString(lhs)` (rust silently returned `false`; TS
+      throws `Invalid type: number \`1\`, expected string`).
+
+### Open gaps (GAP-n — cited by `HELPER_ALIASES`; closing one deletes its row)
+| id | gap | where | risk |
+|---|---|---|---|
+| GAP-1 | `ColumnMetadataStore` precedence: TS `listTables` reads `_zero.column_metadata` (upstream type / isEnum / isArray / isNotNull / backfilling) FIRST and falls back to the pragma type; rust reads the pragma type only (`db/lite_tables.rs read_table_spec`). Identical while the replicator writes the same pipe-notation into both; diverges if metadata is updated without a table rewrite, and rust never excludes BACKFILLING columns. | lite-tables.ts:47-124 | medium (schema-change windows) |
+| GAP-2 | `ALLOWED_APP_ID_CHARACTERS` / `INVALID_APP_ID_MESSAGE`: TS rejects an invalid `appID` at config parse (zero-config.ts:38); rust accepts any string. | zero-config.ts:38, shards.ts | low (startup config) |
+| GAP-3 | `checkClientSchema` runs in TS `#initAndResetCommon` on EVERY pipeline reset (schema change) as well as init; rust re-reads specs + fullTables on reset (`reset_pipelines_and_rehydrate`) but only re-checks the client schema at initConnection. | pipeline-driver.ts:354-372 | low-medium |
 
 ### Queued next (small, self-contained — good pickups)
 - [x] **P7-a** (Part 5) — RETRACTED as a false divergence + REAL fix DONE
@@ -652,8 +694,11 @@ exact holes this bug used.
 | M5 | Ban-unverified-claims guard (must cite `.ts:line`) | traceability | **done** `ban_unverified_claims.py` (ratchet @122) |
 | M6 | Branch/condition coverage gate on ported state logic | did-run? | **done** `branch_coverage.sh` (llvm-cov REGION coverage; ratchet @75%, actuals 78-87%) |
 | M7 | Mutation testing (cargo-mutants) on critical modules | behaves? | **done (harness)** `mutation_smoke.sh` |
+| M8 | Signature differential (mirrored-file twin, 1:1 parameters) | migrated? | **done** `signature_diff.py` (ratchet @0) |
+| M9 | Alias-note guard (every ledger 📌 exception names a real twin or cites an id) | traceability | **done** `alias_guard.py` (0/205 unverifiable; 3 wrong notes had hidden real bugs) |
+| M10 | Helper-import ledger (every VALUE import from an UNLEDGERED TS file → rust twin by name or verified alias) | migrated? | **done** `helper_imports.py` (160 imports: 40 twins, 120 aliased, 0 unresolved; surfaced 4 fixes — see 2026-09-04 below) |
 
-M2/M3/M5 wired into `scripts/local-rust-ci.sh`; M1/M4/M6/M7 are ART/offline
+M2/M3/M5/M8/M9/M10 wired into `scripts/local-rust-ci.sh`; M1/M4/M6/M7 are ART/offline
 context (they need a workload, a profile, or a long run).
 
 M2 keys each guard on (condition, callee, TS enclosing member) — the same guard

@@ -2,12 +2,12 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **177**, Rust **346** · resolved pairs **116** (exact 116 + fuzzy 0) + aliases 19
-- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **230**
+- symbols: TS **178**, Rust **349** · resolved pairs **117** (exact 117 + fuzzy 0) + aliases 19
+- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **232**
 
 ## 1 · File structure diff
 
-TS origin files: **8**  ·  Rust files: **21** (9 new)
+TS origin files: **9**  ·  Rust files: **23** (10 new)
 
 | TS file (LOC) | rel | Rust file(s) (shared syms) |
 |---|---|---|
@@ -18,9 +18,10 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `row-set-signature.ts` (30) | **1:1** | `row_set_signature.rs` (3) |
 | `schema/cvr.ts` (359) | **1:1** | `schema/cvr.rs` (8), `seq_replay.rs` (1) |
 | `schema/types.ts` (393) | **1:1** | `schema/types.rs` (21) |
+| `shared/string-compare.ts` (9) | **1:1** | `shared/string_compare.rs` (1) |
 | `ttl-clock.ts` (15) | **1:1** | `ttl_clock.rs` (3) |
 
-**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `hash.rs` (75), `lib.rs` (35), `parity_check.rs` (1657), `row_key.rs` (300), `schema/mod.rs` (6), `shards.rs` (22), `tracer.rs` (41), `ttl.rs` (145)
+**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `hash.rs` (75), `lib.rs` (36), `parity_check.rs` (1657), `row_key.rs` (318), `schema/mod.rs` (6), `shards.rs` (28), `shared.rs` (4), `tracer.rs` (41), `ttl.rs` (145)
 
 **Merges (many TS → one Rust file):**
 - `otel_metrics.rs` ⟵ `cvr-store.ts`, `row-record-cache.ts`
@@ -70,38 +71,38 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `#assertNewVersion` (cvr.ts:769) | `assert_new_version` (:1028) | exact |
-| `#deleteQueries` (cvr.ts:429) | `delete_queries` (:651) | exact |
-| `#trackExecuted` (cvr.ts:701) | `track_executed` (:933) | exact |
-| `#trackRemoved` (cvr.ts:742) | `track_removed` (:979) | exact |
-| `_ensureNewVersion` (cvr.ts:176) | `ensure_new_version` (:312) | exact |
-| `_setVersion` (cvr.ts:162) | `set_version` (:301) | exact |
-| `assertNotInternal` (cvr.ts:87) | `assert_not_internal` (:171) | exact |
-| `clearDesiredQueries` (cvr.ts:497) | `clear_desired_queries` (:783) | exact |
-| `CVR` (cvr.ts:58) | `CVR` (:1352) | exact |
-| `CVRConfigDrivenUpdater` (cvr.ts:212) | `CVRConfigDrivenUpdater` (:352) | exact |
-| `CVRQueryDrivenUpdater` (cvr.ts:560) | `CVRQueryDrivenUpdater` (:829) | exact |
-| `CVRUpdater` (cvr.ts:141) | `CVRUpdater` (:283) | exact |
-| `deleteClient` (cvr.ts:502) | `delete_client` (:797) | exact |
-| `deleteDesiredQueries` (cvr.ts:422) | `delete_desired_queries` (:643) | exact |
-| `deleteUnreferencedRows` (cvr.ts:959) | `delete_unreferenced_rows` (:1187) | exact |
-| `ensureClient` (cvr.ts:220) | `ensure_client` (:371) | exact |
-| `flush` (cvr.ts:183) | `flush` (:332) | exact |
-| `getInactiveQueries` (cvr.ts:1087) | `get_inactive_queries` (:190) | exact |
-| `getMutationResultsQuery` (cvr.ts:96) | `get_mutation_results_query` (:138) | exact |
-| `markDesiredQueriesAsInactive` (cvr.ts:414) | `mark_desired_queries_as_inactive` (:633) | exact |
-| `mergeRefCounts` (cvr.ts:1049) | `merge_ref_counts` (:40) | exact |
-| `newQueryRecord` (cvr.ts:1167) | `new_query_record` (:97) | exact |
-| `nextEvictionTime` (cvr.ts:1156) | `next_eviction_time` (:264) | exact |
-| `putDesiredQueries` (cvr.ts:317) | `put_desired_queries` (:488) | exact |
-| `received` (cvr.ts:836) | `received` (:1042) | exact |
-| `RefCounts` (cvr.ts:531) | `RefCounts` (:1335) | exact |
-| `RowSetSignatureProvider` (cvr.ts:544) | `RowSetSignatureProvider` (:277) | exact |
-| `RowUpdate` (cvr.ts:51) | `RowUpdate` (:1343) | exact |
-| `setClientSchema` (cvr.ts:273) | `set_client_schema` (:444) | exact |
-| `setProfileID` (cvr.ts:299) | `set_profile_id` (:470) | exact |
-| `trackQueries` (cvr.ts:617) | `track_queries` (:902) | exact |
-| `updatedVersion` (cvr.ts:789) | `updated_version` (:891) | exact |
+| `#assertNewVersion` (cvr.ts:769) | `assert_new_version` (:1031) | exact |
+| `#deleteQueries` (cvr.ts:429) | `delete_queries` (:653) | exact |
+| `#trackExecuted` (cvr.ts:701) | `track_executed` (:936) | exact |
+| `#trackRemoved` (cvr.ts:742) | `track_removed` (:982) | exact |
+| `_ensureNewVersion` (cvr.ts:176) | `ensure_new_version` (:313) | exact |
+| `_setVersion` (cvr.ts:162) | `set_version` (:302) | exact |
+| `assertNotInternal` (cvr.ts:87) | `assert_not_internal` (:172) | exact |
+| `clearDesiredQueries` (cvr.ts:497) | `clear_desired_queries` (:786) | exact |
+| `CVR` (cvr.ts:58) | `CVR` (:1355) | exact |
+| `CVRConfigDrivenUpdater` (cvr.ts:212) | `CVRConfigDrivenUpdater` (:353) | exact |
+| `CVRQueryDrivenUpdater` (cvr.ts:560) | `CVRQueryDrivenUpdater` (:832) | exact |
+| `CVRUpdater` (cvr.ts:141) | `CVRUpdater` (:284) | exact |
+| `deleteClient` (cvr.ts:502) | `delete_client` (:800) | exact |
+| `deleteDesiredQueries` (cvr.ts:422) | `delete_desired_queries` (:645) | exact |
+| `deleteUnreferencedRows` (cvr.ts:959) | `delete_unreferenced_rows` (:1190) | exact |
+| `ensureClient` (cvr.ts:220) | `ensure_client` (:372) | exact |
+| `flush` (cvr.ts:183) | `flush` (:333) | exact |
+| `getInactiveQueries` (cvr.ts:1087) | `get_inactive_queries` (:191) | exact |
+| `getMutationResultsQuery` (cvr.ts:96) | `get_mutation_results_query` (:139) | exact |
+| `markDesiredQueriesAsInactive` (cvr.ts:414) | `mark_desired_queries_as_inactive` (:635) | exact |
+| `mergeRefCounts` (cvr.ts:1049) | `merge_ref_counts` (:41) | exact |
+| `newQueryRecord` (cvr.ts:1167) | `new_query_record` (:98) | exact |
+| `nextEvictionTime` (cvr.ts:1156) | `next_eviction_time` (:265) | exact |
+| `putDesiredQueries` (cvr.ts:317) | `put_desired_queries` (:489) | exact |
+| `received` (cvr.ts:836) | `received` (:1045) | exact |
+| `RefCounts` (cvr.ts:531) | `RefCounts` (:1338) | exact |
+| `RowSetSignatureProvider` (cvr.ts:544) | `RowSetSignatureProvider` (:278) | exact |
+| `RowUpdate` (cvr.ts:51) | `RowUpdate` (:1346) | exact |
+| `setClientSchema` (cvr.ts:273) | `set_client_schema` (:445) | exact |
+| `setProfileID` (cvr.ts:299) | `set_profile_id` (:471) | exact |
+| `trackQueries` (cvr.ts:617) | `track_queries` (:905) | exact |
+| `updatedVersion` (cvr.ts:789) | `updated_version` (:894) | exact |
 
 🟥 **TS symbols not resolved into this file (2):** `CVRSnapshot`, `Column`
 
@@ -253,7 +254,15 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 ### `shards.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (2):** `ShardID`, `cvr_schema`
+🟦 **Rust-only added here (3):** `ShardID`, `app_schema`, `cvr_schema`
+
+### `shared/string_compare.rs`  ⟵  `shared/string-compare.ts`
+
+| TS symbol | Rust symbol | match |
+|---|---|---|
+| `stringCompare` (shared/string-compare.ts:1) | `string_compare` (:15) | exact |
+
+🟦 **Rust-only added here (1):** `utf16_lead`
 
 ### `tracer.rs`  ⟵  _(new)_
 
@@ -304,7 +313,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `convertTTLValues` | cvr-store.ts:88 | INLINED | 📌 cvr_store.rs upsert SQL: ttl/1000 + null-on-negative |
 | `asQuery` | cvr-store.ts:119 | `as_query` cvr_store.rs:1829 | ✅ exact |
 | `CVRStore` | cvr-store.ts:180 | `CVR_STORE` live_count.rs:17 | ✅ exact |
-| `CVR` | cvr.ts:58 | `CVR` cvr.rs:1352 | ✅ exact |
+| `CVR` | cvr.ts:58 | `CVR` cvr.rs:1355 | ✅ exact |
 | `#updateQueryFields` | cvr-store.ts:263 | INLINED cvr_store.rs queries json_to_recordset upsert | 📌 patchVersion/transformationHash/-Version columns |
 | `load` | cvr-store.ts:274 | `load` cvr_store.rs:1304 | ✅ exact |
 | `#recordLoad` | cvr-store.ts:308 | `record_load` otel_metrics.rs:118 | ✅ exact |
@@ -339,39 +348,39 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `InvalidClientSchemaError` | cvr-store.ts:1405 | — | 🟥 UNRESOLVED |
 | `cvrErrorKind` | cvr-store.ts:1421 | `cvr_error_kind` cvr_store.rs:1819 | ✅ exact |
 | `RowsVersionBehindError` | cvr-store.ts:1437 | CVRStoreError::RowsVersionBehind (cvr_store.rs:49) | 📌 TS error class → Rust enum variant |
-| `RowUpdate` | cvr.ts:51 | `RowUpdate` cvr.rs:1343 | ✅ exact |
+| `RowUpdate` | cvr.ts:51 | `RowUpdate` cvr.rs:1346 | ✅ exact |
 | `CVRSnapshot` | cvr.ts:72 | — | 🟥 UNRESOLVED |
-| `assertNotInternal` | cvr.ts:87 | `assert_not_internal` cvr.rs:171 | ✅ exact |
-| `getMutationResultsQuery` | cvr.ts:96 | `get_mutation_results_query` cvr.rs:138 | ✅ exact |
-| `CVRUpdater` | cvr.ts:141 | `CVRUpdater` cvr.rs:283 | ✅ exact |
-| `_setVersion` | cvr.ts:162 | `set_version` cvr.rs:301 | ✅ exact |
-| `_ensureNewVersion` | cvr.ts:176 | `ensure_new_version` cvr.rs:312 | ✅ exact |
-| `CVRConfigDrivenUpdater` | cvr.ts:212 | `CVRConfigDrivenUpdater` cvr.rs:352 | ✅ exact |
-| `ensureClient` | cvr.ts:220 | `ensure_client` cvr.rs:371 | ✅ exact |
-| `setClientSchema` | cvr.ts:273 | `set_client_schema` cvr.rs:444 | ✅ exact |
-| `setProfileID` | cvr.ts:299 | `set_profile_id` cvr.rs:470 | ✅ exact |
-| `putDesiredQueries` | cvr.ts:317 | `put_desired_queries` cvr.rs:488 | ✅ exact |
-| `markDesiredQueriesAsInactive` | cvr.ts:414 | `mark_desired_queries_as_inactive` cvr.rs:633 | ✅ exact |
-| `deleteDesiredQueries` | cvr.ts:422 | `delete_desired_queries` cvr.rs:643 | ✅ exact |
-| `#deleteQueries` | cvr.ts:429 | `delete_queries` cvr.rs:651 | ✅ exact |
-| `clearDesiredQueries` | cvr.ts:497 | `clear_desired_queries` cvr.rs:783 | ✅ exact |
+| `assertNotInternal` | cvr.ts:87 | `assert_not_internal` cvr.rs:172 | ✅ exact |
+| `getMutationResultsQuery` | cvr.ts:96 | `get_mutation_results_query` cvr.rs:139 | ✅ exact |
+| `CVRUpdater` | cvr.ts:141 | `CVRUpdater` cvr.rs:284 | ✅ exact |
+| `_setVersion` | cvr.ts:162 | `set_version` cvr.rs:302 | ✅ exact |
+| `_ensureNewVersion` | cvr.ts:176 | `ensure_new_version` cvr.rs:313 | ✅ exact |
+| `CVRConfigDrivenUpdater` | cvr.ts:212 | `CVRConfigDrivenUpdater` cvr.rs:353 | ✅ exact |
+| `ensureClient` | cvr.ts:220 | `ensure_client` cvr.rs:372 | ✅ exact |
+| `setClientSchema` | cvr.ts:273 | `set_client_schema` cvr.rs:445 | ✅ exact |
+| `setProfileID` | cvr.ts:299 | `set_profile_id` cvr.rs:471 | ✅ exact |
+| `putDesiredQueries` | cvr.ts:317 | `put_desired_queries` cvr.rs:489 | ✅ exact |
+| `markDesiredQueriesAsInactive` | cvr.ts:414 | `mark_desired_queries_as_inactive` cvr.rs:635 | ✅ exact |
+| `deleteDesiredQueries` | cvr.ts:422 | `delete_desired_queries` cvr.rs:645 | ✅ exact |
+| `#deleteQueries` | cvr.ts:429 | `delete_queries` cvr.rs:653 | ✅ exact |
+| `clearDesiredQueries` | cvr.ts:497 | `clear_desired_queries` cvr.rs:786 | ✅ exact |
 | `Column` | cvr.ts:530 | — | 🟥 UNRESOLVED |
-| `RefCounts` | cvr.ts:531 | `RefCounts` cvr.rs:1335 | ✅ exact |
-| `RowSetSignatureProvider` | cvr.ts:544 | `RowSetSignatureProvider` cvr.rs:277 | ✅ exact |
-| `CVRQueryDrivenUpdater` | cvr.ts:560 | `CVRQueryDrivenUpdater` cvr.rs:829 | ✅ exact |
-| `trackQueries` | cvr.ts:617 | `track_queries` cvr.rs:902 | ✅ exact |
+| `RefCounts` | cvr.ts:531 | `RefCounts` cvr.rs:1338 | ✅ exact |
+| `RowSetSignatureProvider` | cvr.ts:544 | `RowSetSignatureProvider` cvr.rs:278 | ✅ exact |
+| `CVRQueryDrivenUpdater` | cvr.ts:560 | `CVRQueryDrivenUpdater` cvr.rs:832 | ✅ exact |
+| `trackQueries` | cvr.ts:617 | `track_queries` cvr.rs:905 | ✅ exact |
 | `#lookupRowsForExecutedAndRemovedQueries` | cvr.ts:652 | INLINED cvr.rs (:1199) | 📌 doc-cited |
-| `#trackExecuted` | cvr.ts:701 | `track_executed` cvr.rs:933 | ✅ exact |
-| `#trackRemoved` | cvr.ts:742 | `track_removed` cvr.rs:979 | ✅ exact |
-| `#assertNewVersion` | cvr.ts:769 | `assert_new_version` cvr.rs:1028 | ✅ exact |
-| `updatedVersion` | cvr.ts:789 | `updated_version` cvr.rs:891 | ✅ exact |
-| `received` | cvr.ts:836 | `received` cvr.rs:1042 | ✅ exact |
-| `deleteUnreferencedRows` | cvr.ts:959 | `delete_unreferenced_rows` cvr.rs:1187 | ✅ exact |
+| `#trackExecuted` | cvr.ts:701 | `track_executed` cvr.rs:936 | ✅ exact |
+| `#trackRemoved` | cvr.ts:742 | `track_removed` cvr.rs:982 | ✅ exact |
+| `#assertNewVersion` | cvr.ts:769 | `assert_new_version` cvr.rs:1031 | ✅ exact |
+| `updatedVersion` | cvr.ts:789 | `updated_version` cvr.rs:894 | ✅ exact |
+| `received` | cvr.ts:836 | `received` cvr.rs:1045 | ✅ exact |
+| `deleteUnreferencedRows` | cvr.ts:959 | `delete_unreferenced_rows` cvr.rs:1190 | ✅ exact |
 | `#deleteUnreferencedRow` | cvr.ts:1004 | change_processor.rs delete_unreferenced_rows | 📌 renamed plural + relocated (doc-cited :201) |
-| `mergeRefCounts` | cvr.ts:1049 | `merge_ref_counts` cvr.rs:40 | ✅ exact |
-| `getInactiveQueries` | cvr.ts:1087 | `get_inactive_queries` cvr.rs:190 | ✅ exact |
-| `nextEvictionTime` | cvr.ts:1156 | `next_eviction_time` cvr.rs:264 | ✅ exact |
-| `newQueryRecord` | cvr.ts:1167 | `new_query_record` cvr.rs:97 | ✅ exact |
+| `mergeRefCounts` | cvr.ts:1049 | `merge_ref_counts` cvr.rs:41 | ✅ exact |
+| `getInactiveQueries` | cvr.ts:1087 | `get_inactive_queries` cvr.rs:191 | ✅ exact |
+| `nextEvictionTime` | cvr.ts:1156 | `next_eviction_time` cvr.rs:265 | ✅ exact |
+| `newQueryRecord` | cvr.ts:1167 | `new_query_record` cvr.rs:98 | ✅ exact |
 | `assert` | cvr.ts:1186 | Rust assert! macro | 📌 idiom (D-16) |
 | `RowRecordCache` | row-record-cache.ts:90 | `RowRecordCache` row_record_cache.rs:190 | ✅ exact |
 | `recordSyncFlushStats` | row-record-cache.ts:144 | `record_sync_flush_stats` otel_metrics.rs:169 | ✅ exact |
@@ -450,6 +459,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `versionFromString` | schema/types.ts:322 | `version_from_string` schema/types.rs:225 | ✅ exact |
 | `queryRecordToQueryRow` | schema/types.ts:342 | `query_record_to_query_row` schema/types.rs:488 | ✅ exact |
 | `maybeVersionString` | schema/types.ts:392 | `maybe_version_string` schema/types.rs:189 | ✅ exact |
+| `stringCompare` | shared/string-compare.ts:1 | `string_compare` shared/string_compare.rs:15 | ✅ exact |
 | `TTLClock` | ttl-clock.ts:5 | `TTLClock` ttl_clock.rs:5 | ✅ exact |
 | `ttlClockSchema` | ttl-clock.ts:7 | — | 🟥 UNRESOLVED |
 | `ttlClockAsNumber` | ttl-clock.ts:9 | IDENTITY | 📌 TTLClock = i64 (ttl_clock.rs); no conversion |
