@@ -460,9 +460,19 @@ impl PokeHandler {
         } else {
             let base = self.base_version.lock().unwrap();
             if cmp_versions(&base, &Some(final_version.clone())) != Ordering::Less {
+                // `state.poke_id` IS the tentative version this poke was
+                // started with (`start_poke` sets it to `version_string(
+                // tentative_version)`), and it is the field that says WHICH way
+                // this fired: `poke_id == final` means the client's base moved
+                // after `start_poke`'s caught-up guard passed, while
+                // `poke_id > final` means the CVR ended below the version the
+                // poke was opened for. The message carried only final+base, so
+                // production could not tell them apart. TS keeps the same
+                // context (`lc.withContext('pokeID', pokeID)`,
+                // client-handler.ts:190).
                 let error = format!(
-                    "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?}",
-                    final_version, *base
+                    "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?} (pokeID {})",
+                    final_version, *base, state.poke_id
                 );
                 drop(base);
                 self.release_chain(&mut state);
