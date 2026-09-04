@@ -3444,8 +3444,14 @@ impl ViewSyncerService {
                     // drift). Port of TS `ResetPipelinesSignal` handling: the
                     // in-flight poke was already cancelled; re-init the pipeline
                     // and re-hydrate every query from scratch.
+                    // TS logs `result.message` (the detailed signal text) and
+                    // labels the metric with `result.reason`
+                    // (view-syncer.ts:573-574). `reset_msg` carries the arm that
+                    // fired plus elapsed/budget/pos — without it the log cannot
+                    // say WHY the advance was abandoned.
                     self.metrics.record_reset(&reason);
-                    self.reset_pipelines_and_rehydrate(result.cvr, &reason)
+                    let message = result.reset_msg.clone().unwrap_or_else(|| reason.clone());
+                    self.reset_pipelines_and_rehydrate(result.cvr, &message)
                         .await;
                 } else {
                     self.mark_version_served(&result.cvr.version);
@@ -3463,9 +3469,12 @@ impl ViewSyncerService {
     /// re-hydrate every query currently in the CVR. Port of the reset branch in
     /// TS `#syncQueryPipelines`: `#pipelines.reset()` then re-run the query
     /// pipeline set. Called when `advance_and_sync` reports a reset.
-    async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {
-        // TS view-syncer.ts:573 `lc.info?.(`resetting pipelines: ${result.message}`)`.
-        tracing::info!(cg_id = %self.cg_id, "resetting pipelines: {reason}");
+    async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, message: &str) {
+        // TS view-syncer.ts:573 `lc.info?.(`resetting pipelines: ${result.message}`)`
+        // — the DETAILED signal text (which budget arm fired, elapsed vs the
+        // hydration budget, pos/numChanges), not the coarse `result.reason`,
+        // which TS uses only as the `#pipelineResets` metric label (:574).
+        tracing::info!(cg_id = %self.cg_id, "resetting pipelines: {message}");
         // TS `#pipelines.reset(clientSchema)` (view-syncer.ts:575) with
         // `must(cvr.clientSchema, 'cvr.clientSchema missing after initialization')`
         // (:548-551); the ProtocolError `#initAndResetCommon` throws fails the
@@ -3529,6 +3538,19 @@ impl ViewSyncerService {
         // everyone to the new version; later passes then find their queries
         // running and their catch-up interval empty (cheap no-ops).
         let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
+        // TS's post-reset rehydrate is CVR-driven, not client-driven:
+        // `#hydrateUnchangedQueries(lc, cvr)` then `#syncQueryPipelineSet(lc,
+        // cvr, 'missing', undefined, driftedQueryIDs)` (view-syncer.ts:592-605)
+        // run ONCE off the CVR's query set with `connCtx === undefined` — the
+        // background connection's context — and never iterate `#clients`. A CG
+        // is still notified after its last client drops (the reap has not fired
+        // yet), and TS rebuilds the pipelines on that pass too. The per-client
+        // loop below would skip the rehydrate entirely for an empty client set
+        // and then `mark_version_served` a version it never hydrated or poked,
+        // leaving the engine on the stale snapshot with an empty pipeline set
+        // (so `total_hydration_time_ms` — the advance budget — reads 0) and
+        // recording a phantom e2e serving-lag observation. Run TS's pass with
+        // no poke targets.
         for (client_id, ws_id) in clients {
             let state_version = self
                 .pipelines()

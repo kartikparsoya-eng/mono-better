@@ -1872,6 +1872,99 @@ impl Default for CancellationToken {
 }
 
 #[cfg(test)]
+mod advance_reset_message_tests {
+    //! The reset signal's MESSAGE is the only record of why an advance was
+    //! abandoned. TS logs it verbatim (`resetting pipelines: ${result.message}`,
+    //! view-syncer.ts:573) and its text names the arm, the elapsed cost, the
+    //! hydration budget and the position in the change batch
+    //! (pipeline-driver.ts:1149-1155).
+    //!
+    //! Worth pinning: the 60-minute dual prod-trace replay (2026-09-04, rev
+    //! 5f3beaaef) logged 25,713 `advancement-timeout` resets against TS's 6, and
+    //! the cause could not be read from the rust logs because the syncer was
+    //! printing the coarse `reason` instead of this text. A message that drops
+    //! its numbers makes that class of divergence undiagnosable.
+    use super::advance_reset_error;
+    use crate::advance_gate::AdvanceReset;
+
+    fn msg(reset: AdvanceReset, elapsed: f64, budget: f64, pos: usize, n: usize) -> String {
+        match advance_reset_error(reset, elapsed, budget, pos, n) {
+            crate::snapshotter::DiffError::Reset(sig) => {
+                assert_eq!(sig.reason, "advancement-timeout", "TS reason label");
+                sig.msg
+            }
+            other => panic!("expected a Reset signal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_arm_reports_its_cost_budget_and_position() {
+        let timeout = msg(AdvanceReset::Timeout, 812.0, 96.0, 7, 40);
+        for needle in ["812", "96", "7/40"] {
+            assert!(
+                timeout.contains(needle),
+                "timeout message must carry {needle}: {timeout}"
+            );
+        }
+
+        let slow = msg(
+            AdvanceReset::SlowCurrentChange {
+                current_change_ms: 543.0,
+            },
+            600.0,
+            96.0,
+            3,
+            40,
+        );
+        for needle in ["543", "96", "3/40"] {
+            assert!(
+                slow.contains(needle),
+                "slow-change message must carry {needle}: {slow}"
+            );
+        }
+
+        let projected = msg(
+            AdvanceReset::Projected {
+                projected_ms: 900.0,
+            },
+            200.0,
+            96.0,
+            9,
+            40,
+        );
+        for needle in ["900", "96", "9/40", "200"] {
+            assert!(
+                projected.contains(needle),
+                "projected message must carry {needle}: {projected}"
+            );
+        }
+
+        let ceiling = msg(
+            AdvanceReset::WallClockCeiling { wall_ms: 61_000.0 },
+            5.0,
+            96.0,
+            1,
+            40,
+        );
+        for needle in ["61000", "1/40"] {
+            assert!(
+                ceiling.contains(needle),
+                "wall-clock message must carry {needle}: {ceiling}"
+            );
+        }
+
+        // The four arms must be distinguishable — a single generic string would
+        // leave the 25,713-vs-6 divergence unattributable.
+        let all = [&timeout, &slow, &projected, &ceiling];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "each reset arm needs a distinct message");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod scalar_reset_tests {
     use super::*;
     use crate::ivm::data::Node;
