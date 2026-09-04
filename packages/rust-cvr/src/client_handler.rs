@@ -244,6 +244,12 @@ struct PokeState {
     /// `final <= base`, so this is the version that says WHICH patch opened a
     /// poke the flush went on to discard.
     first_patch_version: Option<CVRVersion>,
+    /// Which `MultiPoker::new` call site opened this poke. There are five, and
+    /// the `Patches were sent but finalVersion ...` close could come from any —
+    /// trace adjacency was the only way to guess, which is how the
+    /// already-refuted hypotheses got their plausibility. Naming the origin
+    /// makes the failing site a FACT.
+    origin: &'static str,
 }
 
 impl PokeState {
@@ -257,6 +263,7 @@ impl PokeState {
             body_est_bytes: 0,
             poke_in_progress: false,
             first_patch_version: None,
+            origin: "unknown",
         }
     }
 }
@@ -483,8 +490,8 @@ impl PokeHandler {
                 // client-handler.ts:190).
                 let error = format!(
                     "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?} \
-                     (pokeID {}, firstPatch {:?})",
-                    final_version, *base, state.poke_id, state.first_patch_version
+                     (pokeID {}, firstPatch {:?}, origin {})",
+                    final_version, *base, state.poke_id, state.first_patch_version, state.origin
                 );
                 drop(base);
                 self.release_chain(&mut state);
@@ -991,10 +998,21 @@ pub struct MultiPoker {
 }
 
 impl MultiPoker {
-    pub fn new(clients: &[&ClientHandler], tentative_version: CVRVersion) -> Self {
+    /// `origin` labels the call site so the `finalVersion` close names where its
+    /// poke was opened. See `PokeState::origin`. Stamped here rather than
+    /// threaded through `start_poke`, which stays 1:1 with TS `startPoke`.
+    pub fn new(
+        clients: &[&ClientHandler],
+        tentative_version: CVRVersion,
+        origin: &'static str,
+    ) -> Self {
         let pokers: Vec<PokeHandler> = clients
             .iter()
-            .map(|c| c.start_poke(tentative_version.clone()))
+            .map(|c| {
+                let poker = c.start_poke(tentative_version.clone());
+                poker.state.lock().unwrap().origin = origin;
+                poker
+            })
             .collect();
         let dead = pokers.iter().map(|_| AtomicBool::new(false)).collect();
         Self { pokers, dead }
@@ -1820,7 +1838,7 @@ mod tests {
             state_version: "v2".to_string(),
             config_version: Some(1),
         };
-        let poker = MultiPoker::new(&[&failing, &healthy], tentative.clone());
+        let poker = MultiPoker::new(&[&failing, &healthy], tentative.clone(), "test");
 
         // Fan out several patches; the failing client dies on the first.
         for i in 0..5 {
@@ -1853,7 +1871,7 @@ mod tests {
             state_version: "v2".to_string(),
             config_version: Some(1),
         };
-        let poker = MultiPoker::new(&[&c1, &c2], tentative);
+        let poker = MultiPoker::new(&[&c1, &c2], tentative, "test");
 
         // Open each poke (emits pokeStart, sets started=true).
         poker.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})));

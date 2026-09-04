@@ -369,6 +369,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         // SAFETY: test-only env mutation, removed immediately after `new()`.
@@ -406,6 +407,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: None,
             },
+            "test",
         );
         // Boundary of 1: the Add flushes alone, before the Remove nets it out.
         let mut processor = ChangeProcessor::with_page_size(&mut updater, &pokers, 1);
@@ -439,6 +441,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
@@ -490,6 +493,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
@@ -557,6 +561,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
@@ -633,6 +638,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         // Use a small page size for testing
@@ -684,6 +690,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
@@ -736,6 +743,7 @@ mod tests {
                 state_version: "00".to_string(),
                 config_version: Some(1),
             },
+            "test",
         );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);

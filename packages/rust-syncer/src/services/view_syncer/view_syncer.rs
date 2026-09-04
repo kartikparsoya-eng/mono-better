@@ -9160,7 +9160,7 @@ impl ViewSyncerService {
             let clients =
                 Self::config_poke_targets(self.get_clients(poke_ws_ids), &expected_current_version);
             let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-            let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone());
+            let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone(), "config-cvr");
             for p in &config_patches {
                 pokers.add_patch(p);
             }
@@ -9845,7 +9845,7 @@ impl ViewSyncerService {
         // advances `base_version` (only `end()` does), so `catchup_from` is
         // unaffected.
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
+        let pokers = MultiPoker::new(&client_refs, cvr.version.clone(), "catchup-clients");
 
         // catchupFrom = min(cvr.version, min over connected clients' ORIGINAL
         // cookies). Port of `clients.map(c => c.version()).reduce(min, cvr.version)`
@@ -10270,7 +10270,7 @@ impl ViewSyncerService {
 
         let clients = self.get_clients(client_ids);
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, new_version);
+        let pokers = MultiPoker::new(&client_refs, new_version, "hydrate-and-sync");
         for patch in &query_patches {
             pokers.add_patch(patch);
         }
@@ -10582,7 +10582,7 @@ impl ViewSyncerService {
         // `advance_poke_targets`).
         let clients = Self::advance_poke_targets(self.get_clients(client_ids), &cvr_version);
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, pokers_version);
+        let pokers = MultiPoker::new(&client_refs, pokers_version, "advance-and-sync");
 
         {
             let mut processor = ChangeProcessor::new(&mut updater, &pokers);
@@ -10766,7 +10766,7 @@ impl ViewSyncerService {
             let poke_clients =
                 Self::config_poke_targets(clients.clone(), &expected_current_version);
             let refs: Vec<&ClientHandler> = poke_clients.iter().map(|c| c.as_ref()).collect();
-            let pokers = MultiPoker::new(&refs, cfg_cvr.version.clone());
+            let pokers = MultiPoker::new(&refs, cfg_cvr.version.clone(), "config-refs");
             for p in &patches {
                 pokers.add_patch(p);
             }
