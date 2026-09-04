@@ -3551,6 +3551,40 @@ impl ViewSyncerService {
         // (so `total_hydration_time_ms` — the advance budget — reads 0) and
         // recording a phantom e2e serving-lag observation. Run TS's pass with
         // no poke targets.
+        if clients.is_empty() {
+            let (permissions, auth_data, custom_ctx, state_version, replica_version) =
+                self.sync_query_pipeline_set_inputs(&cvr, None);
+            let shard = self.shard.clone();
+            let ttl_clock = self.get_ttl_clock(now);
+            match self
+                .sync_query_pipeline_set(
+                    cvr,
+                    CustomQueryTransformMode::Missing,
+                    &[],
+                    &shard,
+                    permissions.as_ref(),
+                    &auth_data,
+                    custom_ctx.as_ref(),
+                    state_version,
+                    replica_version,
+                    self.last_connect_time,
+                    now,
+                    ttl_clock,
+                    std::collections::HashMap::new(),
+                )
+                .await
+            {
+                Ok(c) => cvr = c,
+                Err(e) => {
+                    tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
+                    self.fail_group(&e);
+                    return;
+                }
+            }
+            self.mark_version_served(&cvr.version);
+            self.cvr = Some(cvr);
+            return;
+        }
         for (client_id, ws_id) in clients {
             let state_version = self
                 .pipelines()
@@ -4442,6 +4476,114 @@ mod tests {
         assert_eq!(
             err["message"],
             "The \"issue\" table does not exist or is not one of the replicated tables: ."
+        );
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    }
+
+    /// TS's post-reset rehydrate is CVR-driven, not client-driven:
+    /// `#hydrateUnchangedQueries(lc, cvr)` then `#syncQueryPipelineSet(lc, cvr,
+    /// 'missing', undefined, driftedQueryIDs)` (view-syncer.ts:592-605) run off
+    /// the CVR's query set with an UNDEFINED connection context and never
+    /// iterate `#clients`; `#pipelinesSynced = true` follows (:606). Rust's
+    /// reset looped over `registered_ws`, so a reset on a CG whose last client
+    /// had dropped (the 5s reap not yet fired — `on_notification` has no client
+    /// gate) rebuilt NOTHING, left `pipelines_synced` false with an empty
+    /// pipeline set, and still marked the version served. An empty pipeline set
+    /// zeroes `total_hydration_time_ms`, which IS the advance budget
+    /// (`advancementResetTimeLimitMs`, pipeline-driver.ts:191). Reverting the
+    /// `clients.is_empty()` branch fails both assertions.
+    #[test]
+    fn reset_with_no_registered_client_still_rebuilds_the_pipelines_from_the_cvr() {
+        use rusqlite::Connection;
+        let db_path = format!("/tmp/rust-syncer-reset-noclient-{}.db", std::process::id());
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "wal2");
+            let _ = conn.pragma_update(None, "journal_mode", "wal");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE "_zero.replicationConfig" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+                CREATE TABLE "_zero.replicationState" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    stateVersion TEXT NOT NULL);
+                CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "table" TEXT NOT NULL,
+                    "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, "pos" INTEGER NOT NULL,
+                    PRIMARY KEY ("stateVersion","pos"));
+                INSERT INTO "_zero.replicationConfig" VALUES ('singleton','00','[]');
+                INSERT INTO "_zero.replicationState"  VALUES ('singleton','01');
+                CREATE TABLE "issue" ("id" "text|NOT_NULL", "title" "text", "_0_version" "text",
+                    PRIMARY KEY ("id"));
+                INSERT INTO "issue" VALUES ('i1','one','01');
+                CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);
+                "#,
+            )
+            .unwrap();
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(PermsReloadFactory {
+            handle: rt.handle().clone(),
+            replica_path: db_path.clone(),
+            initial_hash: None,
+            initial_permissions: Some(serde_json::json!({"tables": {}})),
+        });
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        // A CVR carrying one gotten query, and NO registered connection: the
+        // last client dropped but the CG has not been reaped yet.
+        let mut cvr = empty_cvr("cg1", "00");
+        cvr.client_schema = Some(serde_json::json!({
+            "tables": {"issue": {"columns": {"id": {"type": "string"}}, "primaryKey": ["id"]}}
+        }));
+        cvr.queries.insert(
+            "q1".to_string(),
+            QueryRecord::Client(rust_cvr::schema::types::ClientQueryRecord {
+                base: rust_cvr::schema::types::BaseQueryRecord {
+                    id: "q1".to_string(),
+                    transformation_hash: None,
+                    transformation_version: None,
+                    row_set_signature: None,
+                },
+                ast: serde_json::json!({"table": "issue"}),
+                client_state: std::collections::BTreeMap::new(),
+                patch_version: None,
+            }),
+        );
+        assert!(
+            state.registered_ws.is_empty(),
+            "the fixture must have no registered connection"
+        );
+        state.pipelines_synced = true;
+        rt.block_on(state.reset_pipelines_and_rehydrate(cvr, "advancement-timeout"));
+        assert!(
+            !state.terminal,
+            "a clientless reset must not fail the group"
+        );
+        assert!(
+            state.pipelines_synced,
+            "TS re-syncs the pipeline set from the CVR after a reset and sets \
+             #pipelinesSynced = true (view-syncer.ts:599-606); rust left it false"
+        );
+        assert_eq!(
+            state.query_count(),
+            1,
+            "the CVR's query must be back in the pipelines — an empty pipeline set \
+             zeroes total_hydration_time_ms, the advance budget"
         );
         for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
