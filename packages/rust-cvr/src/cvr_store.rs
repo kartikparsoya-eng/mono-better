@@ -737,19 +737,21 @@ impl CVRStoreHandle {
         // not-yet-queued derivable instance write but includes any pre-queued one.
         if self.pending.is_empty() {
             // Composition of the pending set at a NO-OP flush. A no-op reverts
-            // the CVR to `orig`, discarding whatever version this pass produced
-            // — harmless on its own, but if a patch was also poked at the
-            // discarded version the client is CLOSED with
-            // `Patches were sent but finalVersion ...` (rust 434 vs TS 0 on
-            // identical traffic). `pruned` is the giveaway: row records that
-            // were queued and then dropped as unchanged mean rows were
-            // "received" without changing anything, which is the case TS's
-            // design says cannot coexist with an emitted patch.
-            // Ungated: the gated version logged only 6 of 248 failing passes,
-            // so the MAJORITY shape (no rows queued at all, yet a patch was
-            // still poked at the discarded version) was invisible.
+            // the CVR to `orig`, discarding whatever version this pass produced.
+            // Rust-only diagnostics (TS logs nothing here), kept at `debug` —
+            // a no-op flush is NORMAL and frequent, which is why TS's
+            // `#updateCVRConfig` guards its poke on the version having actually
+            // advanced.
+            //
+            // RESOLVED (c4d8b2dd3): this log was added ungated at `info` to
+            // diagnose the `Patches were sent but finalVersion ...` closes
+            // (rust 434 vs TS 0 on identical traffic). The cause was not the
+            // no-op flush itself but the config poke being OPENED BEFORE it, so
+            // a discarded version bump reached an already-open poke. Both
+            // `#updateCVRConfig` ports now flush first; a no-op flush no longer
+            // implies a failing pass, so the volume no longer belongs at `info`.
             {
-                tracing::info!(
+                tracing::debug!(
                     cvr_id = %self.cvr_id,
                     "no-op CVR flush discarding version {}: rows_queued={} rows_pruned={} \
                      (clients_ins={} clients_del={} queries={} partial={} desires={} instance={})",
