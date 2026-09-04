@@ -9671,6 +9671,18 @@ impl ViewSyncerService {
             return Ok(());
         }
 
+        // TS creates the pokers BEFORE gathering any patches
+        // (view-syncer.ts:2400 `const pokers = usePokers ?? startPoke(...)`) and
+        // ends them unconditionally (2464-2467) — there is no empty-patch-set
+        // early return. That is what delivers the forced empty initial poke to a
+        // client with nothing to catch up on, so it "can learn its got-queries
+        // state has been reconciled with the server" (client-handler.ts:123).
+        // Hoisting this above the floor computation is safe: `start_poke` never
+        // advances `base_version` (only `end()` does), so `catchup_from` is
+        // unaffected.
+        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
+        let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
+
         // catchupFrom = min(cvr.version, min over connected clients' ORIGINAL
         // cookies). Port of `clients.map(c => c.version()).reduce(min, cvr.version)`
         // — but against the cycle-start snapshot, since each client's live
@@ -9689,16 +9701,14 @@ impl ViewSyncerService {
                 catchup_started.elapsed().as_secs_f64() * 1000.0
             ),
         );
-        if patches.is_empty() {
-            return Ok(());
-        }
 
-        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
         for p in &patches {
             pokers.add_patch(p);
         }
         pokers.end(cvr.version.clone());
+        // TS `this.#markVersionServed(cvr.version)` runs right after
+        // `pokers.end(...)` in the same `!usePokers` branch (view-syncer.ts:2466).
+        self.mark_version_served(&cvr.version);
         Ok(())
     }
 
@@ -12484,8 +12494,24 @@ mod engine_tests {
         );
     }
 
+    /// TS `#catchupClients` creates the pokers BEFORE gathering any patches and
+    /// ends them unconditionally (view-syncer.ts:2400 + 2464-2467), so a client
+    /// with NOTHING to catch up on still receives the forced empty initial poke
+    /// — client-handler.ts:123: "We will send a poke on connect even if the
+    /// client is already caught up, so that it can learn its got-queries state
+    /// has been reconciled with the server" — and the version is marked served.
+    ///
+    /// rust used to `return Ok(())` the moment the patch set came back empty,
+    /// which skipped BOTH the poke and `mark_version_served`. The 60-minute dual
+    /// replay's frameseq gate caught it on 2026-09-04 as 4 client groups with
+    /// rust=1 frame (`connected`) against ts=3 (`connected`, `pokeStart`,
+    /// `pokeEnd`) — a client that never learns its queries were reconciled.
+    ///
+    /// The predecessor of this test (`catchup_clients_without_store_is_noop`)
+    /// only asserted that the call did not panic, so it passed both before and
+    /// after the fix; it is tightened here to pin the frames themselves.
     #[tokio::test]
-    async fn catchup_clients_without_store_is_noop() {
+    async fn catchup_clients_pokes_even_when_there_are_no_patches() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -12493,17 +12519,18 @@ mod engine_tests {
             app_id: "app".to_string(),
             shard_num: 0,
         };
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         engine.register_client(
             "client1",
             "ws1",
             "cg1",
             &shard,
-            None,
+            None, // baseCookie None => never poked => forceInitialPoke
             Arc::new(DirectWebSocketSink::new(tx)),
         );
         let cvr = super::empty_cvr("cg1", "v1");
-        // No store set → catchup returns Ok(()) without touching PG.
+        // No store → `gather_catchup_patches` yields an EMPTY patch set, the
+        // same branch a live CG takes when it has nothing to catch up on.
         engine
             .catchup_clients(
                 &cvr,
@@ -12514,6 +12541,29 @@ mod engine_tests {
             )
             .await
             .unwrap();
+
+        let mut frames = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let WsCommand::Send { msg, .. } = cmd {
+                frames.push(
+                    msg.get(0)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                );
+            }
+        }
+        assert_eq!(
+            frames,
+            vec!["pokeStart".to_string(), "pokeEnd".to_string()],
+            "an empty catch-up must still emit the forced initial poke (TS \
+             #catchupClients starts the pokers before gathering patches)"
+        );
+        assert_eq!(
+            engine.served_version.as_deref(),
+            Some(cvr.version.state_version.as_str()),
+            "TS marks the version served after pokers.end(), even with no patches"
+        );
     }
 
     /// Regression for reconnect catch-up: the floor must be each client's cookie
