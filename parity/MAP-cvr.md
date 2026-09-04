@@ -2,8 +2,8 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **178**, Rust **349** · resolved pairs **117** (exact 117 + fuzzy 0) + aliases 19
-- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **232**
+- symbols: TS **178**, Rust **352** · resolved pairs **117** (exact 117 + fuzzy 0) + aliases 19
+- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **235**
 
 ## 1 · File structure diff
 
@@ -21,7 +21,7 @@ TS origin files: **9**  ·  Rust files: **23** (10 new)
 | `shared/string-compare.ts` (9) | **1:1** | `shared/string_compare.rs` (1) |
 | `ttl-clock.ts` (15) | **1:1** | `ttl_clock.rs` (3) |
 
-**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `hash.rs` (75), `lib.rs` (36), `parity_check.rs` (1657), `row_key.rs` (318), `schema/mod.rs` (6), `shards.rs` (28), `shared.rs` (4), `tracer.rs` (41), `ttl.rs` (145)
+**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `hash.rs` (75), `lib.rs` (36), `parity_check.rs` (1657), `row_key.rs` (318), `schema/mod.rs` (6), `shards.rs` (77), `shared.rs` (4), `tracer.rs` (41), `ttl.rs` (145)
 
 **Merges (many TS → one Rust file):**
 - `otel_metrics.rs` ⟵ `cvr-store.ts`, `row-record-cache.ts`
@@ -254,7 +254,7 @@ TS origin files: **9**  ·  Rust files: **23** (10 new)
 ### `shards.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (3):** `ShardID`, `app_schema`, `cvr_schema`
+🟦 **Rust-only added here (6):** `ALLOWED_APP_ID_CHARACTERS`, `INVALID_APP_ID_MESSAGE`, `ShardID`, `app_schema`, `check`, `cvr_schema`
 
 ### `shared/string_compare.rs`  ⟵  `shared/string-compare.ts`
 

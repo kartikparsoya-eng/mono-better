@@ -49,6 +49,56 @@ pub struct IvmColumnSchema {
     pub optional: bool,
 }
 
+/// Port of TS `PipelineDriver#initAndResetCommon(clientSchema)`
+/// (pipeline-driver.ts:354-372) minus the engine (re)build that follows it in
+/// rust (`IvmPipelines::init`): recompute the replica's `tableSpecs` +
+/// `fullTables` from the CURRENT replica schema, then `checkClientSchema`. The
+/// state TS keeps on the driver (`#tableSpecs`, `#shardID`) is passed in
+/// because rust keeps it on the service (`tables` / `full_tables`). The init
+/// half is CG creation (`server/syncer.rs` computes the specs) + the
+/// initConnection check; the reset half is `reset_pipelines_and_rehydrate`,
+/// which fails the group with the returned body (TS: the thrown ProtocolError
+/// fails the view syncer).
+// The Err IS the wire body TS throws (ProtocolError.errorBody).
+#[allow(clippy::result_large_err)]
+pub fn init_and_reset_common(
+    replica_path: Option<&str>,
+    shard: &rust_cvr::shards::ShardID,
+    client_schema: &serde_json::Value,
+    tables: &mut Vec<IvmTableSpec>,
+    full_tables: &mut Vec<crate::db::specs::LiteTableSpec>,
+) -> Result<(), crate::protocol::ErrorBody> {
+    // Schema-change resets must re-read the replica schema. Reusing the specs
+    // captured at CG creation would rebuild the engine with the same stale
+    // table/column set and either reset-loop or serve an obsolete schema.
+    if let Some(path) = replica_path {
+        // pipeline-driver.ts:357-363 `computeZqlSpecs(lc, db,
+        // {includeBackfillingColumns: false}, tableSpecs, fullTables)`.
+        match crate::db::lite_tables::open_replica_read_only(path).and_then(|conn| {
+            crate::db::lite_tables::compute_zql_specs(
+                &conn,
+                &crate::db::lite_tables::ZqlSpecOptions {
+                    include_backfilling_columns: false,
+                },
+                Some(full_tables),
+            )
+        }) {
+            Ok(specs) => *tables = specs,
+            Err(e) => {
+                tracing::error!("schema reload after reset failed: {e}");
+                return Err(crate::protocol::ErrorBody::internal(e));
+            }
+        }
+    }
+    // pipeline-driver.ts:364-369.
+    crate::services::view_syncer::client_schema::check_client_schema(
+        shard,
+        client_schema,
+        tables,
+        full_tables,
+    )
+}
+
 /// Table spec used to build a `TableSource` and the snapshotter diff spec.
 #[derive(Clone, Debug)]
 pub struct IvmTableSpec {

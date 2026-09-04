@@ -598,9 +598,21 @@ failing-first:
 ### Open gaps (GAP-n — cited by `HELPER_ALIASES`; closing one deletes its row)
 | id | gap | where | risk |
 |---|---|---|---|
-| GAP-1 | `ColumnMetadataStore` precedence: TS `listTables` reads `_zero.column_metadata` (upstream type / isEnum / isArray / isNotNull / backfilling) FIRST and falls back to the pragma type; rust reads the pragma type only (`db/lite_tables.rs read_table_spec`). Identical while the replicator writes the same pipe-notation into both; diverges if metadata is updated without a table rewrite, and rust never excludes BACKFILLING columns. | lite-tables.ts:47-124 | medium (schema-change windows) |
-| GAP-2 | `ALLOWED_APP_ID_CHARACTERS` / `INVALID_APP_ID_MESSAGE`: TS rejects an invalid `appID` at config parse (zero-config.ts:38); rust accepts any string. | zero-config.ts:38, shards.ts | low (startup config) |
-| GAP-3 | `checkClientSchema` runs in TS `#initAndResetCommon` on EVERY pipeline reset (schema change) as well as init; rust re-reads specs + fullTables on reset (`reset_pipelines_and_rehydrate`) but only re-checks the client schema at initConnection. | pipeline-driver.ts:354-372 | low-medium |
+| — | none open (GAP-1/2/3 closed 2026-09-04, same day, see below) | | |
+
+Closed 2026-09-04 (each with a test proven failing-first):
+- GAP-1 `ColumnMetadataStore` precedence + backfilling exclusion → ported read side
+  `services/replicator/schema/column_metadata.rs` (`get_instance`/`get_column`/
+  `metadata_to_lite_type_string`), `ZqlSpecOptions{include_backfilling_columns}`
+  (`lite_tables.rs`, serving path passes `false` like pipeline-driver.ts:359);
+  `column_metadata_overrides_the_declared_type_and_hides_backfilling_columns`.
+- GAP-2 appID charset → `rust-cvr/shards.rs` `ALLOWED_APP_ID_CHARACTERS` /
+  `INVALID_APP_ID_MESSAGE` / `check`, asserted at config load
+  (`zero_config.rs validated_app_id`); `invalid_app_id_is_a_fatal_config_error`.
+- GAP-3 client-schema re-check on reset → `view_syncer.rs init_and_reset_common`
+  (TS `#initAndResetCommon`) called from `reset_pipelines_and_rehydrate`, failing
+  the group with the TS body; `reset_rechecks_the_client_schema_against_the_reread_replica`
+  (live on-disk replica, DROP TABLE, real reset path).
 
 ### Queued next (small, self-contained — good pickups)
 - [x] **P7-a** (Part 5) — RETRACTED as a false divergence + REAL fix DONE

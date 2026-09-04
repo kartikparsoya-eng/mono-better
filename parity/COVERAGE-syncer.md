@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **546** · ✅ COVERED **502** · 🟥 GAP (pure, untested) **11** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **502/513 = 98%**
+- Rust fns total **552** · ✅ COVERED **508** · 🟥 GAP (pure, untested) **11** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **508/519 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -31,7 +31,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 502
+## ✅ COVERED — body pinned to TS fixture — 508
 
 | fn | file | signature |
 |---|---|---|
@@ -107,6 +107,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `is_admin_password_valid` | config/zero_config.rs | `pub fn is_admin_password_valid(` |
 | `parse_cpu_max` | config/zero_config.rs | `pub(crate) fn parse_cpu_max(s: &str) -> Option<usize> {` |
 | `parse_query_config` | config/zero_config.rs | `fn parse_query_config() -> Option<crate::FetchConfig> {` |
+| `validated_app_id` | config/zero_config.rs | `fn validated_app_id(app_id: String) -> String {` |
 | `warn_if_quota_capped` | config/zero_config.rs | `pub fn warn_if_quota_capped() {` |
 | `get_backoff_delay_ms` | custom/fetch.rs | `pub(crate) fn get_backoff_delay_ms(attempt: u32) -> u64 {` |
 | `read_body_preview` | custom/fetch.rs | `pub(crate) async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Option<St…` |
@@ -133,9 +134,11 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `validation_of` | custom_queries/transform_query.rs | `fn validation_of(response: &Value) -> ConnectionValidation {` |
 | `compute_table_specs_from_path` | db/lite_tables.rs | `pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, S…` |
 | `compute_zql_specs` | db/lite_tables.rs | `pub fn compute_zql_specs(` |
+| `default` | db/lite_tables.rs | `fn default() -> Self {` |
 | `list_tables` | db/lite_tables.rs | `fn list_tables(conn: &Connection) -> Result<Vec<String>, String> {` |
 | `list_unique_indexes` | db/lite_tables.rs | `fn list_unique_indexes(conn: &Connection) -> Result<HashMap<String, Vec<Vec<String>>>, …` |
 | `lite_table_name` | db/lite_tables.rs | `fn lite_table_name(schema: &str, table: &str) -> String {` |
+| `lite_type_string` | db/lite_tables.rs | `pub fn lite_type_string(` |
 | `lite_type_to_zql_value_type` | db/lite_tables.rs | `pub fn lite_type_to_zql_value_type(lite_type: &str) -> Option<&'static str> {` |
 | `open_replica_read_only` | db/lite_tables.rs | `pub fn open_replica_read_only(replica_path: &str) -> Result<Connection, String> {` |
 | `read_min_row_versions` | db/lite_tables.rs | `fn read_min_row_versions(conn: &Connection) -> Result<HashMap<String, String>, String> {` |
@@ -156,7 +159,6 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `add` | observability/metrics.rs | `pub fn add(field: &AtomicU64, n: u64) {` |
 | `cvr_attempt_otel` | observability/metrics.rs | `fn cvr_attempt_otel() -> &'static CvrAttemptOtel {` |
 | `cvr_flush_failures` | observability/metrics.rs | `fn cvr_flush_failures() -> &'static Counter<u64> {` |
-| `default` | observability/metrics.rs | `fn default() -> Self {` |
 | `failed_client_groups` | observability/metrics.rs | `fn failed_client_groups() -> &'static Counter<u64> {` |
 | `fmt` | observability/metrics.rs | `fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {` |
 | `now_ms` | observability/metrics.rs | `fn now_ms() -> i64 {` |
@@ -246,6 +248,9 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `relay_body` | services/mutagen/pusher.rs | `fn relay_body(` |
 | `set_auth_fail_hook` | services/mutagen/pusher.rs | `fn set_auth_fail_hook(&self, hook: AuthFailHook) {` |
 | `set_validate_hook` | services/mutagen/pusher.rs | `fn set_validate_hook(&self, hook: ValidateHook) {` |
+| `get_column` | services/replicator/schema/column_metadata.rs | `pub fn get_column(&self, table_name: &str, column_name: &str) -> Option<&ColumnMetadata> {` |
+| `get_instance` | services/replicator/schema/column_metadata.rs | `pub fn get_instance(conn: &Connection) -> Result<Option<Self>, String> {` |
+| `metadata_to_lite_type_string` | services/replicator/schema/column_metadata.rs | `pub fn metadata_to_lite_type_string(metadata: &ColumnMetadata) -> String {` |
 | `ivm_row_to_json` | services/run_ast.rs | `pub(crate) fn ivm_row_to_json(row: &Row) -> serde_json::Value {` |
 | `ivm_value_to_json` | services/run_ast.rs | `pub(crate) fn ivm_value_to_json(v: &Value) -> serde_json::Value {` |
 | `rows_by_source_to_json` | services/run_ast.rs | `fn rows_by_source_to_json(src: &rust_ivm::builder::debug_delegate::RowsBySource) -> Row…` |
@@ -322,6 +327,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `hydrate_analyze` | services/view_syncer/pipeline_driver.rs | `pub fn hydrate_analyze(` |
 | `hydration_time_ms` | services/view_syncer/pipeline_driver.rs | `pub fn hydration_time_ms(&self, query_id: &str) -> Option<f64> {` |
 | `init` | services/view_syncer/pipeline_driver.rs | `pub fn init(` |
+| `init_and_reset_common` | services/view_syncer/pipeline_driver.rs | `pub fn init_and_reset_common(` |
 | `init_from_connection` | services/view_syncer/pipeline_driver.rs | `pub fn init_from_connection(` |
 | `initialized` | services/view_syncer/pipeline_driver.rs | `pub fn initialized(&self) -> bool {` |
 | `json_to_value` | services/view_syncer/pipeline_driver.rs | `pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value {` |

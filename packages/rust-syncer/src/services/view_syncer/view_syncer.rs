@@ -3466,20 +3466,28 @@ impl ViewSyncerService {
     async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {
         // TS view-syncer.ts:573 `lc.info?.(`resetting pipelines: ${result.message}`)`.
         tracing::info!(cg_id = %self.cg_id, "resetting pipelines: {reason}");
-        // Schema-change resets must re-read the replica schema. Reusing the specs
-        // captured at CG creation would rebuild the engine with the same stale
-        // table/column set and either reset-loop or serve an obsolete schema.
-        if let Some(path) = self.replica_path.as_deref() {
-            match crate::db::lite_tables::open_replica_read_only(path).and_then(|conn| {
-                crate::db::lite_tables::compute_zql_specs(&conn, Some(&mut self.full_tables))
-            }) {
-                Ok(tables) => self.tables = tables,
-                Err(e) => {
-                    tracing::error!("CG {}: schema reload after reset failed: {e}", self.cg_id);
-                    self.fail_group(&e.to_string());
-                    return;
-                }
-            }
+        // TS `#pipelines.reset(clientSchema)` (view-syncer.ts:575) with
+        // `must(cvr.clientSchema, 'cvr.clientSchema missing after initialization')`
+        // (:548-551); the ProtocolError `#initAndResetCommon` throws fails the
+        // view syncer, i.e. every connection gets the body.
+        let Some(client_schema) = cvr.client_schema.clone() else {
+            self.fail_group("cvr.clientSchema missing after initialization");
+            return;
+        };
+        if let Err(body) = crate::services::view_syncer::pipeline_driver::init_and_reset_common(
+            self.replica_path.as_deref(),
+            &self.shard,
+            &client_schema,
+            &mut self.tables,
+            &mut self.full_tables,
+        ) {
+            tracing::error!(
+                "CG {}: pipeline reset rejected the client schema: {}",
+                self.cg_id,
+                body.message()
+            );
+            self.fail_group_with_error(body);
+            return;
         }
         // Re-init the engine against a fresh snapshot; this clears every hydrated
         // query so the rehydrate below re-adds the full set.
@@ -4326,6 +4334,94 @@ mod tests {
         assert_eq!(state.permissions, Some(serde_json::json!({"tables": {}})));
         assert_eq!(state.metrics.snapshot()["permissionReloads"], 0);
         for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    }
+
+    /// TS `#pipelines.reset(clientSchema)` → `#initAndResetCommon` re-runs
+    /// `checkClientSchema` against the RE-READ replica schema on every reset
+    /// (pipeline-driver.ts:343-369); the thrown ProtocolError fails the view
+    /// syncer, so a schema change that drops a table the client declares ends
+    /// every connection with `SchemaVersionNotSupported`. Before this port rust
+    /// only checked at initConnection: the reset rebuilt an empty pipeline and
+    /// the client silently kept syncing nothing.
+    #[test]
+    fn reset_rechecks_the_client_schema_against_the_reread_replica() {
+        use rusqlite::Connection;
+        let db_path = format!("/tmp/rust-syncer-reset-schema-{}.db", std::process::id());
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "wal2");
+            let _ = conn.pragma_update(None, "journal_mode", "wal");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE "_zero.replicationConfig" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+                CREATE TABLE "_zero.replicationState" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    stateVersion TEXT NOT NULL);
+                CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "table" TEXT NOT NULL,
+                    "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, "pos" INTEGER NOT NULL,
+                    PRIMARY KEY ("stateVersion","pos"));
+                INSERT INTO "_zero.replicationConfig" VALUES ('singleton','00','[]');
+                INSERT INTO "_zero.replicationState"  VALUES ('singleton','01');
+                CREATE TABLE "issue" ("id" "text|NOT_NULL", "title" "text", "_0_version" "text",
+                    PRIMARY KEY ("id"));
+                CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);
+                "#,
+            )
+            .unwrap();
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(PermsReloadFactory {
+            handle: rt.handle().clone(),
+            replica_path: db_path.clone(),
+            initial_hash: None,
+            initial_permissions: Some(serde_json::json!({"tables": {}})),
+        });
+        let global = Arc::new(Mutex::new(HashMap::new()));
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            global,
+            count,
+        );
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let mut cvr = empty_cvr("cg1", "00");
+        cvr.client_schema = Some(serde_json::json!({
+            "tables": {"issue": {"columns": {"id": {"type": "string"}}, "primaryKey": ["id"]}}
+        }));
+        // The replica schema changes underneath the CG: the declared table is gone.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(r#"DROP TABLE "issue";"#).unwrap();
+        }
+        assert!(!state.terminal, "the engine must be live before the reset");
+        rt.block_on(state.reset_pipelines_and_rehydrate(cvr, "schema change"));
+        let errors = error_bodies(&mut drx);
+        let err = errors.last().cloned().unwrap_or_else(|| {
+            panic!("the reset must fail the connection with the TS error body; got {errors:?}")
+        });
+        assert_eq!(err["kind"], "SchemaVersionNotSupported");
+        assert_eq!(
+            err["message"],
+            "The \"issue\" table does not exist or is not one of the replicated tables: ."
+        );
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
     }
