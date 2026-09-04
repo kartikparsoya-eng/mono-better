@@ -52,7 +52,8 @@ fn plan_ast_against_replica() {
     let ast_path = std::env::var("AST").expect("set AST=/path/to/ast.json");
 
     let conn = open_replica_read_only(&replica).expect("open replica");
-    let specs = compute_zql_specs(&conn, None).expect("compute_zql_specs");
+    let specs = compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+        .expect("compute_zql_specs");
     eprintln!("tableSpecs: {}", specs.len());
 
     let table_specs: HashMap<String, HashMap<String, ColumnType>> = specs

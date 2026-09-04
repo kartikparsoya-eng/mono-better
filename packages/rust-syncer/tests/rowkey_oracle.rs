@@ -102,7 +102,13 @@ fn rowkey_oracle_pins_diverging_table() {
     // Real production key selection over the real replica schema.
     let mut full_tables = Vec::new();
     let specs: Vec<IvmTableSpec> = open_replica_read_only(&replica)
-        .and_then(|conn| compute_zql_specs(&conn, Some(&mut full_tables)))
+        .and_then(|conn| {
+            compute_zql_specs(
+                &conn,
+                &rust_syncer::ZqlSpecOptions::default(),
+                Some(&mut full_tables),
+            )
+        })
         .expect("compute_zql_specs failed");
     let spec_by_name: std::collections::HashMap<&str, &IvmTableSpec> =
         specs.iter().map(|s| (s.table.as_str(), s)).collect();

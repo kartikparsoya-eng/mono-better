@@ -55,8 +55,8 @@ pub use auth::read_authorizer::{
     hash_of_ast, hash_of_name_and_args, transform_and_hash_query, transform_query,
 };
 pub use db::lite_tables::{
-    ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
-    read_replica_versions_from_path,
+    ReplicaVersions, ZqlSpecOptions, compute_table_specs_from_path, compute_zql_specs,
+    read_replica_versions, read_replica_versions_from_path,
 };
 pub use db::specs::{LiteColumnSpec, LiteTableSpec};
 pub use http_server::{

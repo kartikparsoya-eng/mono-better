@@ -17,6 +17,9 @@
 //! `TableMetadataTracker.getMinRowVersions`).
 
 use crate::db::specs::{LiteColumnSpec, LiteTableSpec};
+use crate::services::replicator::schema::column_metadata::{
+    ColumnMetadataStore, metadata_to_lite_type_string,
+};
 use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -73,7 +76,52 @@ const TEXT_ARRAY_ATTRIBUTE: &str = "|TEXT_ARRAY";
 /// Open the replica and compute its table specs.
 pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, String> {
     let conn = open_replica_read_only(replica_path)?;
-    compute_zql_specs(&conn, None)
+    compute_zql_specs(&conn, &ZqlSpecOptions::default(), None)
+}
+
+/// Port of TS `ZqlSpecOptions` (lite-tables.ts:184-196).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZqlSpecOptions {
+    /// Whether BACKFILLING columns (a `backfill` id in `_zero.column_metadata`)
+    /// are part of the computed spec. Replication logic includes them; the
+    /// serving/read path must NOT (pipeline-driver.ts:359, run-ast.ts:136,
+    /// analyze.ts:44 all pass `false`).
+    pub include_backfilling_columns: bool,
+}
+
+impl Default for ZqlSpecOptions {
+    /// Rust-only convenience: the serving-path value (`false`). TS has no
+    /// default — every caller spells the option out.
+    fn default() -> Self {
+        Self {
+            include_backfilling_columns: false,
+        }
+    }
+}
+
+/// Port of TS `liteTypeString(upstreamDataType, notNull, textEnum, textArray)`
+/// (types/lite.ts:172-190): the pipe-notation declared type.
+pub fn lite_type_string(
+    upstream_data_type: &str,
+    not_null: bool,
+    text_enum: bool,
+    text_array: bool,
+) -> String {
+    assert!(
+        !upstream_data_type.contains('|'),
+        "Upstream type should not contain |"
+    );
+    let mut type_string = upstream_data_type.to_string();
+    if not_null {
+        type_string.push_str(NOT_NULL_ATTRIBUTE);
+    }
+    if text_enum {
+        type_string.push_str(TEXT_ENUM_ATTRIBUTE);
+    }
+    if text_array {
+        type_string.push_str(TEXT_ARRAY_ATTRIBUTE);
+    }
+    type_string
 }
 
 /// Compute table specs from an open replica connection. Port of TS
@@ -84,18 +132,29 @@ pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableS
 /// `checkClientSchema` explains missing tables/columns from.
 pub fn compute_zql_specs(
     conn: &Connection,
+    options: &ZqlSpecOptions,
     mut full_tables: Option<&mut Vec<LiteTableSpec>>,
 ) -> Result<Vec<IvmTableSpec>, String> {
     let table_names = list_tables(conn)?;
     // Read unique indexes + minRowVersion once, then attach per table.
     let unique_indexes = list_unique_indexes(conn)?;
     let min_row_versions = read_min_row_versions(conn)?;
+    // TS `listTables(db, useColumnMetadata = true)`: `_zero.column_metadata`
+    // takes precedence over the SQLite declared type (lite-tables.ts:93-112).
+    let column_metadata = ColumnMetadataStore::get_instance(conn)?;
     let mut specs = Vec::with_capacity(table_names.len());
     if let Some(full) = full_tables.as_deref_mut() {
         full.clear();
     }
     for table in table_names {
-        let (full_table, spec) = read_table_spec(conn, &table, &unique_indexes, &min_row_versions)?;
+        let (full_table, spec) = read_table_spec(
+            conn,
+            &table,
+            &unique_indexes,
+            &min_row_versions,
+            column_metadata.as_ref(),
+            options,
+        )?;
         if let Some(full) = full_tables.as_deref_mut() {
             full.push(full_table);
         }
@@ -230,6 +289,8 @@ fn read_table_spec(
     table: &str,
     unique_indexes: &HashMap<String, Vec<Vec<String>>>,
     min_row_versions: &HashMap<String, String>,
+    column_metadata: Option<&ColumnMetadataStore>,
+    options: &ZqlSpecOptions,
 ) -> Result<(LiteTableSpec, Option<IvmTableSpec>), String> {
     // pragma_table_info via table-valued function; bind the table name.
     let mut stmt = conn
@@ -266,8 +327,22 @@ fn read_table_spec(
     // `fullTable.primaryKey?.includes(col)`.
     let mut declared_pk: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // TS `LiteTableSpecWithReplicationStatus.backfilling` (lite-tables.ts:113-115).
+    let mut backfilling: std::collections::HashSet<String> = std::collections::HashSet::new();
     for r in rows {
-        let (col_name, lite_type, not_null, pk_pos) = r.map_err(|e| format!("read column: {e}"))?;
+        let (col_name, declared_type, not_null, pk_pos) =
+            r.map_err(|e| format!("read column: {e}"))?;
+        // TS lite-tables.ts:93-112: "Try to read from metadata table first, fall
+        // back to SQLite column type" — the metadata row wins, and its
+        // `backfill` marks the column as backfilling.
+        let metadata = column_metadata.and_then(|store| store.get_column(table, &col_name));
+        let lite_type = match metadata {
+            Some(metadata) => metadata_to_lite_type_string(metadata),
+            None => declared_type,
+        };
+        if metadata.is_some_and(|m| m.is_backfilling) {
+            backfilling.insert(col_name.clone());
+        }
         // TS `listTables` (lite-tables.ts:100-124): every column with its raw
         // lite type, and the declared PK by `pk` position, `''`-padded.
         full_table.columns.push((
@@ -290,6 +365,11 @@ fn read_table_spec(
             // Unsupported upstream type — drop the column (matches TS visibleColumns).
             continue;
         };
+        // TS `visibleColumns` (lite-tables.ts:250-255): backfilling columns are
+        // invisible to the read path unless `includeBackfillingColumns`.
+        if !options.include_backfilling_columns && backfilling.contains(&col_name) {
+            continue;
+        }
         let optional = !lite_type.contains(NOT_NULL_ATTRIBUTE);
         if !optional {
             not_null_columns.insert(col_name.clone());
@@ -476,6 +556,63 @@ mod tests {
         );
     }
 
+    /// TS `listTables(db, useColumnMetadata = true)` (lite-tables.ts:93-112):
+    /// a `_zero.column_metadata` row overrides the SQLite declared type, and a
+    /// `backfill` id makes the column invisible to the read path
+    /// (`includeBackfillingColumns: false`, lite-tables.ts:250-255) while it
+    /// stays in `fullTables`. Before this port rust read the pragma type only
+    /// and served backfilling columns.
+    #[test]
+    fn column_metadata_overrides_the_declared_type_and_hides_backfilling_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "users" ("id" "text|NOT_NULL", "age" "text", "score" "int8|NOT_NULL");
+            CREATE UNIQUE INDEX "users_pkey" ON "users" ("id");
+            CREATE TABLE "_zero.column_metadata" (
+                table_name TEXT NOT NULL, column_name TEXT NOT NULL, upstream_type TEXT NOT NULL,
+                is_not_null INTEGER NOT NULL, is_enum INTEGER NOT NULL, is_array INTEGER NOT NULL,
+                character_max_length INTEGER, backfill TEXT, PRIMARY KEY (table_name, column_name));
+            INSERT INTO "_zero.column_metadata" VALUES ('users', 'age', 'int8', 1, 0, 0, NULL, NULL);
+            INSERT INTO "_zero.column_metadata" VALUES ('users', 'score', 'int8', 1, 0, 0, NULL, 'bf-1');
+            "#,
+        )
+        .unwrap();
+        let mut full_tables = Vec::new();
+        let specs = compute_zql_specs(
+            &conn,
+            &ZqlSpecOptions {
+                include_backfilling_columns: false,
+            },
+            Some(&mut full_tables),
+        )
+        .unwrap();
+        let users = &specs[0];
+        // metadata (int8, NOT NULL) beats the declared `text`.
+        assert_eq!(users.columns["age"].r#type, "number");
+        assert!(!users.columns["age"].optional);
+        // backfilling column hidden from the served spec ...
+        assert!(!users.columns.contains_key("score"));
+        assert_eq!(
+            users.column_order,
+            vec!["id".to_string(), "age".to_string()]
+        );
+        // ... but still a replica column (TS fullTables) with the metadata type.
+        let full = &full_tables[0];
+        assert_eq!(full.column("score").unwrap().data_type, "int8|NOT_NULL");
+        assert_eq!(full.column("age").unwrap().data_type, "int8|NOT_NULL");
+        // Replication logic sees it (`includeBackfillingColumns: true`).
+        let specs = compute_zql_specs(
+            &conn,
+            &ZqlSpecOptions {
+                include_backfilling_columns: true,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(specs[0].columns.contains_key("score"));
+    }
+
     #[test]
     fn reads_replica_table_specs() {
         let conn = Connection::open_in_memory().unwrap();
@@ -504,7 +641,8 @@ mod tests {
             .unwrap();
 
         let mut full_tables = vec![LiteTableSpec::default()];
-        let specs = compute_zql_specs(&conn, Some(&mut full_tables)).unwrap();
+        let specs =
+            compute_zql_specs(&conn, &ZqlSpecOptions::default(), Some(&mut full_tables)).unwrap();
         assert_eq!(
             specs.len(),
             1,
@@ -594,7 +732,7 @@ mod tests {
         )
         .unwrap();
 
-        let specs = compute_zql_specs(&conn, None).unwrap();
+        let specs = compute_zql_specs(&conn, &ZqlSpecOptions::default(), None).unwrap();
         assert_eq!(specs.len(), 1);
         let users = &specs[0];
 
@@ -655,7 +793,7 @@ mod tests {
         )
         .unwrap();
 
-        let specs = compute_zql_specs(&conn, None).unwrap();
+        let specs = compute_zql_specs(&conn, &ZqlSpecOptions::default(), None).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].table, "myapp.widgets");
         assert_eq!(specs[0].min_row_version.as_deref(), Some("3def"));

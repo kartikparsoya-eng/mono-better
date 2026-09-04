@@ -69,8 +69,16 @@ impl CGServicesFactory for RealServicesFactory {
         // — the syncable specs AND every replica table (`checkClientSchema` input).
         let mut full_tables = Vec::new();
         let tables = match crate::db::lite_tables::open_replica_read_only(&self.config.replica_file)
-            .and_then(|conn| crate::compute_zql_specs(&conn, Some(&mut full_tables)))
-        {
+            .and_then(|conn| {
+                // pipeline-driver.ts:359 `{includeBackfillingColumns: false}`.
+                crate::compute_zql_specs(
+                    &conn,
+                    &crate::ZqlSpecOptions {
+                        include_backfilling_columns: false,
+                    },
+                    Some(&mut full_tables),
+                )
+            }) {
             Ok(tables) => tables,
             Err(error) => {
                 initialization_errors.push(format!(

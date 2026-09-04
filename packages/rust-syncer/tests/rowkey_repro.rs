@@ -56,7 +56,9 @@ fn emitted_rowkey_cols(client_pks: Option<HashMap<String, Vec<String>>>) -> Vec<
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     // Precondition: keyCmp[0] is the shortest unique key (surrogate `id`).
     let cus = specs
         .iter()

@@ -2,5 +2,6 @@
 //! and the mutagen pusher are ported into this crate.
 pub mod analyze;
 pub mod mutagen;
+pub mod replicator;
 pub mod run_ast;
 pub mod view_syncer;

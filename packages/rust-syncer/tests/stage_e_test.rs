@@ -45,7 +45,9 @@ fn hydrate_real_rows_produces_row_pokes() {
 
     // Derive the table specs from the real replica schema (Part 1). This
     // includes `_0_version`, which the ChangeProcessor reads as the row version.
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     // Build the pipelines from that connection (no snapshotter needed to hydrate).
@@ -175,7 +177,9 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     let mut pipelines = IvmPipelines::new();
@@ -270,7 +274,9 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     let mut pipelines = IvmPipelines::new();
@@ -394,7 +400,9 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
@@ -524,7 +532,9 @@ fn partial_success_transform_hydrates_healthy_query() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
@@ -712,7 +722,9 @@ fn transform_failure_fails_only_the_offending_connection() {
         "#,
     )
     .unwrap();
-    let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+    let specs =
+        rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+            .unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
@@ -849,7 +861,9 @@ fn pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked() {
             "#,
         )
         .unwrap();
-        let specs = rust_syncer::compute_zql_specs(&conn, None).unwrap();
+        let specs =
+            rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+                .unwrap();
         let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
         let mut pipelines = IvmPipelines::new();
         pipelines.init_from_connection(specs, shared_conn).unwrap();
