@@ -10412,6 +10412,8 @@ impl ViewSyncerService {
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
+        // Version the updater PRODUCED, kept for the discarded-bump check below.
+        let attempted_version = flushed_arc.version.clone();
         let flush_started = std::time::Instant::now();
         let store_flushed = self
             .flush_to_store(&mut updater, flushed_arc.clone(), last_connect_time)
@@ -10431,7 +10433,25 @@ impl ViewSyncerService {
         let flushed_cvr = if store_flushed {
             Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
         } else {
-            updater.base.orig.clone()
+            let orig = updater.base.orig.clone();
+            // THIS is the failing path: the pokers were opened at
+            // `new_version` (the post-bump version `track_queries` returned) and
+            // the caller ends them at the reverted version, so a patch tagged
+            // with the bump starts the poke and `end()` then finds
+            // `base == final` and CLOSES the client. Logging the delta names
+            // whichever path bumped — the same-hash rehydration path was ruled
+            // OUT by production data (244 errors, ZERO such bumps).
+            if rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
+                != std::cmp::Ordering::Equal
+            {
+                tracing::info!(
+                    cg_id = %self.cg_id,
+                    "hydrate quiet commit discarded a version bump: {} -> {}",
+                    rust_cvr::schema::types::version_string(&attempted_version),
+                    rust_cvr::schema::types::version_string(&orig.version),
+                );
+            }
+            orig
         };
         // NOTE: the poke is NOT ended here — the caller ends it after appending
         // catch-up patches (or immediately, when no catch-up applies).
@@ -10584,6 +10604,9 @@ impl ViewSyncerService {
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
+        // Version the updater PRODUCED, before the flush decides whether it is
+        // material. Compared against `orig` below to catch a discarded bump.
+        let attempted_version = flushed_arc.version.clone();
         let store_flushed = self
             .flush_to_store(&mut updater, flushed_arc.clone(), last_connect_time)
             .await?;
@@ -10596,7 +10619,25 @@ impl ViewSyncerService {
         let flushed_cvr = if store_flushed {
             Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
         } else {
-            updater.base.orig.clone()
+            let orig = updater.base.orig.clone();
+            // A quiet commit that DISCARDS a version bump is the
+            // `Patches were sent but finalVersion ...` close: the pokers were
+            // opened at `attempted_version`, any patch tagged with it was
+            // admitted and started the poke, and `end(orig)` then finds
+            // `base == final`. The same-hash rehydration path was ruled OUT by
+            // production data (244 errors, ZERO of those bumps), so log the
+            // delta here to name whichever path actually bumped.
+            if rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
+                != std::cmp::Ordering::Equal
+            {
+                tracing::info!(
+                    cg_id = %self.cg_id,
+                    "quiet commit discarded a version bump: {} -> {}",
+                    rust_cvr::schema::types::version_string(&attempted_version),
+                    rust_cvr::schema::types::version_string(&orig.version),
+                );
+            }
+            orig
         };
         pokers.end(flushed_cvr.version.clone());
 
