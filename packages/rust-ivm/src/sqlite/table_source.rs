@@ -594,6 +594,12 @@ pub struct TableSource {
     /// (pipeline-driver.ts:1071); the TS ctor default is `() => false`
     /// (table-source.ts:103), which [`TableSource::new`] mirrors.
     should_yield: Rc<dyn Fn() -> bool>,
+    /// Port of TS `#getRowStmtCache` (table-source.ts:493): `getRow` SQL text
+    /// memoised by key-column list.
+    get_row_stmt_cache: RefCell<HashMap<String, String>>,
+    /// Port of TS `#stmts.cache` (table-source.ts:139 `cache: new
+    /// StatementCache(db)`): the prepared-statement LRU `getRow` runs through.
+    stmts_cache: crate::sqlite::internal::StatementCache,
 }
 
 impl TableSource {
@@ -654,6 +660,10 @@ impl TableSource {
             applied_changes: Rc::new(RefCell::new(Vec::new())),
             push_epoch: 0,
             should_yield,
+            get_row_stmt_cache: RefCell::new(HashMap::new()),
+            stmts_cache: crate::sqlite::internal::StatementCache::new(
+                crate::sqlite::internal::DEFAULT_MAX_CACHED_STATEMENTS,
+            ),
         }
     }
 
@@ -668,9 +678,15 @@ impl TableSource {
     /// Retrieve a row from the currently pinned snapshot by a unique key.
     /// Port of TS `TableSource.getRow()`, used by reconnect catch-up to rebuild
     /// persisted row patches with contents from the exact IVM snapshot.
-    pub fn get_row(&self, key: &[(String, Value)]) -> Option<Row> {
-        if key.is_empty() {
-            return None;
+    /// Port of TS `#getRowStmt(keyCols)` (zqlite/src/table-source.ts:495): the
+    /// SQL TEXT for a `getRow` on this key-column set, memoised in
+    /// `#getRowStmtCache` keyed by the column list. TS emits no `LIMIT 1` —
+    /// `getRow` takes the first row via `.get()` (rust: `query_row`), and the
+    /// lookup is by primary key, so the clause was a rust-only addition.
+    fn get_row_stmt(&self, key_cols: &[String]) -> String {
+        let key_string = format!("{key_cols:?}");
+        if let Some(sql) = self.get_row_stmt_cache.borrow().get(&key_string) {
+            return sql.clone();
         }
         let select = self
             .column_names
@@ -678,54 +694,80 @@ impl TableSource {
             .map(|column| quote_ident(column))
             .collect::<Vec<_>>()
             .join(", ");
-        let predicates = key
+        let predicates = key_cols
             .iter()
-            .map(|(column, _)| format!("{} = ?", quote_ident(column)))
+            .map(|column| format!("{}=?", quote_ident(column)))
             .collect::<Vec<_>>()
             .join(" AND ");
         let sql = format!(
-            "SELECT {select} FROM {} WHERE {predicates} LIMIT 1",
+            "SELECT {select} FROM {} WHERE {predicates}",
             quote_ident(&self.table_name)
         );
+        self.get_row_stmt_cache
+            .borrow_mut()
+            .insert(key_string, sql.clone());
+        sql
+    }
+
+    pub fn get_row(&self, key: &[(String, Value)]) -> Option<Row> {
+        if key.is_empty() {
+            return None;
+        }
+        // TS `getRow` (table-source.ts:520-528): the SQL text comes from the
+        // memoised `#getRowStmt`, and the PREPARED STATEMENT comes from
+        // `#stmts.cache.use(...)`. Both caches matter — the catch-up path calls
+        // `getRow` once per row patch, so re-preparing here put the SQLite
+        // parser (`sqlite3RunParser`) on the per-row hot path.
+        let key_cols: Vec<String> = key.iter().map(|(column, _)| column.clone()).collect();
+        let sql = self.get_row_stmt(&key_cols);
         let params: Vec<SqlParam> = key.iter().map(|(_, value)| SqlParam::from(value)).collect();
 
         let db = self.db.borrow().clone();
         let conn = db.borrow();
-        let mut stmt = conn.prepare(&sql).unwrap_or_else(|error| {
-            panic!(
-                "[rust-ivm] get_row prepare error for {}: {}",
-                self.table_name, error
-            )
-        });
-        stmt.query_row(
-            params_from_iter(params.iter().map(|param| param as &dyn rusqlite::ToSql)),
-            |raw| {
-                let mut row = FxHashMap::default();
-                for (index, column) in self.column_names.iter().enumerate() {
-                    let value = sqlite_value_to_ivm(
-                        crate::sqlite::db::read_value_lossy(raw, index),
-                        self.columns.get(column),
-                        &self.table_name,
-                        column,
-                    );
-                    row.insert(column.clone(), value);
-                }
-                Ok(Arc::new(row))
-            },
-        )
-        .optional()
-        .unwrap_or_else(|error| {
-            panic!(
-                "[rust-ivm] get_row query error for {}: {}",
-                self.table_name, error
-            )
-        })
+        self.stmts_cache
+            .use_stmt(&conn, &sql, |stmt| {
+                stmt.query_row(
+                    params_from_iter(params.iter().map(|param| param as &dyn rusqlite::ToSql)),
+                    |raw| {
+                        let mut row = FxHashMap::default();
+                        for (index, column) in self.column_names.iter().enumerate() {
+                            let value = sqlite_value_to_ivm(
+                                crate::sqlite::db::read_value_lossy(raw, index),
+                                self.columns.get(column),
+                                &self.table_name,
+                                column,
+                            );
+                            row.insert(column.clone(), value);
+                        }
+                        Ok(Arc::new(row))
+                    },
+                )
+            })
+            .optional()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "[rust-ivm] get_row query error for {}: {}",
+                    self.table_name, error
+                )
+            })
+    }
+
+    /// Prepares performed by the `getRow` statement cache. Rust-only test
+    /// observability for the TS `#stmts.cache` port — no TS twin.
+    pub fn get_row_prepares(&self) -> u64 {
+        self.stmts_cache.prepares()
     }
 
     /// Set the SQLite connection (for Snapshotter leapfrog).
     /// Port of TS `setDB` (table-source.ts:103).
     pub fn set_db(&mut self, db: Rc<RefCell<Connection>>) {
         *self.db.borrow_mut() = db;
+        // `prepare_cached` is per-Connection, so the new connection starts with
+        // an empty statement cache — mirroring TS, whose `#dbCache` is keyed by
+        // `Database` (table-source.ts:137). Reset the hit/miss bookkeeping with
+        // it. The SQL TEXT cache (`#getRowStmtCache`) is db-independent and is
+        // deliberately kept, as in TS.
+        self.stmts_cache.reset();
         self.applied_changes.borrow_mut().clear();
     }
 
@@ -1603,6 +1645,77 @@ mod advance_gate_fetch_tests {
             source
                 .get_row(&[("id".to_string(), Value::Str("missing".into()))])
                 .is_none()
+        );
+    }
+
+    /// TS `getRow` prepares its statement ONCE per SQL text: the text is
+    /// memoised in `#getRowStmtCache` (table-source.ts:495) and the prepared
+    /// statement comes from the `StatementCache` LRU
+    /// (`this.#stmts.cache.use(stmt, …)`, table-source.ts:522). rust called
+    /// `conn.prepare(&sql)` on EVERY call, so the SQLite parser ran per row.
+    ///
+    /// That matters because `getRow` is a per-row call on the catch-up hot
+    /// path: view-syncer `#catchupClients` → `#pipelines.getRow(table, rowKey)`
+    /// for every row patch (rust: `gather_catchup_patches` →
+    /// `Engine::get_row` → here). A CPU profile of the 60-minute prod-trace
+    /// replay (2026-09-04, rev 5f3beaaef) put 61% of process CPU in
+    /// `TableSource::get_row`, of which half was `sqlite3_prepare_v2` →
+    /// `sqlite3RunParser` — i.e. re-parsing this one statement.
+    #[test]
+    fn get_row_prepares_its_statement_once_not_per_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issue(id TEXT PRIMARY KEY, title TEXT);\
+             INSERT INTO issue VALUES ('i1','a'),('i2','b'),('i3','c');",
+        )
+        .unwrap();
+        let columns = HashMap::from([
+            ("id".to_string(), ColumnType::String { optional: false }),
+            ("title".to_string(), ColumnType::String { optional: true }),
+        ]);
+        let source = TableSource::new(
+            Rc::new(RefCell::new(conn)),
+            "issue",
+            columns,
+            vec!["id".to_string()],
+        );
+
+        for _ in 0..10 {
+            for id in ["i1", "i2", "i3"] {
+                assert!(
+                    source
+                        .get_row(&[("id".to_string(), Value::Str(id.into()))])
+                        .is_some(),
+                    "row {id} must still be readable through the cached statement"
+                );
+            }
+        }
+        assert_eq!(
+            source.get_row_prepares(),
+            1,
+            "30 get_row calls over one key-column set must prepare ONE statement \
+             (TS #stmts.cache.use); re-preparing puts sqlite3RunParser on the \
+             per-row catch-up path"
+        );
+
+        // TS keys `#dbCache` by Database, so a snapshot swap starts from a
+        // fresh statement cache — and must still return correct rows.
+        let next = Connection::open_in_memory().unwrap();
+        next.execute_batch(
+            "CREATE TABLE issue(id TEXT PRIMARY KEY, title TEXT);\
+             INSERT INTO issue VALUES ('i1','after-swap');",
+        )
+        .unwrap();
+        let mut source = source;
+        source.set_db(Rc::new(RefCell::new(next)));
+        let row = source
+            .get_row(&[("id".to_string(), Value::Str("i1".into()))])
+            .expect("row after snapshot swap");
+        assert_eq!(row.get("title"), Some(&Value::Str("after-swap".into())));
+        assert_eq!(
+            source.get_row_prepares(),
+            1,
+            "the swapped connection re-prepares exactly once, then caches again"
         );
     }
 

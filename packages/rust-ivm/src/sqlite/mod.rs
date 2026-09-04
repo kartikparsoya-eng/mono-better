@@ -8,11 +8,13 @@
 //! sqlite-cost-model: query planning cost model.
 //! sqlite-stat-fanout: join fanout estimation from SQLite stats.
 //! explain-queries: EXPLAIN QUERY PLAN utilities.
+//! internal/statement-cache: prepared-statement LRU (TS `#stmts.cache`).
 //! query-delegate: ZQLite QueryDelegate implementation.
 
 pub mod database_storage;
 pub mod db;
 pub mod explain_queries;
+pub mod internal;
 pub mod interrupt;
 pub mod options;
 pub mod query_builder;
