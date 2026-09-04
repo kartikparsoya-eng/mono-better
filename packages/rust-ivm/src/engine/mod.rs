@@ -1307,6 +1307,7 @@ impl Engine {
             result: None,
             should_yield,
             last_return: Instant::now(),
+            last_was_yield: false,
             perf_timer,
             restored: false,
         })
@@ -1722,12 +1723,11 @@ fn push_source_change(
                 std::mem::take(&mut entry.collector.borrow_mut().row_changes)
             };
             for rc in row_changes {
-                let delivery_start = Instant::now();
-                {
-                    let _t = crate::perf_trace::scope("deliver.row");
-                    on_row_change(&rc);
-                }
-                crate::advance_gate::exclude_current(delivery_start.elapsed());
+                // Delivering a row to the consumer is NOT excluded: TS runs the
+                // equivalent work (`#processChanges` accumulating the row, then
+                // `updater.received()`) with the advance timer running.
+                let _t = crate::perf_trace::scope("deliver.row");
+                on_row_change(&rc);
             }
             // Surviving companion changes (resolved value unchanged) stream
             // under the owning query, per TS companion accumulation.
@@ -1744,12 +1744,9 @@ fn push_source_change(
                     }
                 };
                 for rc in streamed {
-                    let delivery_start = Instant::now();
-                    {
-                        let _t = crate::perf_trace::scope("deliver.row");
-                        on_row_change(&rc);
-                    }
-                    crate::advance_gate::exclude_current(delivery_start.elapsed());
+                    // Not excluded — see the main-row loop above.
+                    let _t = crate::perf_trace::scope("deliver.row");
+                    on_row_change(&rc);
                 }
             }
         }
@@ -2358,6 +2355,11 @@ pub struct AdvanceStream {
     /// When the previous `next()` returned — the gap until the next pull is
     /// consumer time, excluded from the economic budget.
     last_return: Instant,
+    /// Whether the item returned by the previous `next()` was a `Yield`, i.e.
+    /// the consumer spent the interval awaiting its time slice. Only that
+    /// interval is excluded from the economic budget (TS `TimeSliceTimer`
+    /// stops exclusively inside `yieldProcess`).
+    last_was_yield: bool,
     perf_timer: Instant,
     restored: bool,
 }
@@ -2588,16 +2590,30 @@ impl Iterator for AdvanceStream {
     type Item = crate::ivm::stream::StreamItem<RowChange>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Consumer time since the last pull (received()/poke work, or a time
-        // slice yielded to a neighbour) is not IVM work: exclude it from the
-        // economic budget, exactly as the callback path excluded synchronous
-        // row delivery. The wall-clock ceiling arm is exclusion-free.
-        self.advance_gate.exclude(self.last_return.elapsed());
+        // TS parity: the advance budget's clock is the view-syncer's ONE
+        // `TimeSliceTimer` — `#advancePipelines` hands the same timer to
+        // `pipelines.advance(timer)` (which the budget arms read as
+        // `advanceTimer.totalElapsed()`, pipeline-driver.ts:1102) and to
+        // `#processChanges` (view-syncer.ts:2579-2585). `#processChanges` stops
+        // it in exactly ONE place: `await timer.yieldProcess(…)`
+        // (view-syncer.ts:2508-2512). Every other consumer cost —
+        // `updater.received()`, `pokers.addPatch()` — runs with the timer
+        // RUNNING and counts against the budget.
+        //
+        // So exclude the awaited time slice and NOTHING else. Excluding all
+        // inter-pull time (the previous behaviour, justified by a NAPI boundary
+        // deleted in a5e502ad9) made rust's `elapsed` smaller than TS's for
+        // identical work, so rust shed LESS eagerly than TS. The wall-clock
+        // ceiling arm stays exclusion-free.
+        if self.last_was_yield {
+            self.advance_gate.exclude(self.last_return.elapsed());
+        }
         // Arm the per-fetch gate for THIS pull only. The guard disarms on
         // return (and on unwind), so a suspended stream never leaves its
         // budget armed on a shard another client group is hydrating on.
         let _gate_guard = crate::advance_gate::arm(self.advance_gate.clone());
         let item = self.next_inner();
+        self.last_was_yield = matches!(item, Some(crate::ivm::stream::StreamItem::Yield));
         self.last_return = Instant::now();
         item
     }

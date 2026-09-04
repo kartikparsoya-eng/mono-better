@@ -461,14 +461,28 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   (`advance_reset_error` → the same `advancement-timeout` reset the per-change arm
   emits). The gate is inert outside a production advance: hydrate and worker-thread
   fetches see `None` and read every row (`should_stop_fetch()` == false when
-  unarmed). Rust-only additions beyond TS: the `WallClockCeiling` arm (an absolute
-  exclusion-free bound — TS's budget keeps ticking through delivery, Rust excludes
-  delivery time via `exclude`, so a slow consumer could otherwise hold the WAL
-  snapshot open indefinitely) is a divergence-guard, not a behavior change on the
-  hot path.
+  unarmed).
+
+  **The economic clock is TS's clock (corrected 2026-09-04).** `#advancePipelines`
+  builds ONE `TimeSliceTimer` and hands it both to `pipelines.advance(timer)` —
+  read by the budget arms as `advanceTimer.totalElapsed()` (pipeline-driver.ts:1102)
+  — and to `#processChanges` (view-syncer.ts:2579-2585), which stops it in exactly
+  one place: `await timer.yieldProcess(…)` (:2508-2512). So `exclude()` is called
+  for the awaited time slice and NOTHING else. It previously excluded ALL time
+  between two `AdvanceStream` pulls plus each row's delivery callback, justified by
+  a NAPI boundary deleted in a5e502ad9; that made rust's `elapsed` smaller than TS's
+  for identical work, so rust shed LESS eagerly than TS. Pinned by
+  `advance_yield_test::consumer_stall_counts_against_the_budget_but_a_yielded_slice_does_not`.
+
+  Rust-only addition beyond TS: the `WallClockCeiling` arm, an absolute
+  exclusion-free bound. Its original rationale (rust excluded delivery time, so a
+  slow consumer could hold the WAL snapshot open indefinitely) is now largely spent
+  — rust excludes only what TS excludes. It is retained because yields ARE still
+  excluded on both sides while TS carries no such ceiling, so it remains a
+  divergence-guard, not a behavior change on the hot path.
 - **Tests:** `advance_gate::tests::*` (the budget-math arms:
   `slow_current_change_trips_regardless_of_late_finish`, `projected_batch_cost_trips`,
-  `late_advancement_finishes_instead_of_resetting`, `delivery_wait_is_excluded_from_budget`,
+  `late_advancement_finishes_instead_of_resetting`, `yield_wait_is_excluded_from_budget`,
   `should_stop_fetch_is_false_when_unarmed`) + the fetch-integration suite
   `sqlite::table_source` `advance_gate_fetch_tests`
   (`fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`
@@ -687,3 +701,40 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   `known(K1)` and fails on anything else; `hydrate_real_rows_produces_row_pokes`
   (stage_e) pins (c)'s poke contents.
 - **Known gap:** none beyond (b).
+
+## I-16 — Advance buffers the change delta, then applies it to the CVR
+- **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`
+  (`advance_and_sync`: the `collected: Vec<CollectedChange>` drain loop, then
+  `CVRQueryDrivenUpdater::new` → `MultiPoker::new` → `ChangeProcessor::on_row_change`
+  replay).
+- **No TS twin (scheduling, not logic):** TS `#advancePipelines` builds the
+  updater and the pokers BEFORE consuming, then `#processChanges` interleaves —
+  it pulls the `advance(timer)` generator and, inside the same loop, batches
+  rows into `updater.received()` and `pokers.addPatch()`
+  (view-syncer.ts:2484-2530). Rust drains the whole `AdvanceStream` into
+  `collected` first (only `accumulate_signature` + `row_change_to_maps` run in
+  the loop), stops the timer, and only then builds the updater/pokers and
+  replays the delta in order. An advance delta is small — TS likewise returns
+  `changes` as an array — so buffering it is cheap, unlike a full hydrate.
+- **Contract (TS-observable):** the rows a client receives, their order, and the
+  version they land at are identical to TS's interleaved processing; a reset
+  discards the delta without any client seeing part of it. Rust gets the last
+  property structurally — no poke has been started when
+  `AdvanceOutcome::Reset` is read, so there is nothing to cancel, where TS must
+  `await pokers.cancel()` in its `ResetPipelinesSignal` catch.
+- **KNOWN DIVERGENCE (registered 2026-09-04, not yet fixed):** because the CVR
+  work happens after the drain loop, rust's advance budget does NOT measure
+  `received()` / `addPatch()` cost, while TS's does — that work runs inside TS's
+  timer and against `advanceTimer.totalElapsed()`. rust's `elapsed` is therefore
+  still smaller than TS's for the same advance, and rust still sheds later than
+  TS would. This is SEPARATE from the `exclude()` correction in I-11 and is the
+  larger of the two. Fixing it means interleaving (the header — version and
+  numChanges — is already available from `changes.header()` before the loop, so
+  the updater CAN be built first), which reintroduces TS's mid-advance poke
+  cancel on reset and changes when CVR writes hit the store. That is an
+  architectural change needing its own design, tests and ART gate — do not fold
+  it into an unrelated commit.
+- **Tests:** the ordering/identity half is covered by the advance suites
+  (`advance_yield_test` — row changes byte-identical with and without yields —
+  and the syncer's `advance_and_sync` tests). The budget half is NOT pinned:
+  that is exactly the open divergence above.

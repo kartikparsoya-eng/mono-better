@@ -401,16 +401,6 @@ pub fn should_stop_fetch() -> bool {
     ADVANCE_GATE.with(|g| g.borrow().as_ref().is_some_and(|g| g.over_budget()))
 }
 
-/// Exclude a synchronous row-delivery wait from the currently armed advance.
-/// This is a no-op outside production advance.
-pub fn exclude_current(duration: Duration) {
-    ADVANCE_GATE.with(|g| {
-        if let Some(gate) = g.borrow().as_ref() {
-            gate.exclude(duration);
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_wait_is_excluded_from_budget() {
+    fn yield_wait_is_excluded_from_budget() {
         let g = gate(200, 100.0, 4, 0);
         g.exclude(Duration::from_millis(175));
         assert!(g.elapsed_ms() < 50.0);

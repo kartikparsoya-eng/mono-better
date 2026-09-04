@@ -348,3 +348,70 @@ fn the_advance_gate_is_disarmed_while_the_stream_is_suspended_at_a_yield() {
         "gate must be disarmed after the stream is exhausted"
     );
 }
+
+/// TS parity for WHAT THE ADVANCE BUDGET COUNTS.
+///
+/// `#advancePipelines` builds ONE `TimeSliceTimer` and hands it both to
+/// `pipelines.advance(timer)` — whose budget arms read it as
+/// `advanceTimer.totalElapsed()` (pipeline-driver.ts:1102) — and to
+/// `#processChanges` (view-syncer.ts:2579-2585). `#processChanges` stops that
+/// timer in exactly one place, `await timer.yieldProcess(…)`
+/// (view-syncer.ts:2508-2512). So consumer work between pulls counts against
+/// the budget, and only the awaited time slice does not.
+///
+/// rust excluded ALL time between two pulls (`AdvanceStream::next` →
+/// `exclude(last_return.elapsed())`) plus each row's delivery callback
+/// (`push_source_change` → `exclude_current`), justified by a NAPI boundary
+/// deleted in a5e502ad9. rust therefore measured a smaller `elapsed` than TS
+/// for identical work and shed LESS eagerly.
+///
+/// Both directions are pinned: a stall while holding a DATA item must be
+/// charged (the advance aborts), the same stall while yielded must not be.
+/// Reverting `next()` to exclude unconditionally makes the first case stop
+/// aborting and FAILS this test.
+#[test]
+fn consumer_stall_counts_against_the_budget_but_a_yielded_slice_does_not() {
+    // > MIN_ADVANCEMENT_TIME_LIMIT_MS (50) so the timeout arm can fire at all.
+    let stall = std::time::Duration::from_millis(140);
+
+    // Drive the fixture's 3-change advance, stalling once — either while
+    // holding a data row (consumer work) or while yielded. Returns `aborted`.
+    let run = |tag: &str, yield_always: bool, stall_on_yield: bool| -> bool {
+        let mut fx = Fixture::new(tag);
+        fx.write_three_changes();
+        let hook: Option<Rc<dyn Fn() -> bool>> = if yield_always {
+            Some(Rc::new(|| true))
+        } else {
+            None
+        };
+        let mut stream = fx
+            .eng
+            .start_advance(&mut fx.snap, &fx.syncable, &fx.all_tables, hook)
+            .unwrap();
+        let mut stalled = false;
+        for item in stream.by_ref() {
+            let is_yield = matches!(item, StreamItem::Yield);
+            if !stalled && is_yield == stall_on_yield {
+                stalled = true;
+                std::thread::sleep(stall);
+            }
+        }
+        assert!(stalled, "{tag}: the stall must have happened");
+        fx.eng.finish_advance(stream).unwrap().aborted
+    };
+
+    // Stalling while holding a data row is consumer work: TS charges it.
+    assert!(
+        run("stall-data", false, false),
+        "a consumer stall between pulls must count against the advance budget \
+         (TS stops its TimeSliceTimer only inside yieldProcess), so this \
+         advance must abort",
+    );
+
+    // Stalling while yielded is the awaited time slice: TS excludes it.
+    assert!(
+        !run("stall-yield", true, true),
+        "time spent awaiting a yielded slice must NOT count against the budget \
+         (TS `timer.yieldProcess()` stops the timer), so this advance must commit",
+    );
+}
