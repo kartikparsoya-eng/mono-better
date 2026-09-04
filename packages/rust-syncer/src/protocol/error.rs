@@ -56,7 +56,7 @@ pub struct PushFailedHttpBody {
     pub message: String,
     pub origin: ErrorOrigin,
     pub reason: ErrorReason,
-    pub status: i64,
+    pub status: crate::protocol::JsNumber,
     #[serde(
         rename = "bodyPreview",
         default,
@@ -102,7 +102,7 @@ pub struct TransformFailedHttpBody {
     pub message: String,
     pub origin: ErrorOrigin,
     pub reason: ErrorReason,
-    pub status: i64,
+    pub status: crate::protocol::JsNumber,
     #[serde(
         rename = "bodyPreview",
         default,

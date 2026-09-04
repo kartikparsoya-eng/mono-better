@@ -6,8 +6,96 @@
 //! Wire format: all messages are JSON tuples `["messageType", bodyObject]`.
 //! We use untagged enums + `#[serde(tag = "op")]` to match the TS union types.
 
+/// A TS `v.number()` — a JS number, in both directions.
+///
+/// JS has ONE numeric type, so a `v.number()` field accepts `1`, `1.5`, `1E5`,
+/// `-0`, `1e309` (-> Infinity) and `1e-330` (-> 0) alike. Typing such a field
+/// `i64` in rust rejected all of those and CLOSED the connection where TS
+/// served the query — `1E5` is an ordinary way to write a timestamp (M13 R1).
+///
+/// Plain `f64` fixes the inbound half and breaks the outbound half: serde
+/// renders `404.0` where `JSON.stringify` renders `404`. `JsNumber` does both —
+/// it deserializes from any JSON number and serializes the way
+/// `JSON.stringify` renders a JS number (integral values as integers,
+/// non-finite as `null`, exactly as JS does).
+///
+/// This is the same rule already hand-written in three places —
+/// `rust_ivm::ivm::data::Value`'s `Serialize`, `tdigest::number_to_value`, and
+/// `view_syncer::value_to_serde_json` — whose integral cutoffs had already
+/// drifted apart (`9.007e15` vs `i64::MIN/MAX`). New protocol fields use this.
+///
+/// Rust-only type (AGENTS.md rule 5): it has no TS twin because it exists to
+/// give rust the single JS numeric type TS gets from the language.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
+pub struct JsNumber(pub f64);
+
+impl JsNumber {
+    pub fn as_f64(self) -> f64 {
+        self.0
+    }
+}
+
+impl From<f64> for JsNumber {
+    fn from(v: f64) -> Self {
+        JsNumber(v)
+    }
+}
+
+impl From<i64> for JsNumber {
+    fn from(v: i64) -> Self {
+        JsNumber(v as f64)
+    }
+}
+
+impl serde::Serialize for JsNumber {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let n = self.0;
+        if !n.is_finite() {
+            // `JSON.stringify(Infinity)` and `JSON.stringify(NaN)` are `null`.
+            return s.serialize_none();
+        }
+        // `JSON.stringify(1)` is `1`, never `1.0`; `-0` renders as `0`.
+        if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+            s.serialize_i64(n as i64)
+        } else {
+            s.serialize_f64(n)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for JsNumber {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        f64::deserialize(d).map(JsNumber)
+    }
+}
+
+/// Deserialize a valita `.optional()` field: absent-or-value, NEVER an explicit
+/// `null`.
+///
+/// TS `v.object({x: v.string().optional()})` REJECTS `{"x": null}` — `.optional()`
+/// widens the field to "may be missing", not "may be null" (verified by the M13
+/// oracle: `wrongtype/*/null` frames are rejected by valita). serde's
+/// `Option<T>` accepts BOTH a missing key and an explicit `null`, so every
+/// `.optional()` field needs this to match.
+///
+/// Serde invokes a `deserialize_with` only when the key is PRESENT, so `null`
+/// reaches `T::deserialize` and fails there, while an absent key falls back to
+/// `#[serde(default)]` -> `None`. Pair it with `#[serde(default)]`.
+///
+/// Rust-only helper (AGENTS.md rule 5): it has no TS twin because it exists to
+/// close the serde-vs-valita gap in optional-field semantics, reproducing TS
+/// behavior rather than adding any.
+pub fn optional_no_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
 pub mod analyze_query_result;
 pub mod change_desired_queries;
+pub mod close_connection;
 pub mod connect;
 pub mod delete_clients;
 pub mod down;
@@ -18,9 +106,11 @@ pub mod error_reason_enum;
 pub mod inspect_up;
 pub mod mutation_id;
 pub mod mutations_patch;
+pub mod ping;
 pub mod poke;
 pub mod pong;
 pub mod protocol_version;
+pub mod pull;
 pub mod push;
 pub mod queries_patch;
 pub mod row_patch;
@@ -30,6 +120,7 @@ pub mod version;
 
 pub use analyze_query_result::*;
 pub use change_desired_queries::*;
+pub use close_connection::*;
 pub use connect::*;
 pub use delete_clients::*;
 pub use down::*;
@@ -40,9 +131,11 @@ pub use error_reason_enum::*;
 pub use inspect_up::*;
 pub use mutation_id::*;
 pub use mutations_patch::*;
+pub use ping::*;
 pub use poke::*;
 pub use pong::*;
 pub use protocol_version::*;
+pub use pull::*;
 pub use push::*;
 pub use queries_patch::*;
 pub use row_patch::*;
@@ -95,24 +188,24 @@ mod tests {
     /// `InvalidMessage: unexpected end of hex escape`.
     #[test]
     fn parse_upstream_accepts_unpaired_surrogate_like_ts_json_parse() {
-        let parsed = parse_upstream(r#"["pull",{"q":"\ud800"}]"#)
+        let parsed = parse_upstream(r#"["updateAuth",{"auth":"\ud800"}]"#)
             .expect("TS JSON.parse accepts a lone surrogate; rust must too");
-        let Upstream::Pull(body) = parsed else {
-            panic!("expected Pull, got {parsed:?}")
+        let Upstream::UpdateAuth(body) = parsed else {
+            panic!("expected UpdateAuth, got {parsed:?}")
         };
         // U+FFFD is what TS itself stores: node re-encodes a lone surrogate to
         // UTF-8 as the replacement character at every boundary it crosses.
-        assert_eq!(body["q"], serde_json::json!("\u{FFFD}"));
+        assert_eq!(body.auth, "\u{FFFD}");
     }
 
     /// A lone TRAILING surrogate is equally legal to `JSON.parse`.
     #[test]
     fn parse_upstream_accepts_unpaired_low_surrogate() {
-        let parsed = parse_upstream(r#"["pull",{"q":"a\udc4db"}]"#).unwrap();
-        let Upstream::Pull(body) = parsed else {
-            panic!("expected Pull")
+        let parsed = parse_upstream(r#"["updateAuth",{"auth":"a\udc4db"}]"#).unwrap();
+        let Upstream::UpdateAuth(body) = parsed else {
+            panic!("expected UpdateAuth")
         };
-        assert_eq!(body["q"], serde_json::json!("a\u{FFFD}b"));
+        assert_eq!(body.auth, "a\u{FFFD}b");
     }
 
     /// The repair must not over-reach: a WELL-FORMED pair is a real character
@@ -123,11 +216,11 @@ mod tests {
     /// here is genuinely under the scanner.
     #[test]
     fn parse_upstream_preserves_well_formed_surrogate_pairs() {
-        let parsed = parse_upstream(r#"["pull",{"q":"\ud83d\udc4d \ud800"}]"#).unwrap();
-        let Upstream::Pull(body) = parsed else {
-            panic!("expected Pull")
+        let parsed = parse_upstream(r#"["updateAuth",{"auth":"\ud83d\udc4d \ud800"}]"#).unwrap();
+        let Upstream::UpdateAuth(body) = parsed else {
+            panic!("expected UpdateAuth")
         };
-        assert_eq!(body["q"], serde_json::json!("👍 \u{FFFD}"));
+        assert_eq!(body.auth, "👍 \u{FFFD}");
     }
 
     /// `\\ud800` is an escaped BACKSLASH plus the literal text `ud800`, not a
@@ -136,11 +229,11 @@ mod tests {
     /// puts this frame through the repair in the first place.
     #[test]
     fn parse_upstream_does_not_treat_escaped_backslash_as_a_unicode_escape() {
-        let parsed = parse_upstream(r#"["pull",{"q":"\\ud800|\ud800"}]"#).unwrap();
-        let Upstream::Pull(body) = parsed else {
-            panic!("expected Pull")
+        let parsed = parse_upstream(r#"["updateAuth",{"auth":"\\ud800|\ud800"}]"#).unwrap();
+        let Upstream::UpdateAuth(body) = parsed else {
+            panic!("expected UpdateAuth")
         };
-        assert_eq!(body["q"], serde_json::json!("\\ud800|\u{FFFD}"));
+        assert_eq!(body.auth, "\\ud800|\u{FFFD}");
     }
 
     /// The handler re-reads the RAW frame text for the `initConnection`,

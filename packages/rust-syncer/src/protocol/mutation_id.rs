@@ -4,9 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// TS `mutationIDSchema.id` is `v.number()` — a JS number (f64), not an i64
+// (M13 R1). `Eq` is gone with it: f64 is not `Eq`, and TS compares these as JS
+// numbers anyway. `deny_unknown_fields` mirrors strict `v.object` (M13 R3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MutationID {
-    pub id: i64,
+    pub id: crate::protocol::JsNumber,
     #[serde(rename = "clientID")]
     pub client_id: String,
 }

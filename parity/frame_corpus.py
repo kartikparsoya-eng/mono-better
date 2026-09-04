@@ -79,7 +79,8 @@ VALID = {
     "push":            '["push",{"clientGroupID":"g1","mutations":[],"pushVersion":1,'
                        '"schemaVersion":1,"timestamp":1,"requestID":"r1"}]',
     "inspect":         '["inspect",{"id":"i1","op":"version"}]',
-    "ackMutationResponses": '["ackMutationResponses",{"lastMutationID":1}]',
+    # Body is `mutationIDSchema` (push.ts:96), NOT a `lastMutationID` wrapper.
+    "ackMutationResponses": '["ackMutationResponses",{"id":1,"clientID":"c1"}]',
 }
 
 STRING_SLOTS = {
@@ -104,7 +105,7 @@ NUMBER_SLOTS = {
                         '"schemaVersion":1,"timestamp":1,"requestID":"r1"}]',
     "push.timestamp":   '["push",{"clientGroupID":"g1","mutations":[],"pushVersion":1,'
                         '"schemaVersion":1,"timestamp":%s,"requestID":"r1"}]',
-    "ackMutationResponses.lastMutationID": '["ackMutationResponses",{"lastMutationID":%s}]',
+    "ackMutationResponses.id": '["ackMutationResponses",{"id":%s,"clientID":"c1"}]',
     "pull.cookie":      '["pull",{"clientGroupID":"g1","cookie":%s,"requestID":"r1"}]',
 }
 
@@ -162,6 +163,7 @@ def main() -> int:
         "changeDesiredQueries": ["desiredQueriesPatch"],
         "initConnection": ["desiredQueriesPatch"],
         "inspect": ["id", "op"],
+        "ackMutationResponses": ["id", "clientID"],
         "push": ["clientGroupID", "mutations", "pushVersion", "schemaVersion",
                  "timestamp", "requestID"],
     }

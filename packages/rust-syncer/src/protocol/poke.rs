@@ -18,8 +18,8 @@ pub struct PokeStartBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaVersions {
-    pub min_supported_version: i64,
-    pub max_supported_version: i64,
+    pub min_supported_version: crate::protocol::JsNumber,
+    pub max_supported_version: crate::protocol::JsNumber,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

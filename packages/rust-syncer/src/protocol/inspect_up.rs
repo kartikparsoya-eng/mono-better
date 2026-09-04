@@ -7,7 +7,7 @@ use serde_json::Value;
 
 // inspectQueriesUpBodySchema uses clientID (capital ID)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op")]
+#[serde(tag = "op", deny_unknown_fields)]
 pub enum InspectUpBody {
     #[serde(rename = "queries")]
     Queries {

@@ -29,19 +29,63 @@ pub struct ConnectedBody {
 // objects, not tuples — a wire-shape drift) was DEAD code and has been removed.
 
 // initConnectionBodySchema uses userPushURL/userQueryURL (capital URL)
+// valita `v.object` rejects unknown keys (M13 R3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InitConnectionBody {
     pub desired_queries_patch: UpQueriesPatch,
+    // Every `.optional()` below is absent-or-value, never an explicit `null`
+    // (M13 R4) — valita `.optional()` does not admit null, serde's `Option`
+    // does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub client_schema: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub deleted: Option<DeleteClientsBody>,
-    #[serde(rename = "userPushURL")]
+    #[serde(
+        rename = "userPushURL",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub user_push_url: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub user_push_headers: Option<serde_json::Map<String, Value>>,
-    #[serde(rename = "userQueryURL")]
+    #[serde(
+        rename = "userQueryURL",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub user_query_url: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub user_query_headers: Option<serde_json::Map<String, Value>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub active_clients: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::protocol::optional_no_null"
+    )]
     pub traceparent: Option<String>,
 }
 

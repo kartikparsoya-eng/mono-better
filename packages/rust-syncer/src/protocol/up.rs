@@ -145,7 +145,10 @@ pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {
 /// [`parse_upstream`] so a caller that also needs the raw array (e.g. the
 /// router's inbound dispatch) can parse the frame's JSON exactly once.
 pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error> {
-    if arr.len() < 2 {
+    // TS `v.tuple([v.literal(...), bodySchema])` pins the frame to EXACTLY two
+    // elements — a 3-element array fails the tuple, it is not truncated. Rust
+    // checked only `< 2` and ignored the extras (M13 R5).
+    if arr.len() != 2 {
         return Err(serde::de::Error::custom(
             "message must be a tuple [type, body]",
         ));
@@ -167,19 +170,38 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
             serde_json::from_value::<InitConnectionBody>(body.clone())?;
             Upstream::InitConnection(body.clone())
         }
-        "ping" => Upstream::Ping,
+        "ping" => {
+            // TS `pingBodySchema = v.object({})` (ping.ts:3) — the body must be
+            // an object, and valita rejects any key in it. Rust ignored the
+            // ping body entirely (M13 R5).
+            serde_json::from_value::<PingBody>(body.clone())?;
+            Upstream::Ping
+        }
         "deleteClients" => {
             Upstream::DeleteClients(serde_json::from_value::<DeleteClientsBody>(body.clone())?)
         }
         "changeDesiredQueries" => Upstream::ChangeDesiredQueries(serde_json::from_value::<
             ChangeDesiredQueriesBody,
         >(body.clone())?),
-        "pull" => Upstream::Pull(body.clone()),
+        "pull" => {
+            // TS validates the body against `pullRequestBodySchema`
+            // (pull.ts:5). Rust kept the raw `Value` and validated NOTHING, so
+            // wrong types, missing fields and null fields all passed (M13 R2).
+            // Keep the raw Value afterwards: the handler forwards it verbatim.
+            serde_json::from_value::<PullRequestBody>(body.clone())?;
+            Upstream::Pull(body.clone())
+        }
         "updateAuth" => {
             Upstream::UpdateAuth(serde_json::from_value::<UpdateAuthBody>(body.clone())?)
         }
         "push" => Upstream::Push(serde_json::from_value::<PushBody>(body.clone())?),
-        "closeConnection" => Upstream::CloseConnection,
+        "closeConnection" => {
+            // TS `closeConnectionBodySchema = v.array(v.unknown())`
+            // (close-connection.ts:3) — the body must be an ARRAY. Rust ignored
+            // it (M13 R5).
+            serde_json::from_value::<CloseConnectionBody>(body.clone())?;
+            Upstream::CloseConnection
+        }
         "inspect" => Upstream::Inspect(serde_json::from_value::<InspectUpBody>(body.clone())?),
         "ackMutationResponses" => Upstream::AckMutationResponses(serde_json::from_value::<
             AckMutationResponsesBody,

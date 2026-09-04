@@ -85,7 +85,7 @@ fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {
             muts.iter()
                 .filter_map(|m| {
                     Some(MutationID {
-                        id: m.get("id")?.as_i64()?,
+                        id: m.get("id")?.as_f64()?.into(),
                         client_id: m.get("clientID")?.as_str()?.to_string(),
                     })
                 })
@@ -414,7 +414,7 @@ impl PusherService {
                                         ),
                                         origin: ErrorOrigin::ZeroCache,
                                         reason: ErrorReason::Http,
-                                        status,
+                                        status: status.into(),
                                         body_preview: preview,
                                     },
                                 );
@@ -748,7 +748,7 @@ fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {
     }
     let mutation_id_of = |m: &serde_json::Value| -> Option<MutationID> {
         Some(MutationID {
-            id: m.get("id")?.as_i64()?,
+            id: m.get("id")?.as_f64()?.into(),
             client_id: m.get("clientID")?.as_str()?.to_string(),
         })
     };
@@ -779,8 +779,9 @@ fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {
                         reason: ErrorReason::Http,
                         status: response
                             .get("status")
-                            .and_then(|s| s.as_i64())
-                            .unwrap_or_default(),
+                            .and_then(|s| s.as_f64())
+                            .unwrap_or_default()
+                            .into(),
                         body_preview: response.get("details").map(|d| {
                             d.as_str()
                                 .map(|s| s.to_string())
@@ -890,7 +891,7 @@ fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {
                             .filter_map(|m| {
                                 Some(MutationID {
                                     client_id: m.get("id")?.get("clientID")?.as_str()?.to_string(),
-                                    id: m.get("id")?.get("id")?.as_i64()?,
+                                    id: m.get("id")?.get("id")?.as_f64()?.into(),
                                 })
                             })
                             .collect(),
@@ -934,9 +935,9 @@ mod tests {
         ]});
         let ids = mutation_ids_of(&body);
         assert_eq!(ids.len(), 2);
-        assert_eq!(ids[0].id, 7);
+        assert_eq!(ids[0].id.as_f64(), 7.0);
         assert_eq!(ids[0].client_id, "cA");
-        assert_eq!(ids[1].id, 8);
+        assert_eq!(ids[1].id.as_f64(), 8.0);
         // No mutations key → empty, not a panic.
         assert!(mutation_ids_of(&serde_json::json!({})).is_empty());
     }
@@ -1007,8 +1008,11 @@ mod tests {
         assert_eq!(muts(&combined[1]), vec![3]);
         let t = combined[0].target.as_ref().unwrap();
         assert_eq!(
-            t.mutation_ids.iter().map(|m| m.id).collect::<Vec<_>>(),
-            vec![1, 2, 4],
+            t.mutation_ids
+                .iter()
+                .map(|m| m.id.as_f64())
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0, 4.0],
             "failure target covers every merged mutation"
         );
     }

@@ -389,8 +389,8 @@ fn test_parse_push_message() {
     match result {
         Upstream::Push(body) => {
             assert_eq!(body.client_group_id, "cg1");
-            assert_eq!(body.push_version, 1);
-            assert_eq!(body.timestamp, 123);
+            assert_eq!(body.push_version.as_f64(), 1.0);
+            assert_eq!(body.timestamp.as_f64(), 123.0);
             assert_eq!(body.request_id, "req1");
             assert!(body.mutations.is_empty());
         }

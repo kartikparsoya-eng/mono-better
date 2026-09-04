@@ -53,67 +53,20 @@ use rust_syncer::protocol::parse_upstream;
 ///    v.object({})` requires an object). Rust checks `arr.len() < 2` and, for
 ///    `ping`, ignores the body entirely.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    // R1 — 12 frames. TS ACCEPTS, rust REJECTS: a real client is disconnected.
-    ("number/push.pushVersion/neg-zero", "R1"),
-    ("number/push.pushVersion/fractional", "R1"),
-    ("number/push.pushVersion/overflow-f64", "R1"),
-    ("number/push.pushVersion/neg-overflow-f64", "R1"),
-    ("number/push.pushVersion/tiny", "R1"),
-    ("number/push.pushVersion/exp-upper", "R1"),
-    ("number/push.timestamp/neg-zero", "R1"),
-    ("number/push.timestamp/fractional", "R1"),
-    ("number/push.timestamp/overflow-f64", "R1"),
-    ("number/push.timestamp/neg-overflow-f64", "R1"),
-    ("number/push.timestamp/tiny", "R1"),
-    ("number/push.timestamp/exp-upper", "R1"),
-    // R2 — 30 frames. The whole pull body is unchecked in rust.
-    ("wrongtype/pull.clientGroupID/null", "R2"),
-    ("wrongtype/pull.clientGroupID/true", "R2"),
-    ("wrongtype/pull.clientGroupID/number", "R2"),
-    ("wrongtype/pull.clientGroupID/array", "R2"),
-    ("wrongtype/pull.clientGroupID/object", "R2"),
-    ("wrongtype/pull.requestID/null", "R2"),
-    ("wrongtype/pull.requestID/true", "R2"),
-    ("wrongtype/pull.requestID/number", "R2"),
-    ("wrongtype/pull.requestID/array", "R2"),
-    ("wrongtype/pull.requestID/object", "R2"),
-    ("wrongtype/pull.cookie/true", "R2"),
-    ("wrongtype/pull.cookie/number", "R2"),
-    ("wrongtype/pull.cookie/array", "R2"),
-    ("wrongtype/pull.cookie/object", "R2"),
-    ("number/pull.cookie/zero", "R2"),
-    ("number/pull.cookie/neg-zero", "R2"),
-    ("number/pull.cookie/neg-one", "R2"),
-    ("number/pull.cookie/int32-max-plus", "R2"),
-    ("number/pull.cookie/max-safe", "R2"),
-    ("number/pull.cookie/max-safe-plus-1", "R2"),
-    ("number/pull.cookie/max-safe-plus-2", "R2"),
-    ("number/pull.cookie/min-safe", "R2"),
-    ("number/pull.cookie/fractional", "R2"),
-    ("number/pull.cookie/tiny", "R2"),
-    ("number/pull.cookie/exp-upper", "R2"),
-    ("missing/pull/clientGroupID", "R2"),
-    ("missing/pull/cookie", "R2"),
-    ("missing/pull/requestID", "R2"),
-    ("nullfield/pull/clientGroupID", "R2"),
-    ("nullfield/pull/requestID", "R2"),
-    // R3 — 6 frames, one per object-bodied message type.
-    ("extrafield/updateAuth", "R3"),
-    ("extrafield/pull", "R3"),
-    ("extrafield/changeDesiredQueries", "R3"),
-    ("extrafield/initConnection", "R3"),
-    ("extrafield/inspect", "R3"),
-    ("extrafield/push", "R3"),
-    // R4 — 4 frames. `.optional()` is absent-or-value, never null.
-    ("wrongtype/initConnection.userPushURL/null", "R4"),
-    ("wrongtype/initConnection.traceparent/null", "R4"),
-    ("wrongtype/changeDesiredQueries.traceparent/null", "R4"),
-    ("nullfield/push/schemaVersion", "R4"),
-    // R5 — 4 frames. Frame arity and body shape are unchecked.
-    ("structural/three-elements", "R5"),
-    ("structural/body-null", "R5"),
-    ("structural/body-string", "R5"),
-    ("structural/body-array", "R5"),
+    // R6 — 6 frames. `1e309` overflows f64. JS coerces the literal to
+    // `Infinity` and valita's `v.number()` accepts it; `serde_json` refuses to
+    // construct an out-of-range number and fails the FRAME parse, before any
+    // field type is consulted. There is no supported way to make `serde_json`
+    // yield `Infinity` short of hand-rolling JSON number parsing, which would
+    // be a far larger invention than the divergence is worth: the value is
+    // unusable on both sides anyway — TS gets `Infinity`, which `JSON.stringify`
+    // renders back as `null`.
+    ("number/push.pushVersion/overflow-f64", "R6"),
+    ("number/push.pushVersion/neg-overflow-f64", "R6"),
+    ("number/push.timestamp/overflow-f64", "R6"),
+    ("number/push.timestamp/neg-overflow-f64", "R6"),
+    ("number/ackMutationResponses.id/overflow-f64", "R6"),
+    ("number/ackMutationResponses.id/neg-overflow-f64", "R6"),
 ];
 
 fn parity_dir() -> PathBuf {

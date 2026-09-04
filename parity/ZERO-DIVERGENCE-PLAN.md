@@ -307,25 +307,46 @@ python3 parity/frame_corpus.py
 node_modules/.bin/tsx parity/ts_frame_oracle.mts
 ```
 
-**First run: 56 divergences across 5 root causes**, all itemized in
-`KNOWN_DIVERGENCES` (a ratchet — an unlisted divergence fails, and so does a
-listed one that no longer reproduces, so the list can only shrink):
+**First run: 56 divergences across 5 root causes** — all now FIXED, verified by
+the ratchet (`KNOWN_DIVERGENCES` fails on a listed row that stops reproducing,
+so a fix must delete its row in the same commit):
 
-| Code | Frames | Direction | Root cause |
-|---|---|---|---|
-| R1 `js-number-vs-i64` | 12 | TS accepts, **rust disconnects** | `push.pushVersion`/`timestamp` are `v.number()` (f64) in TS, `i64` in rust. TS serves `1E5`, `1.5`, `-0`, `1e309`, `1e-330`; rust closes the socket. Same client-visible harm as the surrogate bug. |
-| R2 `pull-body-unvalidated` | 30 | rust accepts | `"pull" => Upstream::Pull(body.clone())` validates NOTHING; TS validates `pullRequestBodySchema`. Wrong types, missing and null fields all pass. |
-| R3 `valita-objects-are-strict` | 6 | rust accepts | valita `v.object` rejects unknown keys; serde ignores them. One per object-bodied type. Live hazard during a client rollout that adds a field. |
-| R4 `optional-is-not-nullable` | 4 | rust accepts | valita `.optional()` is absent-or-value, never `null`; serde `Option<T>` accepts `null`. The tri-state handling AGENTS.md rule 1 names. |
-| R5 `tuple-arity-and-body-shape` | 4 | rust accepts | TS `v.tuple([literal, body])` pins the frame to exactly two elements and validates the body; rust checks `len() < 2` and ignores `ping`'s body. |
+| Code | Frames | Direction | Root cause | Fix |
+|---|---|---|---|---|
+| R1 `js-number-vs-i64` | 12 | TS accepts, **rust disconnected** | `pushVersion`/`timestamp`/`mutationID.id` are `v.number()` (f64) in TS, `i64` in rust: TS served `1E5`, `1.5`, `-0`, `1e-330`, rust closed the socket. `1E5` is an ordinary timestamp. | `JsNumber` — deserializes from any JSON number, serializes JS-style (integral as integer, non-finite as `null`) |
+| R2 `pull-body-unvalidated` | 30 | rust accepted | `"pull" => Upstream::Pull(body.clone())` validated NOTHING; TS validates `pullRequestBodySchema` | new `protocol/pull.rs` (1:1 with `pull.ts`), validated at the parse site |
+| R3 `valita-objects-are-strict` | 6 | rust accepted | valita `v.object` rejects unknown keys, serde ignores them — TS disconnects a rollout client that adds a field, rust serves it | `deny_unknown_fields` on every body type (works on the internally-tagged `InspectUpBody` too) |
+| R4 `optional-is-not-nullable` | 4 | rust accepted | valita `.optional()` is absent-or-value, NEVER `null`; serde `Option<T>` takes both. The tri-state AGENTS.md rule 1 names | `optional_no_null` on every `.optional()` field |
+| R5 `tuple-arity-and-body-shape` | 4 | rust accepted | TS `v.tuple` pins the frame to exactly 2 elements and validates the body; rust checked `len() < 2` and ignored `ping`'s body | arity `!= 2`; new `protocol/ping.rs` + `protocol/close_connection.rs` |
 
-**Proven non-vacuous**: with the surrogate repair reverted, M13 reports 30 NEW
-divergences across 10 distinct string slots — it catches the bug it was built
-for, in every slot, not just the one production happened to hit.
+Two further divergences surfaced only because those fixes tightened the parser:
+
+- **Outbound `null` vs omitted.** Rust serialized `None` optionals as
+  `"clientSchema": null`; TS's `JSON.stringify` OMITS an `undefined` key. Caught
+  when a rust-serialized `initConnection` failed rust's own R4 check on the way
+  back in. Fixed with `skip_serializing_if` — the R4 mirror on the write side.
+- **`as_i64()` in the push relay.** `pusher.rs` read mutation ids with
+  `as_i64()`, which returns `None` for a float-encoded `1.0`, and `filter_map`
+  then SILENTLY DROPPED that mutation from the failure/ack list. Now `as_f64()`.
+
+`JsNumber` also collapses a live drift surface: this same JS-number rule was
+hand-written in three places — `rust_ivm::ivm::data::Value`'s `Serialize`,
+`tdigest::number_to_value`, `view_syncer::value_to_serde_json` — whose integral
+cutoffs had already diverged (`9.007e15` vs `i64::MIN/MAX`).
+
+**Remaining (6 frames, R6 `f64-overflow-literal`)**: `1e309` overflows f64. JS
+coerces the literal to `Infinity` and `v.number()` accepts it; `serde_json`
+refuses to construct an out-of-range number and fails the frame parse before any
+field type is consulted. Making it match would mean hand-rolling JSON number
+parsing — a far larger invention than the divergence is worth, since the value is
+unusable on both sides anyway (`JSON.stringify(Infinity)` is `null`).
+
+A corpus bug fixed in the same pass: the `ackMutationResponses` baseline used a
+`{lastMutationID}` body, but the schema is `mutationIDSchema` (push.ts:96), so
+both engines rejected it and that whole slot tested nothing.
 
 Fixed in the same series: the unpaired-surrogate parse divergence itself
 (`parse_frame_json`, the rust twin of `connection.ts:203` `JSON.parse`).
-R1-R5 remain as the burn-down list.
 
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
