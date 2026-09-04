@@ -82,6 +82,86 @@ mod tests {
         assert!(parse_upstream(r#"["definitelyNotAThing",{}]"#).is_err());
     }
 
+    /// TS parity, verified against `Connection.#handleMessage`
+    /// (zero-cache/src/workers/connection.ts:203-204): TS runs `JSON.parse`
+    /// then `valita.parse(value, upstreamSchema)`, and NEITHER rejects an
+    /// unpaired surrogate — JS strings are UTF-16, so `JSON.parse` on
+    /// `{"q":"\ud800"}` yields a 1-char string with `charCodeAt(0) === 0xd800`
+    /// (checked against node), and valita's string check is a `typeof` test.
+    /// `serde_json` rejects the same bytes, so rust answered a real client with
+    /// `InvalidMessage` + close where TS served the query. Browser clients emit
+    /// lone surrogates by slicing mid-astral-pair (`"👍".slice(0, 1)`) — what a
+    /// length-capped search box does. Seen in production as
+    /// `InvalidMessage: unexpected end of hex escape`.
+    #[test]
+    fn parse_upstream_accepts_unpaired_surrogate_like_ts_json_parse() {
+        let parsed = parse_upstream(r#"["pull",{"q":"\ud800"}]"#)
+            .expect("TS JSON.parse accepts a lone surrogate; rust must too");
+        let Upstream::Pull(body) = parsed else {
+            panic!("expected Pull, got {parsed:?}")
+        };
+        // U+FFFD is what TS itself stores: node re-encodes a lone surrogate to
+        // UTF-8 as the replacement character at every boundary it crosses.
+        assert_eq!(body["q"], serde_json::json!("\u{FFFD}"));
+    }
+
+    /// A lone TRAILING surrogate is equally legal to `JSON.parse`.
+    #[test]
+    fn parse_upstream_accepts_unpaired_low_surrogate() {
+        let parsed = parse_upstream(r#"["pull",{"q":"a\udc4db"}]"#).unwrap();
+        let Upstream::Pull(body) = parsed else {
+            panic!("expected Pull")
+        };
+        assert_eq!(body["q"], serde_json::json!("a\u{FFFD}b"));
+    }
+
+    /// The repair must not over-reach: a WELL-FORMED pair is a real character
+    /// and must survive as that character, not decay into two U+FFFDs — which
+    /// is what a naive "replace every surrogate escape" fix would do. The lone
+    /// `\ud800` is what forces the repair to run at all: a frame holding only a
+    /// valid pair parses on the first attempt and never reaches it, so the pair
+    /// here is genuinely under the scanner.
+    #[test]
+    fn parse_upstream_preserves_well_formed_surrogate_pairs() {
+        let parsed = parse_upstream(r#"["pull",{"q":"\ud83d\udc4d \ud800"}]"#).unwrap();
+        let Upstream::Pull(body) = parsed else {
+            panic!("expected Pull")
+        };
+        assert_eq!(body["q"], serde_json::json!("👍 \u{FFFD}"));
+    }
+
+    /// `\\ud800` is an escaped BACKSLASH plus the literal text `ud800`, not a
+    /// unicode escape; consuming `\\` as one unit is what keeps ordinary text
+    /// from being corrupted into U+FFFD. The trailing lone surrogate is what
+    /// puts this frame through the repair in the first place.
+    #[test]
+    fn parse_upstream_does_not_treat_escaped_backslash_as_a_unicode_escape() {
+        let parsed = parse_upstream(r#"["pull",{"q":"\\ud800|\ud800"}]"#).unwrap();
+        let Upstream::Pull(body) = parsed else {
+            panic!("expected Pull")
+        };
+        assert_eq!(body["q"], serde_json::json!("\\ud800|\u{FFFD}"));
+    }
+
+    /// The handler re-reads the RAW frame text for the `initConnection`,
+    /// `updateAuth` and `push` bodies. A bare `serde_json::from_str(..)` there
+    /// still fails on a frame `parse_upstream` now accepts, collapsing the body
+    /// to `Null` — a silently EMPTY `initConnection` context, which breaks push
+    /// auth and custom queries downstream. Those sites route through
+    /// `parse_frame_json` so the body survives.
+    #[test]
+    fn parse_frame_json_keeps_the_body_of_a_surrogate_bearing_init_frame() {
+        let frame = r#"["initConnection",{"desiredQueriesPatch":[],"tag":"\ud800"}]"#;
+        assert!(
+            serde_json::from_str::<Vec<serde_json::Value>>(frame).is_err(),
+            "precondition: a bare serde parse must reject this frame",
+        );
+        let arr = parse_frame_json(frame).expect("frame parses after repair");
+        let body = arr.get(1).cloned().unwrap_or(serde_json::Value::Null);
+        assert!(!body.is_null(), "init body collapsed to null: {body}");
+        assert_eq!(body["tag"], serde_json::json!("\u{FFFD}"));
+    }
+
     /// Port of TS `errorBodySchema` wire shapes (zero-protocol/src/error.ts +
     /// error-origin-enum.ts: `ZeroCache = 'zeroCache'`). G36 error-semantics
     /// surface: the serialized `["error", body]` frames for the ClientNotFound

@@ -334,7 +334,8 @@ impl MessageHandler for SyncerWsMessageHandler {
 
             Upstream::UpdateAuth(_) => {
                 let body_value: serde_json::Value = {
-                    let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
+                    let arr: Vec<serde_json::Value> =
+                        crate::protocol::parse_frame_json(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
                 };
                 // TS reads mustGetConnectionContext before updateAuth (revision
@@ -378,7 +379,8 @@ impl MessageHandler for SyncerWsMessageHandler {
                 // records the connection context, then the ViewSyncer dispatch
                 // runs the config/hydrate pass inline on the CG task.
                 let body_value: serde_json::Value = {
-                    let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
+                    let arr: Vec<serde_json::Value> =
+                        crate::protocol::parse_frame_json(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
                 };
                 self.conn_context_manager
@@ -471,7 +473,7 @@ impl SyncerWsMessageHandler {
                 // queries this syncer already hydrates and pokes — no WS
                 // response needed here.
                 if let Some(pusher) = &self.pusher {
-                    let body_value: serde_json::Value = serde_json::from_str(raw_msg)
+                    let body_value: serde_json::Value = crate::protocol::parse_frame_json(raw_msg)
                         .ok()
                         .and_then(|arr: Vec<serde_json::Value>| arr.into_iter().nth(1))
                         .unwrap_or(serde_json::Value::Null);
