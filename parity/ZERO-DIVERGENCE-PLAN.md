@@ -276,6 +276,57 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
 - Deeper ART modes (soak G6 leaks, capacity G22/G25, determinism G21, mutation-
   matrix G15) — run when a longer infra window is available.
 
+## M13 — protocol frame differential (added + executed 2026-09-04)
+
+Every layer before this compares rust to TS **structurally** — same symbols,
+same bodies, same call contexts, same executed paths. None of them asks the one
+question that catches a parser divergence: *given the identical bytes, do the
+two implementations give the same answer?*
+
+That gap shipped a production bug. Rust closed the ws connection with
+`InvalidMessage: unexpected end of hex escape` on frames TS served — 893 client
+disconnects in a single 32-minute replay. `up.ts` -> `up.rs` was a clean 1:1
+mapping, so L1 saw nothing; the branches matched, so L2 saw nothing; the call
+sat in the right context, so L3 saw nothing. The divergence lived entirely
+inside `JSON.parse` vs `serde_json::from_str`.
+
+**How it works.** `parity/frame_corpus.py` generates 399 raw upstream frames —
+raw *text*, because these divergences are lexical and do not survive a round
+trip through a parsed value: unpaired surrogate escapes, truncated `\u`,
+numbers JS widens to Infinity, control characters, tri-state null/absent,
+unknown fields, tuple arity. `parity/ts_frame_oracle.mts` runs each through the
+REAL `JSON.parse` + `valita.parse(upstreamSchema)` — importing the schema, never
+restating it, so the golden cannot drift from the spec — and checks in the
+answers. `packages/rust-syncer/tests/frame_parity_test.rs` asserts rust's
+accept/reject matches TS on every frame.
+
+Regenerate:
+
+```
+python3 parity/frame_corpus.py
+node_modules/.bin/tsx parity/ts_frame_oracle.mts
+```
+
+**First run: 56 divergences across 5 root causes**, all itemized in
+`KNOWN_DIVERGENCES` (a ratchet — an unlisted divergence fails, and so does a
+listed one that no longer reproduces, so the list can only shrink):
+
+| Code | Frames | Direction | Root cause |
+|---|---|---|---|
+| R1 `js-number-vs-i64` | 12 | TS accepts, **rust disconnects** | `push.pushVersion`/`timestamp` are `v.number()` (f64) in TS, `i64` in rust. TS serves `1E5`, `1.5`, `-0`, `1e309`, `1e-330`; rust closes the socket. Same client-visible harm as the surrogate bug. |
+| R2 `pull-body-unvalidated` | 30 | rust accepts | `"pull" => Upstream::Pull(body.clone())` validates NOTHING; TS validates `pullRequestBodySchema`. Wrong types, missing and null fields all pass. |
+| R3 `valita-objects-are-strict` | 6 | rust accepts | valita `v.object` rejects unknown keys; serde ignores them. One per object-bodied type. Live hazard during a client rollout that adds a field. |
+| R4 `optional-is-not-nullable` | 4 | rust accepts | valita `.optional()` is absent-or-value, never `null`; serde `Option<T>` accepts `null`. The tri-state handling AGENTS.md rule 1 names. |
+| R5 `tuple-arity-and-body-shape` | 4 | rust accepts | TS `v.tuple([literal, body])` pins the frame to exactly two elements and validates the body; rust checks `len() < 2` and ignores `ping`'s body. |
+
+**Proven non-vacuous**: with the surrogate repair reverted, M13 reports 30 NEW
+divergences across 10 distinct string slots — it catches the bug it was built
+for, in every slot, not just the one production happened to hit.
+
+Fixed in the same series: the unpaired-surrogate parse divergence itself
+(`parse_frame_json`, the rust twin of `connection.ts:203` `JSON.parse`).
+R1-R5 remain as the burn-down list.
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree
