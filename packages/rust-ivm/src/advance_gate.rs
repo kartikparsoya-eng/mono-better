@@ -218,8 +218,20 @@ impl AdvanceGate {
         }
     }
 
-    /// Exclude time spent synchronously delivering rows across the NAPI
-    /// boundary. TS pauses its timer while the consumer is yielded.
+    /// Exclude consumer time from the economic budget.
+    ///
+    /// DIVERGENCE (2026-09-04, unregistered): this was justified by the NAPI
+    /// boundary's synchronous row delivery, and that boundary was deleted in
+    /// a5e502ad9. What the sole caller now excludes is ALL time between two
+    /// pulls of `AdvanceStream` — the CVR `received()`/poke work as well as a
+    /// yielded time slice. TS stops its `TimeSliceTimer` ONLY inside
+    /// `timer.yieldProcess()` (view-syncer.ts `TimeSliceTimer.#stopLap`); the
+    /// `#processChanges` consumer work runs with the timer STILL RUNNING, and
+    /// that is the `elapsed` its budget arms compare against
+    /// (pipeline-driver.ts:1102). rust therefore measures a smaller `elapsed`
+    /// than TS for identical work and sheds LESS eagerly. Narrowing this to the
+    /// yield await alone changes load-shedding under pressure, so it needs its
+    /// own change plus an ART gate rather than a comment fix.
     pub fn exclude(&self, duration: Duration) {
         let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
         self.excluded_nanos.fetch_add(nanos, Ordering::Relaxed);

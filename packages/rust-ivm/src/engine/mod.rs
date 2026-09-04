@@ -771,17 +771,6 @@ impl Engine {
             .map(|p| p.hydration_row_count)
     }
 
-    /// Replace the native wall-clock measurement with the caller's
-    /// pause-aware hydration timer.
-    pub fn set_hydration_time_ms(&mut self, query_id: &str, hydration_time_ms: f64) -> bool {
-        if let Some(entry) = self.pipelines.iter_mut().find(|p| p.query_id == query_id) {
-            entry.hydration_time_ms = hydration_time_ms;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Wall-clock hydration time for a query's pipeline, or `None` if the query
     /// has no registered pipeline. Port of reading TS `pipeline.hydrationTimeMs`
     /// (pipeline-driver.ts:773) — read by the driver at teardown to emit
@@ -1587,7 +1576,7 @@ impl Engine {
         Some(data)
     }
 
-    /// Get the sources map (for NAPI to access).
+    /// Get the sources map.
     pub fn sources(&self) -> &HashMap<String, Shared<dyn Source>> {
         &self.sources
     }

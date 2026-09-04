@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compile the wal2 SQLite fork into a static lib for rust builds/tests.
 #
-# Shared by build-local-wal2.sh (local addon builds) and CI's rust-test job
+# Used by CI's rust-test job and by local `cargo test` runs
 # (cargo test must link a SQLite with STMT_SCANSTATUS + STAT4 — the system
 # libsqlite3 lacks both, and the cost model hand-binds sqlite3_stmt_scanstatus_v2).
 #

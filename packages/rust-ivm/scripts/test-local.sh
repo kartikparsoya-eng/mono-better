@@ -2,9 +2,7 @@
 # test-local.sh — Master local test runner for Rust IVM.
 # Runs ALL tests without Docker/ART:
 #   1. Rust unit + integration tests (cargo test)
-#   2. NAPI addon comprehensive test (test-napi-full.mjs)
-#   3. NAPI addon basic test (test-napi.mjs)
-#   4. WAL2 linking check (if Docker image exists)
+#   2. WAL2 linking check (if Docker image exists)
 #
 # Usage:
 #   bash rust-ivm/scripts/test-local.sh
@@ -53,56 +51,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Check NAPI addon exists
+# 2. Docker WAL2 check (if image exists)
 # ---------------------------------------------------------------------------
-ADDON="$SCRIPT_DIR/../napi/rust-ivm.node"
-echo "━━━ 2. NAPI Addon Check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ ! -f "$ADDON" ]; then
-  echo "  ⚠️  NAPI addon not found at $ADDON"
-  echo "  Building: cd rust-ivm/napi && napi build --release"
-  cd "$PROJECT_ROOT/rust-ivm/napi"
-  if napi build --release 2>&1 | tail -10; then
-    echo "  ✅ NAPI addon built"
-  else
-    echo "  ❌ NAPI addon build FAILED"
-    FAILURES=$((FAILURES + 1))
-  fi
-else
-  ADDON_SIZE=$(stat -f%z "$ADDON" 2>/dev/null || stat -c%s "$ADDON" 2>/dev/null || echo "?")
-  echo "  ✅ NAPI addon found ($ADDON_SIZE bytes)"
-fi
-echo ""
-
-# ---------------------------------------------------------------------------
-# 3. NAPI comprehensive test
-# ---------------------------------------------------------------------------
-echo "━━━ 3. NAPI Comprehensive Test ━━━━━━━━━━━━━━━━━━━━━━━"
-cd "$PROJECT_ROOT"
-if node "$SCRIPT_DIR/test-napi-full.mjs" $VERBOSE 2>&1; then
-  echo "  ✅ NAPI comprehensive test passed"
-else
-  echo "  ❌ NAPI comprehensive test FAILED"
-  FAILURES=$((FAILURES + 1))
-fi
-echo ""
-
-# ---------------------------------------------------------------------------
-# 4. NAPI basic test (legacy)
-# ---------------------------------------------------------------------------
-echo "━━━ 4. NAPI Basic Test (legacy) ━━━━━━━━━━━━━━━━━━━━━━"
-cd "$PROJECT_ROOT"
-if node "$SCRIPT_DIR/test-napi.mjs" 2>&1 | tail -5; then
-  echo "  ✅ NAPI basic test passed"
-else
-  echo "  ❌ NAPI basic test FAILED"
-  FAILURES=$((FAILURES + 1))
-fi
-echo ""
-
-# ---------------------------------------------------------------------------
-# 5. Docker WAL2 check (if image exists)
-# ---------------------------------------------------------------------------
-echo "━━━ 5. Docker WAL2 Check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "━━━ 2. Docker WAL2 Check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if docker image inspect zero-rust-ivm:latest >/dev/null 2>&1; then
   echo "  Docker image found, checking WAL2 linking..."
   if [ -f "$SCRIPT_DIR/test-docker-wal2.sh" ]; then

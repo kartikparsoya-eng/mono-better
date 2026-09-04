@@ -463,7 +463,6 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// A streaming frame — one chunk of the wire output.
-/// Both HTTP and napi transports consume these.
 #[derive(Clone, Debug)]
 pub enum StreamFrame {
     /// A partial chunk of row changes for a query.
@@ -485,7 +484,7 @@ pub enum StreamFrame {
 }
 
 /// A sink that receives streaming frames.
-/// Implementations: HTTP chunked response, napi ThreadsafeFunction queue.
+/// Implementations in this crate: `NullSink`, `CollectSink`.
 pub trait StreamSink {
     fn send(&mut self, frame: StreamFrame);
 }

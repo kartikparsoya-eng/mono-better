@@ -88,8 +88,8 @@ fn poke_part_max_bytes() -> usize {
     })
 }
 
-/// Abstract WebSocket sink. The napi implementation proxies to TS's WS via
-/// a ThreadsafeFunction with `Blocking` call mode.
+/// Abstract WebSocket sink. The production implementation is rust-syncer's
+/// `DirectWebSocketSink` (ws_sink.rs), which owns the socket's writer task.
 pub trait WebSocketSink: Send + Sync {
     fn push(&self, msg: Value) -> Result<(), String>;
     /// Push a frame whose approximate serialized byte size is already known

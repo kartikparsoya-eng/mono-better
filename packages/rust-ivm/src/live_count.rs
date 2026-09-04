@@ -1,6 +1,6 @@
 //! Live-instance census for leak hunting. Each tracked type increments its
 //! counter on construction and decrements in `Drop`; `snapshot()` renders the
-//! process-wide totals. Used (env-gated) by the napi teardown to show which
+//! process-wide totals. Rendered (env-gated) at snapshotter teardown to show which
 //! operator structs survive `Engine::destroy` — a nonzero census after the
 //! graph is destroyed means Rc cycles (or an external holder) are retaining
 //! subtrees, which in turn pin source DB cells and defer SQLite closes.

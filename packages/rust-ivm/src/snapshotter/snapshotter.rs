@@ -72,7 +72,7 @@ impl Snapshotter {
         }
     }
 
-    /// Install the out-of-band interrupt registry used by the NAPI owner.
+    /// Install the out-of-band interrupt registry used by the engine's owner.
     /// The registry is republished after every snapshot swap so cancel always
     /// targets the connections that TableSource and diff iteration actually use.
     pub fn set_snapshot_interrupt_registry(
@@ -291,10 +291,10 @@ pub enum StalePinAction {
     Repin,
 }
 
-/// Pure decision core of the napi stale-pin guard (`stale_pin_check` in
-/// napi/src/lib.rs): tracks pin PROGRESS and applies the two-strike rule.
-/// Lives in this crate so the logic is unit-testable — the napi cdylib
-/// cannot link a test harness (unresolved `napi_*` symbols outside node).
+/// Pure decision core of the stale-pin guard: tracks pin PROGRESS and applies
+/// the two-strike rule. (It was split out so the napi cdylib's `stale_pin_check`
+/// could be unit-tested from this crate; that addon was removed in a5e502ad9,
+/// but the split is still where the logic's tests live.)
 ///
 /// The trigger condition is deliberately pin-progress-based, NOT
 /// activity-based: a starved replication subscription under a reconnect

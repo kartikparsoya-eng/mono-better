@@ -2,9 +2,8 @@
 # Local test runner — runs all Rust IVM tests without Docker or ART.
 #
 # Usage:
-#   ./rust-ivm/scripts/run-local-tests.sh              # Rust tests + NAPI tests
+#   ./rust-ivm/scripts/run-local-tests.sh              # Rust tests
 #   ./rust-ivm/scripts/run-local-tests.sh --rust-only   # Rust tests only
-#   ./rust-ivm/scripts/run-local-tests.sh --napi-only   # NAPI tests only
 #   ./rust-ivm/scripts/run-local-tests.sh --docker      # Also run Docker WAL2 test
 #   ./rust-ivm/scripts/run-local-tests.sh --all         # Everything including Docker
 
@@ -43,34 +42,6 @@ run_rust_tests() {
   fi
 }
 
-run_napi_tests() {
-  echo -e "\n${BLUE}=== NAPI Addon Tests ===${NC}"
-
-  ADDON="$PROJECT_ROOT/rust-ivm/napi/rust-ivm.node"
-
-  if [ ! -f "$ADDON" ]; then
-    echo -e "${YELLOW}NAPI addon not found. Building...${NC}"
-    cd "$PROJECT_ROOT/rust-ivm/napi"
-    if ! napi build --release 2>&1; then
-      echo -e "${RED}NAPI build failed${NC}"
-      TOTAL_FAIL=$((TOTAL_FAIL + 1))
-      return
-    fi
-  fi
-
-  echo "Running: node scripts/test-napi.mjs"
-  echo ""
-
-  cd "$PROJECT_ROOT"
-  if node rust-ivm/scripts/test-napi.mjs 2>&1; then
-    echo -e "${GREEN}NAPI tests: PASS${NC}"
-    TOTAL_PASS=$((TOTAL_PASS + 1))
-  else
-    echo -e "${RED}NAPI tests: FAIL${NC}"
-    TOTAL_FAIL=$((TOTAL_FAIL + 1))
-  fi
-}
-
 run_docker_tests() {
   echo -e "\n${BLUE}=== Docker WAL2 Verification ===${NC}"
 
@@ -99,15 +70,13 @@ run_docker_tests() {
 
 # Parse args
 RUST=true
-NAPI=true
 DOCKER=false
 
 for arg in "$@"; do
   case $arg in
-    --rust-only)  RUST=true;  NAPI=false; DOCKER=false ;;
-    --napi-only)  RUST=false; NAPI=true;  DOCKER=false ;;
+    --rust-only)  RUST=true;  DOCKER=false ;;
     --docker)     DOCKER=true ;;
-    --all)        RUST=true;  NAPI=true;  DOCKER=true ;;
+    --all)        RUST=true;  DOCKER=true ;;
   esac
 done
 
@@ -116,7 +85,6 @@ echo "=========================="
 echo "Project root: $PROJECT_ROOT"
 
 if $RUST; then run_rust_tests; fi
-if $NAPI; then run_napi_tests; fi
 if $DOCKER; then run_docker_tests; fi
 
 echo ""

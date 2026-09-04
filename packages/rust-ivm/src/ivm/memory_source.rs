@@ -628,7 +628,9 @@ impl Input for SourceInput {
 
             // Use the dedicated connection for this source (one per source,
             // matching TS's one better-sqlite3 Database per syncer worker).
-            // The NAPI worker thread is single-threaded, so this is safe.
+            // The `RefCell` borrow is safe because the engine is `!Send` and
+            // runs on one serial client-group thread (this used to cite the
+            // NAPI worker thread, removed in a5e502ad9).
             let db_conn = self.db_conn.borrow();
             let db = match db_conn.as_ref() {
                 Some(c) => c,
