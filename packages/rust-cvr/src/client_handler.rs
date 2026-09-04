@@ -237,6 +237,13 @@ struct PokeState {
     /// Reset to 0 whenever the body is flushed (taken).
     body_est_bytes: usize,
     poke_in_progress: bool,
+    /// `to_version` of the FIRST patch admitted into this poke — i.e. the patch
+    /// that made `ensure_body` push `pokeStart` and set `started`. Diagnostic
+    /// for the `Patches were sent but finalVersion ...` close: that error means
+    /// a patch was admitted (`to_version > base`) and `end()` then ran with
+    /// `final <= base`, so this is the version that says WHICH patch opened a
+    /// poke the flush went on to discard.
+    first_patch_version: Option<CVRVersion>,
 }
 
 impl PokeState {
@@ -249,6 +256,7 @@ impl PokeState {
             part_count: 0,
             body_est_bytes: 0,
             poke_in_progress: false,
+            first_patch_version: None,
         }
     }
 }
@@ -308,6 +316,9 @@ impl PokeHandler {
         drop(base);
 
         let mut state = self.state.lock().unwrap();
+        if state.first_patch_version.is_none() {
+            state.first_patch_version = Some(to_version.clone());
+        }
         self.ensure_body(&mut state)?;
 
         let result: Result<(), String> = (|| {
@@ -471,8 +482,9 @@ impl PokeHandler {
                 // context (`lc.withContext('pokeID', pokeID)`,
                 // client-handler.ts:190).
                 let error = format!(
-                    "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?} (pokeID {})",
-                    final_version, *base, state.poke_id
+                    "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?} \
+                     (pokeID {}, firstPatch {:?})",
+                    final_version, *base, state.poke_id, state.first_patch_version
                 );
                 drop(base);
                 self.release_chain(&mut state);

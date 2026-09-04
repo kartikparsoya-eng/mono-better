@@ -696,6 +696,7 @@ impl CVRStoreHandle {
         // revision did — makes every CONFIG-ONLY flush pay a cache read (and the
         // first one a full per-CG `cvr.rows` scan) while the store mutex is held,
         // work TS never performs.
+        let row_records_before_prune = self.pending.pending_row_record_updates.len();
         if !self.pending.pending_row_record_updates.is_empty() {
             let existing_rows = self.get_row_records().await?;
             // TS `this.#rowCount = existingRowRecords.size` (cvr-store.ts:1068).
@@ -735,6 +736,31 @@ impl CVRStoreHandle {
         // round-trip per no-op cycle. `is_empty()` here correctly excludes the
         // not-yet-queued derivable instance write but includes any pre-queued one.
         if self.pending.is_empty() {
+            // Composition of the pending set at a NO-OP flush. A no-op reverts
+            // the CVR to `orig`, discarding whatever version this pass produced
+            // — harmless on its own, but if a patch was also poked at the
+            // discarded version the client is CLOSED with
+            // `Patches were sent but finalVersion ...` (rust 434 vs TS 0 on
+            // identical traffic). `pruned` is the giveaway: row records that
+            // were queued and then dropped as unchanged mean rows were
+            // "received" without changing anything, which is the case TS's
+            // design says cannot coexist with an emitted patch.
+            if row_records_before_prune > 0 {
+                tracing::info!(
+                    cvr_id = %self.cvr_id,
+                    "no-op CVR flush discarding version {}: rows_queued={} rows_pruned={} \
+                     (clients_ins={} clients_del={} queries={} partial={} desires={} instance={})",
+                    crate::schema::types::version_string(&cvr.version),
+                    row_records_before_prune,
+                    row_records_before_prune - self.pending.pending_row_record_updates.len(),
+                    self.pending.pending_clients_insert.len(),
+                    self.pending.pending_clients_delete.len(),
+                    self.pending.pending_query_updates.len(),
+                    self.pending.pending_query_partial_updates.len(),
+                    self.pending.pending_desire_updates.len(),
+                    self.pending.pending_instance_write.is_some(),
+                );
+            }
             return Ok(None);
         }
         // There ARE material changes — now record the instance write and proceed.
