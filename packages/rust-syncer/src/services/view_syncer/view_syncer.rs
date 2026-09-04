@@ -10243,6 +10243,21 @@ impl ViewSyncerService {
             CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, Some(provider));
         if let Some(reason) = bump_reason {
             crate::metrics::record_same_hash_rehydration_version_bump(reason);
+            // The bump is what a quiet commit later throws away, producing the
+            // `Patches were sent but finalVersion ...` close (pokeID == final+1).
+            // The OTEL counter carries the reason but is not scraped, so the
+            // label — `missing-pipeline` vs `row-set-signature-drift` — was
+            // invisible in production. It is the field that says WHICH upstream
+            // condition fires: a missing pipeline (rust dropped a pipeline TS
+            // keeps) or signature drift (re-execution chose a different row
+            // subset). TS logs nothing here, so this is rust-only diagnostics on
+            // a rust-only symptom: a 434-vs-0 divergence against the TS arm on
+            // identical traffic (2026-09-04 dual run).
+            tracing::info!(
+                cg_id = %self.cg_id,
+                add_queries = add_queries.len(),
+                "same-hash rehydration version bump: {reason}"
+            );
             updater.ensure_new_version();
         }
 
