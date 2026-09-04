@@ -152,6 +152,19 @@ pub struct SyncerConfig {
     pub yield_threshold_ms: f64,
 }
 
+/// Port of zero-config.ts:35-38 `appOptions.id: v.string().default('zero')
+/// .assert(id => ALLOWED_APP_ID_CHARACTERS.test(id), INVALID_APP_ID_MESSAGE)`
+/// — an invalid appID is a fatal config error at startup (TS `parseOptions`
+/// exits with the message; rust panics with it).
+fn validated_app_id(app_id: String) -> String {
+    assert!(
+        rust_cvr::shards::allowed_app_id_characters(&app_id),
+        "{}",
+        rust_cvr::shards::INVALID_APP_ID_MESSAGE
+    );
+    app_id
+}
+
 impl SyncerConfig {
     pub fn from_env() -> Self {
         let config = Self {
@@ -193,9 +206,11 @@ impl SyncerConfig {
                     auto
                 }),
             shard: env::var("SHARD").unwrap_or_else(|_| "0".to_string()),
-            app_id: env::var("ZERO_APP_ID")
-                .or_else(|_| env::var("APP_ID"))
-                .unwrap_or_else(|_| "zero".to_string()),
+            app_id: validated_app_id(
+                env::var("ZERO_APP_ID")
+                    .or_else(|_| env::var("APP_ID"))
+                    .unwrap_or_else(|_| "zero".to_string()),
+            ),
             auth_jwk: env::var("AUTH_JWK").ok(),
             auth_jwks_url: env::var("AUTH_JWKS_URL").ok(),
             auth_secret: env::var("AUTH_SECRET").ok(),
@@ -392,5 +407,26 @@ mod cpu_quota_tests {
         assert_eq!(parse_cpu_max("max 100000"), None);
         assert_eq!(parse_cpu_max(""), None);
         assert_eq!(parse_cpu_max("garbage here"), None);
+    }
+}
+
+#[cfg(test)]
+mod app_id_tests {
+    use super::*;
+
+    #[test]
+    fn valid_app_ids_pass_through() {
+        assert_eq!(validated_app_id("zero".to_string()), "zero");
+        assert_eq!(validated_app_id("acme_prod2".to_string()), "acme_prod2");
+    }
+
+    /// zero-config.ts:38 rejects the appID at config parse; before this port
+    /// rust accepted it and later built `Acme-Prod_0/cvr` PG schema names.
+    #[test]
+    #[should_panic(
+        expected = "The App ID may only consist of lower-case letters, numbers, and the underscore character"
+    )]
+    fn invalid_app_id_is_a_fatal_config_error() {
+        validated_app_id("Acme-Prod".to_string());
     }
 }
