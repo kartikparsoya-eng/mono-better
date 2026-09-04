@@ -745,7 +745,10 @@ impl CVRStoreHandle {
             // were queued and then dropped as unchanged mean rows were
             // "received" without changing anything, which is the case TS's
             // design says cannot coexist with an emitted patch.
-            if row_records_before_prune > 0 {
+            // Ungated: the gated version logged only 6 of 248 failing passes,
+            // so the MAJORITY shape (no rows queued at all, yet a patch was
+            // still poked at the discarded version) was invisible.
+            {
                 tracing::info!(
                     cvr_id = %self.cvr_id,
                     "no-op CVR flush discarding version {}: rows_queued={} rows_pruned={} \
