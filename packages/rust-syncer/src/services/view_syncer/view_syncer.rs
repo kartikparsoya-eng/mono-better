@@ -8399,6 +8399,25 @@ impl AuthValidator for InertAuthValidator {
     }
 }
 
+/// Whether a failed CVR flush may be retried.
+///
+/// Rust-only (AGENTS.md rule 5): TS has no flush retry at all, so this
+/// predicate exists only to bound the rust-only convoy mitigation. It must
+/// stay TRUE for exactly the errors `CVRStoreHandle::flush` can raise BEFORE
+/// `std::mem::take(&mut self.pending)` — today that is the `pool.begin()`
+/// acquire. Every other error has already eaten the writes, so retrying it
+/// cannot re-send them; it can only turn a hard failure into a silent quiet
+/// commit. Anything not listed here propagates and fails the group, which is
+/// what TS does with every flush error.
+fn is_retryable_flush_error(e: &rust_cvr::cvr_store::CVRStoreError) -> bool {
+    matches!(
+        e,
+        rust_cvr::cvr_store::CVRStoreError::Sqlx(
+            sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed
+        )
+    )
+}
+
 impl ViewSyncerService {
     /// The storeless engine-surface constructor (the former standalone
     /// `SyncEngine::new`). Rust-only test scaffold, no TS twin: the engine-level
@@ -8885,11 +8904,18 @@ impl ViewSyncerService {
                 // simply QUEUES, so transient CVR saturation degrades to latency,
                 // not a storm. We approximate that: retry a few times with growing
                 // jittered backoff so a saturation spike is ridden out as latency.
-                // The flush is one PG transaction (a failed attempt leaves nothing
-                // behind, so retries are safe) and deterministic errors (ownership
-                // handoff) just re-fail cheaply. Unlike TS's unbounded queue this
-                // is BOUNDED, so a genuinely-dead CVR still fails the group
-                // promptly rather than wedging. Jitter de-synchronizes the convoy.
+                // Unlike TS's unbounded queue this is BOUNDED, so a genuinely-dead
+                // CVR still fails the group promptly rather than wedging. Jitter
+                // de-synchronizes the convoy.
+                //
+                // CORRECTED 2026-09-05: this block used to claim "a failed attempt
+                // leaves nothing behind, so retries are safe" and retried EVERY
+                // error. A failed attempt leaves nothing behind in the DATABASE
+                // (the tx rolls back) but it has already consumed the store's
+                // pending set, so the retry re-sends NOTHING, reports a quiet
+                // commit, and silently discards the writes. Only errors raised
+                // BEFORE the pending set is taken may be retried —
+                // `is_retryable_flush_error`.
                 const MAX_FLUSH_ATTEMPTS: u32 = 3;
                 let mut attempt = 1u32;
                 let result = loop {
@@ -8899,6 +8925,17 @@ impl ViewSyncerService {
                     };
                     match outcome {
                         Ok(r) => break Ok(r),
+                        // ONLY the pool-acquire convoy is retryable. TS has NO
+                        // retry at all: `#flushUpdater` lets the error out and
+                        // the view-syncer fails the group, so every client
+                        // rehomes and rehydrates. Retrying anything else is not
+                        // just un-TS, it is UNSOUND — `flush` consumes its
+                        // pending set, so a second attempt after a write failure
+                        // sends nothing, reports a quiet commit, and silently
+                        // discards the writes (see the ACQUIRE BEFORE CONSUMING
+                        // note in cvr_store.rs). A pool acquire fails before the
+                        // `take`, so that one CAN be replayed truthfully.
+                        Err(e) if !is_retryable_flush_error(&e) => break Err(e),
                         Err(e) if attempt >= MAX_FLUSH_ATTEMPTS => break Err(e),
                         Err(e) => {
                             let jitter = (std::time::SystemTime::now()

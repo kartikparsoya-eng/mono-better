@@ -781,6 +781,22 @@ impl CVRStoreHandle {
         // CVR: they're tagged with the old version, and replaying them is exactly
         // the cross-owner corruption the version guard exists to prevent. TS gets
         // this for free by discarding the whole CVRStore with the failed service.
+        let mut stats = CVRFlushStats::default();
+        // ACQUIRE BEFORE CONSUMING. The `take` below is destructive and there is
+        // no way to re-derive the pending set, so anything that can fail BEFORE
+        // it must not have eaten the writes. A pool-acquire failure is the one
+        // retryable error `flush_ops_to_store` exists for (the convoy case), and
+        // taking `pending` first made that retry a LIE: attempt 1 consumed the
+        // writes and failed, attempt 2 found `self.pending` empty, took the
+        // `is_empty()` early return above, and reported a QUIET COMMIT — a
+        // success. The writes were silently discarded and no error ever reached
+        // the client. Observed 192/192 flush failures reporting `retry 1/3` and
+        // then "succeeding", with ZERO escalations to attempt 2/3 and ZERO group
+        // failures, against a payload (a `\u0000` in a query arg, which PG
+        // rejects for `jsonb`) that is perfectly deterministic and could not
+        // possibly have succeeded on a genuine re-send.
+        let mut tx = self.pool.begin().await?;
+
         let pending = std::mem::take(&mut self.pending);
 
         if crate::tracer::enabled() {
@@ -797,9 +813,6 @@ impl CVRStoreHandle {
                 ),
             );
         }
-
-        let mut stats = CVRFlushStats::default();
-        let mut tx = self.pool.begin().await?;
         // Port of TS `runTx` (run-transaction.ts:37-56): every zero-cache
         // transaction disables the session `statement_timeout` (providers set
         // one at the database level) and bounds an orphaned transaction with
