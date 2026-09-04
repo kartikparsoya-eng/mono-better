@@ -119,5 +119,8 @@ python3 "$ROOT/parity/alias_guard.py"; chk $? "M9 alias guard"
 step "parity — M10 helper-import ledger (every shared/types helper a ported file imports has a rust twin or a verified alias)"
 python3 "$ROOT/parity/helper_imports.py"; chk $? "M10 helper-import ledger"
 
+step "parity — M11 prod-path reachability (a ported symbol prod cannot reach is not parity)"
+python3 "$ROOT/parity/prod_reachability.py"; chk $? "M11 prod-path reachability"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail
