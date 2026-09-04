@@ -1050,6 +1050,14 @@ pub struct ViewSyncerService {
     /// the existing tests.
     #[cfg(test)]
     config_pass_runs: u64,
+    /// Test seam (empty in production): forced outcomes for `flush_ops_to_store`,
+    /// so the storeless harness can exercise the QUIET-COMMIT branch
+    /// (`flushed: false` — TS `#flush` returning `{cvr: this._orig, flushed:
+    /// false}` when nothing material changed). Without it that branch needs a
+    /// live PG CVR store, and it is the branch the config-poke ORDER bug lived
+    /// in (`config_update_no_op_flush_does_not_close_client`).
+    #[cfg(test)]
+    forced_flush_outcomes: std::cell::RefCell<std::collections::VecDeque<bool>>,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1390,6 +1398,8 @@ impl ViewSyncerService {
             validate_connection_runs: 0,
             #[cfg(test)]
             config_pass_runs: 0,
+            #[cfg(test)]
+            forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -8438,6 +8448,8 @@ impl ViewSyncerService {
             validate_connection_runs: 0,
             #[cfg(test)]
             config_pass_runs: 0,
+            #[cfg(test)]
+            forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -8826,6 +8838,12 @@ impl ViewSyncerService {
         flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
     ) -> Result<bool, String> {
+        // Test seam (empty in production): forces the store-flush outcome so the
+        // storeless harness can reach the quiet-commit (`flushed: false`) path.
+        #[cfg(test)]
+        if let Some(forced) = self.forced_flush_outcomes.borrow_mut().pop_front() {
+            return Ok(forced);
+        }
         let Some(store_arc) = self.store.clone() else {
             return Ok(true);
         };
@@ -9157,13 +9175,27 @@ impl ViewSyncerService {
             // version. A lagging reconnect must stay on its old cookie until
             // `catchup_clients`; advancing it here would make every catch-up
             // patch look stale and silently drop the missed rows.
-            let clients =
-                Self::config_poke_targets(self.get_clients(poke_ws_ids), &expected_current_version);
-            let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-            let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone(), "config-cvr");
-            for p in &config_patches {
-                pokers.add_patch(p);
-            }
+            // ORDER IS THE PORT (AGENTS.md rule 8). TS `#updateCVRConfig`
+            // FLUSHES FIRST and only then pokes, guarded on the version having
+            // actually advanced:
+            //
+            //   this.#cvr = await this.#flushUpdater(lc, updater);
+            //   if (cmpVersions(cvr.version, this.#cvr.version) < 0) {
+            //     const pokers = startPoke(this.#getClients(cvr.version), newCVR.version);
+            //     ... addPatch ... ; await pokers.end(newCVR.version);
+            //   }
+            //
+            // (view-syncer.ts:1140-1159). Rust used to open the pokers BEFORE
+            // the flush, at the optimistically bumped `cfg_cvr.version`, admit
+            // the config patches at that version, and only then discover the
+            // flush was a no-op and revert to `orig`. `end(orig)` then found
+            // `base == final` and CLOSED the client with `Patches were sent but
+            // finalVersion ... is not greater than baseVersion` — 256 of 256
+            // such closes in a replay came from this site, against ZERO on the
+            // TS arm running the same trace. Flushing first makes the failure
+            // structurally unreachable: when nothing was persisted the version
+            // did not advance, the guard is false, and no poke is opened at a
+            // version that is about to be thrown away.
             let cfg_arc = Arc::new(cfg_cvr);
             let store_flushed = self
                 .flush_ops_to_store(
@@ -9182,7 +9214,27 @@ impl ViewSyncerService {
             } else {
                 cfg.base.orig.clone()
             };
-            pokers.end(cfg_cvr.version.clone());
+            // TS `cmpVersions(cvr.version, this.#cvr.version) < 0` — poke only
+            // when the flushed CVR is strictly ahead of the pre-config version.
+            if cmp_versions(
+                &Some(expected_current_version.clone()),
+                &Some(cfg_cvr.version.clone()),
+            ) == std::cmp::Ordering::Less
+            {
+                // TS `#getClients(cvr.version)` — clients at the PRE-config
+                // version; a lagging reconnect stays on its old cookie until
+                // `catchup_clients`.
+                let clients = Self::config_poke_targets(
+                    self.get_clients(poke_ws_ids),
+                    &expected_current_version,
+                );
+                let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
+                let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone(), "config-cvr");
+                for p in &config_patches {
+                    pokers.add_patch(p);
+                }
+                pokers.end(cfg_cvr.version.clone());
+            }
         }
         // TS `#handleConfigUpdate` arms the eviction timer for the updated CVR's
         // inactive queries at its tail (view-syncer.ts:1390).
@@ -10759,17 +10811,22 @@ impl ViewSyncerService {
         // (view-syncer.ts:1032-1050).
         let clients = self.get_clients(poke_ws_ids);
         {
-            // Like the config poke (`config_poke_targets`): only clients AT the
-            // pre-delete CVR version get this delta poke. A lagging reconnect
-            // must keep its old cookie for `catchup_clients` — ending a poke at
-            // the new version here would jump it over its catch-up interval.
-            let poke_clients =
-                Self::config_poke_targets(clients.clone(), &expected_current_version);
-            let refs: Vec<&ClientHandler> = poke_clients.iter().map(|c| c.as_ref()).collect();
-            let pokers = MultiPoker::new(&refs, cfg_cvr.version.clone(), "config-refs");
-            for p in &patches {
-                pokers.add_patch(p);
-            }
+            // ORDER IS THE PORT (AGENTS.md rule 8) — the SECOND port of TS
+            // `#updateCVRConfig`. `deleteClients` routes through
+            // `#handleConfigUpdate` → `#updateCVRConfig` (view-syncer.ts:1046),
+            // which FLUSHES FIRST and pokes only when the version actually
+            // advanced (view-syncer.ts:1140-1159). Opening the pokers at the
+            // optimistically bumped version and reverting underneath them on a
+            // quiet commit is what closed clients with `Patches were sent but
+            // finalVersion ... is not greater than baseVersion` on the sibling
+            // `handle_config_update` path. Both ports of the same TS function
+            // must have the same order.
+            //
+            // NOTE the contrast with `hydrate_and_sync` / `advance_and_sync`:
+            // TS `#addAndRemoveQueries` (2226/2345/2360) and `#advancePipelines`
+            // (2594/2617/2622) genuinely DO start the poke before the flush and
+            // end at the post-flush version — those rust sites stay poke-first
+            // because that is their TS shape.
             let cfg_arc = Arc::new(cfg_cvr);
             let store_flushed = self
                 .flush_ops_to_store(
@@ -10786,7 +10843,26 @@ impl ViewSyncerService {
             } else {
                 cfg.base.orig.clone()
             };
-            pokers.end(cfg_cvr.version.clone());
+            // TS `cmpVersions(cvr.version, this.#cvr.version) < 0`.
+            if cmp_versions(
+                &Some(expected_current_version.clone()),
+                &Some(cfg_cvr.version.clone()),
+            ) == std::cmp::Ordering::Less
+            {
+                // Like the config poke (`config_poke_targets`): only clients AT
+                // the pre-delete CVR version get this delta poke. A lagging
+                // reconnect must keep its old cookie for `catchup_clients` —
+                // ending a poke at the new version here would jump it over its
+                // catch-up interval.
+                let poke_clients =
+                    Self::config_poke_targets(clients.clone(), &expected_current_version);
+                let refs: Vec<&ClientHandler> = poke_clients.iter().map(|c| c.as_ref()).collect();
+                let pokers = MultiPoker::new(&refs, cfg_cvr.version.clone(), "config-refs");
+                for p in &patches {
+                    pokers.add_patch(p);
+                }
+                pokers.end(cfg_cvr.version.clone());
+            }
         }
 
         // TS `#updateCVRConfig` (view-syncer.ts:1160-1167): once the config
@@ -11666,6 +11742,222 @@ mod engine_tests {
         assert!(
             !result.version.is_empty(),
             "advance produced an empty version — the updater was built without the header version"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-04): the config poke must be opened AFTER the
+    /// store flush and ONLY when the CVR version actually advanced. TS:
+    ///
+    /// ```text
+    /// this.#cvr = await this.#flushUpdater(lc, updater);
+    /// if (cmpVersions(cvr.version, this.#cvr.version) < 0) {
+    ///   const pokers = startPoke(this.#getClients(cvr.version), newCVR.version);
+    ///   for (const patch of patches) { await pokers.addPatch(patch); }
+    ///   await pokers.end(newCVR.version);
+    /// }
+    /// ```
+    ///
+    /// (view-syncer.ts:1138-1159). Rust opened the pokers BEFORE the flush at the
+    /// optimistically bumped version, admitted the config patches there, then
+    /// discovered the flush was a QUIET COMMIT (`flushed: false` — nothing
+    /// material to persist), reverted `cfg_cvr` to `orig` underneath the open
+    /// poke, and called `end(orig)`. That found `base == final` with patches
+    /// pending and CLOSED the client:
+    /// `Patches were sent but finalVersion ... is not greater than baseVersion`.
+    /// 256 of 256 such closes in a prod-replay came from this one site, against
+    /// ZERO on the TS arm running the same trace.
+    ///
+    /// Revert `handle_config_update` to poke-before-flush and the first case
+    /// FAILS (the client receives `WsCommand::Fail`); the second case pins that
+    /// the guard does not over-suppress a poke that legitimately advanced.
+    #[tokio::test]
+    async fn config_update_no_op_flush_does_not_close_client() {
+        async fn run(flush_outcome: bool) -> (usize, usize, usize) {
+            let mut pipelines = IvmPipelines::new();
+            pipelines.init(vec![users_spec()], None, "zero").unwrap();
+            let mut engine = SyncEngine::new(pipelines);
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+            let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+            let shard = ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            };
+            // The client is AT the CVR's version ("00", `empty_cvr`), so it is a
+            // `#getClients(cvr.version)` poke target AND its poke base equals the
+            // version a reverted flush falls back to — the exact production
+            // shape. (A `None` cookie means "no floor" in `add_patch`/`end`, so
+            // it cannot express the base == final collision.)
+            engine.register_client("client1", "ws1", "cg1", &shard, Some("00"), sink);
+
+            // Force the store flush to report the quiet-commit outcome.
+            engine
+                .forced_flush_outcomes
+                .borrow_mut()
+                .push_back(flush_outcome);
+
+            let cvr = super::empty_cvr("cg1", "v1");
+            let puts = vec![DesiredQuerySpec {
+                hash: "q1".to_string(),
+                ast: Some(serde_json::json!({"table": "users"})),
+                name: None,
+                args: None,
+                ttl: None,
+            }];
+
+            engine
+                .handle_config_update(
+                    cvr,
+                    "client1",
+                    &["ws1".to_string()],
+                    &shard,
+                    puts,
+                    Vec::new(),
+                    false,
+                    None,
+                    None,
+                    0,
+                    0,
+                    0,
+                )
+                .await
+                .unwrap();
+
+            let (mut starts, mut ends, mut fails) = (0, 0, 0);
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    WsCommand::Send { msg, .. } => match msg[0].as_str() {
+                        Some("pokeStart") => starts += 1,
+                        Some("pokeEnd") => ends += 1,
+                        _ => {}
+                    },
+                    WsCommand::Fail(_) => fails += 1,
+                    _ => {}
+                }
+            }
+            (starts, ends, fails)
+        }
+
+        // Quiet commit: the version never advanced, so TS opens no poke at all
+        // and the client stays connected.
+        let (starts, ends, fails) = run(false).await;
+        assert_eq!(
+            fails, 0,
+            "a no-op CVR flush must not close the client — this is the \
+             finalVersion-not-greater-than-baseVersion close"
+        );
+        assert_eq!(
+            (starts, ends),
+            (0, 0),
+            "TS pokes nothing when cmpVersions(cvr.version, newCVR.version) is not < 0"
+        );
+
+        // Positive control: a flush that DID persist advances the version, so the
+        // guard opens the poke exactly as before.
+        let (starts, ends, fails) = run(true).await;
+        assert_eq!(fails, 0, "a successful flush must not close the client");
+        assert!(
+            starts >= 1 && ends >= 1,
+            "an advancing config flush must still poke: {starts} starts, {ends} ends"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-04): the SECOND port of TS `#updateCVRConfig`.
+    /// `deleteClients` routes through `#handleConfigUpdate` → `#updateCVRConfig`
+    /// (view-syncer.ts:1046), so it must flush first and poke only when the
+    /// version advanced — exactly like `handle_config_update`. Rust had the same
+    /// poke-before-flush ordering here, so a quiet commit on a delete pass closed
+    /// the client the same way. Revert `delete_clients` to poke-before-flush and
+    /// this FAILS with the `finalVersion ... is not greater than baseVersion`
+    /// close.
+    #[tokio::test]
+    async fn delete_clients_no_op_flush_does_not_close_client() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &shard,
+            Some("00"),
+            Arc::new(DirectWebSocketSink::new(tx1)),
+        );
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        engine.register_client(
+            "client2",
+            "ws2",
+            "cg1",
+            &shard,
+            Some("00"),
+            Arc::new(DirectWebSocketSink::new(tx2)),
+        );
+
+        // Give client2 a desired query so its deletion produces real patches
+        // (`delete_client` → `mark_desired_queries_as_inactive`). This pass
+        // flushes for real, advancing the CVR past "00".
+        let cvr = engine
+            .handle_config_update(
+                super::empty_cvr("cg1", "v1"),
+                "client2",
+                &["ws1".to_string(), "ws2".to_string()],
+                &shard,
+                vec![DesiredQuerySpec {
+                    hash: "q1".to_string(),
+                    ast: Some(serde_json::json!({"table": "users"})),
+                    name: None,
+                    args: None,
+                    ttl: None,
+                }],
+                Vec::new(),
+                false,
+                None,
+                None,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        while rx1.try_recv().is_ok() {}
+
+        // Now delete client2 with a QUIET COMMIT: patches are produced, but the
+        // store reports nothing material persisted, so the CVR reverts to the
+        // pre-delete version that client1 is already at.
+        engine.forced_flush_outcomes.borrow_mut().push_back(false);
+        engine
+            .delete_clients(
+                cvr,
+                &shard,
+                "client1",
+                "ws1",
+                &["client2".to_string()],
+                &["client2".to_string()],
+                &[],
+                &["ws1".to_string()],
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let mut fails = 0;
+        while let Ok(cmd) = rx1.try_recv() {
+            if matches!(cmd, WsCommand::Fail(_)) {
+                fails += 1;
+            }
+        }
+        assert_eq!(
+            fails, 0,
+            "a no-op delete-clients flush must not close the client — TS pokes \
+             only when cmpVersions(cvr.version, this.#cvr.version) < 0"
         );
     }
 
