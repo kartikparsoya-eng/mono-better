@@ -59,21 +59,25 @@ impl<'de> serde::Deserialize<'de> for Value {
         Ok(match v {
             serde_json::Value::Null => Value::Null,
             serde_json::Value::Bool(b) => Value::Bool(b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    const MAX_SAFE: i64 = 9_007_199_254_740_991;
-                    if !(-MAX_SAFE..=MAX_SAFE).contains(&i) {
-                        return Err(serde::de::Error::custom(format!(
-                            "integer {i} is outside of supported bounds"
-                        )));
-                    }
-                    Value::F64(i as f64)
-                } else if let Some(f) = n.as_f64() {
-                    Value::F64(f)
-                } else {
-                    Value::Null
-                }
-            }
+            // Every JSON number becomes an f64, exactly as `JSON.parse` does.
+            // TS parses inbound protocol messages with a plain `JSON.parse`
+            // (connection.ts:203) and the AST's literal schema is a bare
+            // `v.number()` (zero-protocol/src/ast.ts:32/61/64), so a value
+            // beyond ±(2^53-1) is silently rounded to the nearest double and
+            // the query runs. This impl used to REJECT it, which failed the
+            // whole client group with `AST parse error: integer ... is outside
+            // of supported bounds` — an error TS never produces.
+            //
+            // The bounds check belongs to the OTHER direction, reading a stored
+            // SQLite integer (`sqlite/table_source.rs`, TS `fromSQLiteType`
+            // throwing `UnsupportedValueError`, zqlite table-source.ts:637);
+            // it was copied here, where TS has no twin. `replay::
+            // json_to_rust_value` — the other JSON→Value path, which this impl
+            // documents itself as matching — already does the plain coercion.
+            serde_json::Value::Number(n) => match n.as_f64() {
+                Some(f) => Value::F64(f),
+                None => Value::Null,
+            },
             serde_json::Value::String(s) => Value::Str(Arc::from(s)),
             other => Value::Json(Arc::from(other.to_string())),
         })
@@ -246,6 +250,63 @@ mod value_parity_tests {
         assert_eq!(js_stringify_value(&Value::F64(f64::INFINITY)), "null");
         assert_eq!(js_stringify_value(&Value::F64(f64::NEG_INFINITY)), "null");
         assert_eq!(js_stringify_value(&Value::F64(-0.0)), "0");
+    }
+
+    /// NON-VACUOUS (2026-09-05): an AST literal beyond ±(2^53-1) must be
+    /// ROUNDED like `JSON.parse`, not rejected.
+    ///
+    /// TS parses inbound protocol messages with a plain `JSON.parse`
+    /// (zero-cache connection.ts:203) into an AST whose literal schema is a
+    /// bare `v.number()` (zero-protocol ast.ts:32/61/64) — no bounds check
+    /// anywhere — so the value silently becomes the nearest double and the
+    /// query runs. Rust's `Deserialize` rejected it, so `parse_ts_ast` failed
+    /// and the whole client group went down with
+    /// `Internal: AST parse error for qid=...: integer 9007199254740993 is
+    /// outside of supported bounds` (observed once in the 2026-09-05 60-minute
+    /// prod-replay). The bounds check has a real TS twin only in the opposite
+    /// direction, reading a stored SQLite integer
+    /// (`table_source.rs` <- `fromSQLiteType`), where it is kept.
+    ///
+    /// Golden values are `JSON.parse`'s own output, taken from node:
+    ///   JSON.parse("[9007199254740993, -9007199254740993, 12345678901234567890]")
+    ///     -> 9007199254740992 | -9007199254740992 | 12345678901234567000
+    ///
+    /// Restore the `outside of supported bounds` error and this fails on the
+    /// first `unwrap`.
+    #[test]
+    fn json_numbers_round_like_json_parse_instead_of_erroring() {
+        let parsed: Vec<Value> = serde_json::from_str(
+            "[9007199254740993, -9007199254740993, 12345678901234567890, 1, 1.5]",
+        )
+        .expect(
+            "a JSON number beyond 2^53 must deserialize like JSON.parse does \
+             (TS has no bounds check on AST literals), not error",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                Value::F64(9007199254740992.0),
+                Value::F64(-9007199254740992.0),
+                Value::F64(12345678901234567000.0),
+                Value::F64(1.0),
+                Value::F64(1.5),
+            ],
+            "must match JSON.parse's doubles exactly"
+        );
+
+        // And the two rust JSON→Value paths must agree: this impl documents
+        // itself as matching `json_to_value` logic, and `replay::
+        // json_to_rust_value` never had the bounds check — the disagreement is
+        // how the divergence hid (the analyze path accepted what the serving
+        // path rejected).
+        for raw in ["9007199254740993", "-9007199254740993", "1", "1.5"] {
+            let via_serde: Value = serde_json::from_str(raw).unwrap();
+            let via_replay = crate::replay::json_to_rust_value(&serde_json::from_str(raw).unwrap());
+            assert_eq!(
+                via_serde, via_replay,
+                "the serde and replay JSON->Value paths must agree on {raw}"
+            );
+        }
     }
 
     #[test]
