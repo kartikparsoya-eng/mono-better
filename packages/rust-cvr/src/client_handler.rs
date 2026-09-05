@@ -460,8 +460,17 @@ impl PokeHandler {
             if cmp_versions(&base, &Some(final_version.clone())) == Ordering::Equal
                 && !self.force_initial_poke
             {
-                // TS client-handler.ts:196 `lc.info?.(`already caught up, not sending poke.`)`.
-                tracing::info!("already caught up, not sending poke.");
+                // TS `end` returns SILENTLY here — `return; // Nothing changed
+                // and nothing was sent.` (client-handler.ts:319-325). It logs
+                // NOTHING at this site. Rust used to emit
+                // `already caught up, not sending poke.` here, misattributed to
+                // client-handler.ts:196, which is the `startPoke` branch below
+                // — a different site with a different comparison (TENTATIVE vs
+                // base, not FINAL vs base). On the advance path the tentative
+                // version is always ahead, so TS never takes that branch, while
+                // rust took THIS one on every no-change advance: 1.7M INFO
+                // lines/hour of JSON serialization on the serving path against
+                // TS's 2,983, for identical (empty) client output.
                 self.release_chain(&mut state);
                 return Ok(());
             }
@@ -880,6 +889,10 @@ impl ClientHandler {
         let force_initial_poke = !self.ever_poked.load(AtomicOrdering::SeqCst);
         let cmp = cmp_versions(&base_val, &Some(tentative_version.clone()));
         if cmp == Ordering::Greater || (cmp == Ordering::Equal && !force_initial_poke) {
+            // TS client-handler.ts:196 `lc.info?.(`already caught up, not
+            // sending poke.`)` — logged where TS logs it, on the NOOP branch of
+            // `startPoke`, comparing the TENTATIVE version to the base.
+            tracing::info!("already caught up, not sending poke.");
             // Genuinely inert NOOP handler (TS returns an object whose
             // addPatch/end/cancel are empty functions): every method
             // early-returns on `noop`, so a later `end(final != base)` cannot
@@ -1342,6 +1355,100 @@ mod tests {
     /// fabricated from-scratch `pokeStart {baseCookie: null}` + `pokeEnd` and
     /// REGRESSED the client's cookie. TS returns an object whose
     /// addPatch/end/cancel are empty functions (client-handler.ts).
+    /// NON-VACUOUS (2026-09-05): `already caught up, not sending poke.` is TS
+    /// `startPoke`'s line (client-handler.ts:196), compared against the
+    /// TENTATIVE version. TS's `end` returns SILENTLY in the equivalent
+    /// situation (`return; // Nothing changed and nothing was sent.`,
+    /// client-handler.ts:319-325).
+    ///
+    /// Rust had it on the `end` site only. Because rust's poker is lazy, that
+    /// branch fires on EVERY no-change advance for every caught-up client,
+    /// while TS's `startPoke` branch does not (the advance's tentative version
+    /// is the new stateVersion, strictly ahead of every client base). Measured
+    /// on the 60-minute prod-replay: 1,718,897 of these INFO lines on rust
+    /// against 2,983 on TS — 576x the JSON log serialization on the serving
+    /// path, for byte-identical (empty) client output.
+    ///
+    /// Move the `tracing::info!` back to `end` and the second half fails; drop
+    /// it from `start_poke` and the first half fails.
+    #[test]
+    fn caught_up_is_logged_at_start_poke_not_at_end() {
+        use std::sync::{Arc as StdArc, Mutex as CapMutex};
+
+        #[derive(Clone)]
+        struct Cap(StdArc<CapMutex<Vec<u8>>>);
+        impl std::io::Write for Cap {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Cap {
+            type Writer = Cap;
+            fn make_writer(&'a self) -> Cap {
+                self.clone()
+            }
+        }
+
+        const LINE: &str = "already caught up, not sending poke.";
+        let v2 = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        };
+        let v3 = CVRVersion {
+            state_version: "v3".to_string(),
+            config_version: None,
+        };
+
+        let capture = |f: &dyn Fn()| -> String {
+            let buf = StdArc::new(CapMutex::new(Vec::<u8>::new()));
+            let sub = tracing_subscriber::fmt()
+                .with_writer(Cap(buf.clone()))
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            tracing::subscriber::with_default(sub, f);
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+
+        // (a) startPoke's NOOP branch — TENTATIVE (v2) is not ahead of the
+        //     base (v2) and the client has been poked: TS logs here.
+        let (handler, _messages) = make_handler();
+        *handler.base_version.lock().unwrap() = Some(v2.clone());
+        handler.start_poke(v2.clone()).end(v2.clone()).unwrap(); // consume the forced initial poke
+        let at_start = capture(&|| {
+            handler.start_poke(v2.clone()).end(v2.clone()).unwrap();
+        });
+        assert!(
+            at_start.contains(LINE),
+            "TS logs the caught-up line in startPoke (client-handler.ts:196); got: {at_start}"
+        );
+
+        // (b) A poke STARTED ahead of the base (tentative v3 > base v2) that
+        //     ends with nothing to send (final == base) — the lazy no-change
+        //     advance, i.e. the shape that produced 1.7M lines. TS's `end`
+        //     returns silently.
+        let (handler2, messages2) = make_handler();
+        *handler2.base_version.lock().unwrap() = Some(v2.clone());
+        handler2.start_poke(v2.clone()).end(v2.clone()).unwrap(); // consume the forced initial poke
+        messages2.lock().unwrap().clear();
+        let at_end = capture(&|| {
+            handler2.start_poke(v3.clone()).end(v2.clone()).unwrap();
+        });
+        assert!(
+            !at_end.contains(LINE),
+            "TS's end() returns SILENTLY when nothing changed \
+             (client-handler.ts:319-325); rust must not log there. Got: {at_end}"
+        );
+        assert!(
+            messages2.lock().unwrap().is_empty(),
+            "and still no frame is sent — the fix is log placement, not behavior"
+        );
+    }
+
     #[test]
     fn test_noop_poke_inert_on_mismatched_end() {
         let (handler, messages) = make_handler();
