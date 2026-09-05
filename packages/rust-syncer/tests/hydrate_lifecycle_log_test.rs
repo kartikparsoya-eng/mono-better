@@ -91,7 +91,7 @@ fn hydrate_emits_query_pipeline_lifecycle_log() {
                 )
                 .unwrap();
             for _ in changes.by_ref() {}
-            changes.finish();
+            changes.finish().unwrap();
         }
     });
 
@@ -143,7 +143,7 @@ fn remove_query_emits_query_pipeline_stop_log() {
                 )
                 .unwrap();
             for _ in changes.by_ref() {}
-            changes.finish();
+            changes.finish().unwrap();
         }
         // TS `removeQuery(queryID, stopReason)` → `#destroyPipeline`. TTL/errored
         // removals use the default stop reason `remove-query`.

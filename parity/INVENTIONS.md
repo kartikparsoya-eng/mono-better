@@ -540,8 +540,17 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   yield leaves its shard thread with NO armed advance gate, so a neighbouring
   client group's hydrate on the same thread can never be truncated by this
   advance's budget, and a hydrate started after the advance finishes sees no
-  advance context (TS `#advanceContext = null` in `finally`, :1049).
-- **Tests:** `tests/time_slice_yield_test.rs` —
+  advance context (TS `#advanceContext = null` in `finally`, :1049); (e) a
+  FAILURE inside a slice surfaces exactly where TS's throw does — `hydrate` /
+  `HydrateChanges::finish` report it as an `Err`, which the view-syncer turns
+  into `fail_group` (TS `#cleanup(err)` → `client.fail`, view-syncer.ts:2810),
+  so every client of the group gets an `Internal` error frame. Never a bare
+  unwind past the driver: that kills the CG TASK (`cg_executor.rs:299`), which
+  BYPASSES `fail_group`, so the clients lose their socket with no error frame —
+  a different observable outcome than TS for the same input.
+- **Tests:** `tests/hydrate_probe_failure_test.rs` (e; both arms abort with the
+  production panic when the driver re-throws instead of reporting);
+  `tests/time_slice_yield_test.rs` —
   `hydrate_surfaces_a_yield_per_row_when_the_slice_threshold_is_exceeded` (b +
   the sentinel round-trip: 0 yields on the pre-port shape),
   `a_fresh_lap_under_the_threshold_does_not_yield` (comparison direction),

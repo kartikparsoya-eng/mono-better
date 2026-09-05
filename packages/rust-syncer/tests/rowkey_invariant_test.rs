@@ -90,7 +90,7 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
                 cols = c;
             }
         }
-        changes.finish();
+        changes.finish().unwrap();
     }
     assert!(!cols.is_empty(), "{}: expected a row change", shape.name);
     cols

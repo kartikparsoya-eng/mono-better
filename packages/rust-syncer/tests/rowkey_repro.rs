@@ -96,7 +96,7 @@ fn emitted_rowkey_cols(client_pks: Option<HashMap<String, Vec<String>>>) -> Vec<
                 cols = c;
             }
         }
-        changes.finish();
+        changes.finish().unwrap();
     }
     assert!(
         !cols.is_empty(),

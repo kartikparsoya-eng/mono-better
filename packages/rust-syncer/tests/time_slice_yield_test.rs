@@ -70,7 +70,7 @@ fn hydrate_counts(pipelines: &mut IvmPipelines) -> (usize, usize) {
             StreamItem::Yield => yields += 1,
         }
     }
-    changes.finish();
+    changes.finish().unwrap();
     (data, yields)
 }
 
@@ -234,7 +234,7 @@ fn snapshotter_pipelines(threshold: Rc<dyn Fn() -> f64>) -> (IvmPipelines, Strin
         )
         .unwrap();
     for _ in changes.by_ref() {}
-    changes.finish();
+    changes.finish().unwrap();
     (pipelines, db_path)
 }
 
@@ -366,7 +366,7 @@ fn a_hydrate_after_a_finished_advance_uses_its_own_slice_context() {
             data += 1;
         }
     }
-    changes.finish();
+    changes.finish().unwrap();
     assert_eq!(data, ADVANCE_CHANGES + 1, "all four rows at head");
     drop(pipelines);
     cleanup(&db);

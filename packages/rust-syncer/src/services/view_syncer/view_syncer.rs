@@ -9639,7 +9639,7 @@ impl ViewSyncerService {
                 self.hydrate_unchanged_runs += 1;
             }
             self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version)
-                .await
+                .await?
         };
 
         // Drift check: (re-)hydrate a query when it is missing OR its
@@ -10194,12 +10194,12 @@ impl ViewSyncerService {
         cfg_cvr: &CVR,
         executed: &[(String, serde_json::Value, String)],
         state_version: &str,
-    ) -> std::collections::HashSet<String> {
+    ) -> Result<std::collections::HashSet<String>, String> {
         let mut drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // TS view-syncer.ts:1458 — when the CVR is behind the db, hydration must
         // run through the updater path, so skip the proactive re-check.
         if cfg_cvr.version.state_version != state_version {
-            return drifted;
+            return Ok(drifted);
         }
         for (qid, transformed_ast, new_hash) in executed {
             let Some(record) = cfg_cvr.queries.get(qid) else {
@@ -10237,16 +10237,14 @@ impl ViewSyncerService {
             timer.start().await;
             let mut count = 0usize;
             {
-                let mut changes = match self
+                // TS `#hydrateUnchangedQueries` puts NO try/catch around
+                // `#pipelines.addQuery` (view-syncer.ts:1620-1635): a hydrate
+                // throw propagates out of the whole pass and fails the group.
+                // Rust must not warn-and-skip — that would turn a failed
+                // rehydrate into a query silently left on a torn-down pipeline.
+                let mut changes = self
                     .pipelines
-                    .hydrate(&one, Rc::clone(&timer) as Rc<dyn Timer>)
-                {
-                    Ok(changes) => changes,
-                    Err(e) => {
-                        tracing::warn!("hydrate_unchanged_queries: hydrate {qid} failed: {e}");
-                        continue;
-                    }
-                };
+                    .hydrate(&one, Rc::clone(&timer) as Rc<dyn Timer>)?;
                 for item in changes.by_ref() {
                     match item {
                         StreamItem::Yield => timer.yield_process().await,
@@ -10256,7 +10254,7 @@ impl ViewSyncerService {
                         }
                     }
                 }
-                changes.finish();
+                changes.finish()?;
             }
             let elapsed = timer.total_elapsed();
             tracing::debug!("hydrated {count} rows for {qid} ({elapsed} ms)");
@@ -10298,7 +10296,7 @@ impl ViewSyncerService {
                 drifted.insert(qid.clone());
             }
         }
-        drifted
+        Ok(drifted)
     }
 
     /// Hydrate queries AND apply to CVR + push pokes to clients — the whole
@@ -10487,7 +10485,12 @@ impl ViewSyncerService {
                     }
                 }
             }
-            changes.finish();
+            // TS `addQuery` throwing (a source-drift assert, a Take/Cap
+            // invariant, an unpreparable cost-model probe) reaches the
+            // view-syncer as an ERROR, which fails the group with an error
+            // frame — never as a bare task death. Surface it on the same `Err`
+            // channel the CVR version-bump failure above uses.
+            changes.finish()?;
         }
         let total_process_time_ms = timer.stop();
         if let Some(e) = cvr_err {
@@ -11586,7 +11589,8 @@ mod engine_tests {
         let (mut engine, cvr) = build(999);
         let drifted = engine
             .hydrate_unchanged_queries(&cvr, &executed, "00")
-            .await;
+            .await
+            .unwrap();
         assert!(
             drifted.contains("q1"),
             "a mismatched stored signature must drift"
@@ -11600,7 +11604,8 @@ mod engine_tests {
         let (mut engine, cvr) = build(0);
         let drifted = engine
             .hydrate_unchanged_queries(&cvr, &executed, "00")
-            .await;
+            .await
+            .unwrap();
         assert!(
             !drifted.contains("q1"),
             "a matching stored signature must NOT drift"

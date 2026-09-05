@@ -896,8 +896,19 @@ impl IvmPipelines {
         let stream = match started {
             Ok(stream) => stream,
             Err(payload) => {
+                // TS `#addQueryImpl` logs `query-pipeline-hydrate-failed` and
+                // RETHROWS (pipeline-driver.ts:794-812); the throw reaches the
+                // view-syncer, which fails the group with an error frame
+                // (`#cleanup(err)` → `client.fail`). Rust surfaces the same
+                // failure through the `Err` channel the caller already routes to
+                // `fail_group`: a bare `resume_unwind` here instead killed the CG
+                // TASK, which bypasses `fail_group` entirely — clients lost their
+                // socket with NO error frame (cg_executor.rs:299 logs the panic
+                // and counts `fail_group("panic")`). See the cost-model probe
+                // (`sqlite_cost_model.rs`), whose TS twin `db.prepare(sql)`
+                // simply THROWS a `SqliteError`.
                 self.on_hydrate_panic(&checkpoint, queries);
-                std::panic::resume_unwind(payload);
+                return Err(panic_message(&payload));
             }
         };
         Ok(HydrateChanges {
@@ -905,6 +916,7 @@ impl IvmPipelines {
             stream: Some(stream),
             checkpoint,
             queries: queries.to_vec(),
+            outcome: None,
         })
     }
 
@@ -1237,15 +1249,27 @@ pub struct HydrateChanges<'a> {
     stream: Option<HydrateStream>,
     checkpoint: HashMap<String, usize>,
     queries: Vec<(String, String)>,
+    /// Set when a pull panicked: the hydrate is over and [`finish`](Self::finish)
+    /// reports the failure as an `Err`, mirroring `AdvanceChanges::outcome`.
+    outcome: Option<String>,
 }
 
 impl HydrateChanges<'_> {
-    /// Run phase 3 now (register / destroy + lifecycle lines). Dropping the
-    /// stream does the same; this makes the point explicit at the call site.
-    pub fn finish(mut self) {
+    /// Run phase 3 now (register / destroy + lifecycle lines) and report the
+    /// hydrate outcome. Dropping the stream runs phase 3 too (outcome
+    /// discarded); this makes it explicit at the call site.
+    ///
+    /// An `Err` here is TS `addQuery` THROWING: the view-syncer must fail the
+    /// group with it (TS `#cleanup(err)` → `client.fail`), not continue.
+    pub fn finish(mut self) -> Result<(), String> {
+        if let Some(outcome) = self.outcome.take() {
+            self.stream = None;
+            return Err(outcome);
+        }
         if let Some(stream) = self.stream.take() {
             self.driver.finish_hydrate(stream, &self.queries);
         }
+        Ok(())
     }
 }
 
@@ -1253,18 +1277,28 @@ impl Iterator for HydrateChanges<'_> {
     type Item = StreamItem<RowChange>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.outcome.is_some() {
+            return None;
+        }
         let stream = self.stream.as_mut()?;
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
             Ok(item) => item,
             Err(payload) => {
-                // Roll back BEFORE resuming the unwind. The stream itself is
-                // released by the consumer's frame during that unwind, where
-                // `std::thread::panicking()` is true and the Take/Cap
-                // initial-fetch guards no-op — the same order the old
-                // synchronous `catch_unwind` around the whole hydrate produced.
+                // Roll the partially-wired source connections back, then end the
+                // stream and hand the message to `finish` as an `Err` — TS
+                // `#addQueryImpl`'s `catch (e) { ...'query-pipeline-hydrate-
+                // failed'...; throw e; }` (pipeline-driver.ts:794-812), whose
+                // throw the view-syncer turns into `#cleanup(err)`.
                 self.driver
                     .on_hydrate_panic(&self.checkpoint, &self.queries);
-                std::panic::resume_unwind(payload);
+                // Drop the stream here: its Drop must run OUTSIDE the caught
+                // panic (the RefCell borrows a mid-fetch panic held are already
+                // released) but before `finish`, exactly as `AdvanceChanges`
+                // does. `Drop for HydrateChanges` then sees `None` and skips
+                // `finish_hydrate` on a half-built graph.
+                self.stream = None;
+                self.outcome = Some(panic_message(&payload));
+                None
             }
         }
     }
@@ -1767,7 +1801,7 @@ mod tests {
                     count += 1;
                 }
             }
-            changes.finish();
+            changes.finish().unwrap();
         }
         // Empty in-memory source → no rows streamed.
         assert_eq!(count, 0);
