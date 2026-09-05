@@ -8399,6 +8399,53 @@ impl AuthValidator for InertAuthValidator {
     }
 }
 
+/// Rust-only diagnostic (AGENTS.md rule 5, no TS twin): per-process tally of how
+/// each advance ended, so the no-op advance storm can be attributed WITHOUT
+/// per-event logging. `SYNCER_TRACE=1` emits ~2,900 lines/s, which would distort
+/// the very latency a measurement run exists to capture; these are three atomic
+/// increments plus one summary line per minute.
+///
+/// Classes (they partition every advance):
+///   `no_changes`  - the IVM advance collected nothing for this CG's queries.
+///   `quiet`       - it collected changes, but the CVR flush found nothing
+///                   material (pruned as unchanged) and discarded the bump.
+///   `material`    - the flush persisted.
+static ADV_NO_CHANGES: AtomicU64 = AtomicU64::new(0);
+static ADV_QUIET: AtomicU64 = AtomicU64::new(0);
+static ADV_MATERIAL: AtomicU64 = AtomicU64::new(0);
+static ADV_SUMMARY_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Emit the advance-classification tally at most once a minute, per process.
+fn maybe_log_advance_summary() {
+    const EVERY_MS: u64 = 60_000;
+    let now = now_ms() as u64;
+    let last = ADV_SUMMARY_AT_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < EVERY_MS {
+        return;
+    }
+    if ADV_SUMMARY_AT_MS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // another thread is emitting this tick
+    }
+    let (n, q, m) = (
+        ADV_NO_CHANGES.load(Ordering::Relaxed),
+        ADV_QUIET.load(Ordering::Relaxed),
+        ADV_MATERIAL.load(Ordering::Relaxed),
+    );
+    let total = n + q + m;
+    tracing::info!(
+        "advance-classes total={total} no_changes={n} quiet={q} material={m} \
+         no_changes_pct={:.1}",
+        if total > 0 {
+            n as f64 * 100.0 / total as f64
+        } else {
+            0.0
+        }
+    );
+}
+
 /// Whether a failed CVR flush may be retried.
 ///
 /// Rust-only (AGENTS.md rule 5): TS has no flush retry at all, so this
@@ -10681,7 +10728,8 @@ impl ViewSyncerService {
         // The same anti-pattern is already called out and avoided inside
         // `cvr_store::flush_internal` ("work TS never performs"); this is the
         // same read one level up, at the notification site.
-        let existing_rows_owned: Arc<RowRecordMap> = if collected.is_empty() {
+        let collected_empty = collected.is_empty();
+        let existing_rows_owned: Arc<RowRecordMap> = if collected_empty {
             Arc::new(HashMap::new())
         } else {
             self.existing_rows().await.map_err(|e| e.to_string())?
@@ -10734,6 +10782,14 @@ impl ViewSyncerService {
         // no-ops for caught-up clients instead of advancing their cookies to a
         // version that was never persisted, and the next material flush's
         // `expected_current_version` still matches the on-disk version.
+        if collected_empty {
+            ADV_NO_CHANGES.fetch_add(1, Ordering::Relaxed);
+        } else if store_flushed {
+            ADV_MATERIAL.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ADV_QUIET.fetch_add(1, Ordering::Relaxed);
+        }
+        maybe_log_advance_summary();
         let flushed_cvr = if store_flushed {
             Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
         } else {
