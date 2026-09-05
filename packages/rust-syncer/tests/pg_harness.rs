@@ -1310,7 +1310,6 @@ fn pg_advance_lmid_change_with_no_queries() {
         .unwrap();
     }
 
-    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
@@ -1318,7 +1317,6 @@ fn pg_advance_lmid_change_with_no_queries() {
             // c1 is still online, so the advance must poke it directly (unlike
             // the offline-catchup template, which passes no poke targets).
             &["ws1".to_string()],
-            &existing,
             0,
             0,
             0,
@@ -1744,13 +1742,11 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
         )
         .unwrap();
     }
-    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
             "replica-1".to_string(),
             &["ws1".to_string()],
-            &existing,
             0,
             0,
             0,
@@ -2010,18 +2006,8 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         )
         .unwrap();
     }
-
-    let existing_before_advance = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
-        .block_on(engine.advance_and_sync(
-            hydrated,
-            "replica-1".to_string(),
-            &[],
-            &existing_before_advance,
-            0,
-            0,
-            0,
-        ))
+        .block_on(engine.advance_and_sync(hydrated, "replica-1".to_string(), &[], 0, 0, 0))
         .expect("offline advance");
     assert_eq!(advanced.num_changes, 1, "one replica row changed");
     assert!(advanced.reset_reason.is_none(), "advance must not reset");
@@ -2457,7 +2443,6 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
         .unwrap();
     }
 
-    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let _advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
@@ -2465,7 +2450,6 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
             // Poke the still-connected client (at the pre-advance version) so we
             // can observe the delta the advance produces.
             &["ws1".to_string()],
-            &existing,
             0,
             0,
             0,

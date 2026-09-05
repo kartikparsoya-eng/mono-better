@@ -1058,6 +1058,16 @@ pub struct ViewSyncerService {
     /// in (`config_update_no_op_flush_does_not_close_client`).
     #[cfg(test)]
     forced_flush_outcomes: std::cell::RefCell<std::collections::VecDeque<bool>>,
+    /// Test observability: how many times `existing_rows()` was CALLED (not how
+    /// many hit the store). Pins the TS-parity laziness of the CVR row-map read
+    /// on the advance path — an advance that collected no row changes must not
+    /// reach for the map at all, because TS never materialises one for an
+    /// advance (`updater.received(lc, rows)` takes only the changed batch, and
+    /// the store reads row records solely inside `#flush` under
+    /// `if (this.#pendingRowRecordUpdates.size)`). No other observable
+    /// distinguishes "skipped the read" from "read a warm cache".
+    #[cfg(test)]
+    existing_rows_calls: std::cell::Cell<usize>,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1400,6 +1410,8 @@ impl ViewSyncerService {
             config_pass_runs: 0,
             #[cfg(test)]
             forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            existing_rows_calls: std::cell::Cell::new(0),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -3408,17 +3420,6 @@ impl ViewSyncerService {
         let cvr = self.cvr.take().unwrap();
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = match self.existing_rows().await {
-            Ok(rows) => rows,
-            Err(e) => {
-                // TS lets a rejected `getRowRecords()` abort the pass; rust fails
-                // the group so clients rehome onto a consistent reload (I-4).
-                tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
-                self.fail_group(&e.to_string());
-                return;
-            }
-        };
-        self.last_row_count = existing_rows.len();
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
         let advance_started = std::time::Instant::now();
@@ -3431,7 +3432,6 @@ impl ViewSyncerService {
                 cvr,
                 self.replica_version.clone(),
                 &client_ids,
-                &existing_rows,
                 self.last_connect_time,
                 now,
                 ttl_clock,
@@ -8469,6 +8469,8 @@ impl ViewSyncerService {
             config_pass_runs: 0,
             #[cfg(test)]
             forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            existing_rows_calls: std::cell::Cell::new(0),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -8564,6 +8566,9 @@ impl ViewSyncerService {
     /// for rows absent from this set, so an empty existing-row set would silently
     /// swallow real row DELs.
     pub async fn existing_rows(&self) -> Result<Arc<RowRecordMap>, CVRStoreError> {
+        #[cfg(test)]
+        self.existing_rows_calls
+            .set(self.existing_rows_calls.get() + 1);
         let Some(store_arc) = self.store.clone() else {
             return Ok(Arc::new(HashMap::new()));
         };
@@ -10570,7 +10575,6 @@ impl ViewSyncerService {
         cvr: CVR,
         replica_version: String,
         client_ids: &[String],
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -10659,6 +10663,31 @@ impl ViewSyncerService {
                 reset_msg: Some(msg),
             });
         }
+
+        // LAZY, like TS. `existing_rows` is read ONLY by `on_row_change` /
+        // `finish_received` below, so an advance that collected no row changes
+        // never needs it. TS never materialises a row map for an advance at all:
+        // `#advancePipelines` hands `#processChanges` just the changed-row batch
+        // (view-syncer.ts:2472-2505 -> `updater.received(lc, rows)`), and the
+        // store reads row records only inside `#flush`, guarded by
+        // `if (this.#pendingRowRecordUpdates.size)` (cvr-store.ts:1066-1067).
+        //
+        // Rust used to load this in `on_notification` BEFORE the advance, so
+        // every notification paid an `offload()` hop onto the shared pool plus a
+        // store-mutex acquire even when the commit touched nothing this CG
+        // queries. That cost scales with (live CGs x commit rate), which is why
+        // it is invisible on a 5-minute trace and dominates a 60-minute one:
+        // 1.5M no-op advance cycles at ~900 CGs, against ~3K on the TS arm.
+        // The same anti-pattern is already called out and avoided inside
+        // `cvr_store::flush_internal` ("work TS never performs"); this is the
+        // same read one level up, at the notification site.
+        let existing_rows_owned: Arc<RowRecordMap> = if collected.is_empty() {
+            Arc::new(HashMap::new())
+        } else {
+            self.existing_rows().await.map_err(|e| e.to_string())?
+        };
+        self.last_row_count = existing_rows_owned.len();
+        let existing_rows: &RowRecordMap = &existing_rows_owned;
 
         // Build the updater with the real post-advance version, then replay the
         // collected delta through it (order preserved).
@@ -11760,18 +11789,24 @@ mod engine_tests {
 
         // make_cvr() has stateVersion "00" and replicaVersion "v1"; advancing a
         // snapshot pinned at "v1" MUST NOT panic (it did before the fix).
-        let existing_rows: RowRecordMap = HashMap::new();
+        //
+        // ALSO PINS (fix, 2026-09-05) that this zero-change advance never reads
+        // the CVR row map. TS materialises no row map for an advance:
+        // `#advancePipelines` hands `#processChanges` only the changed-row batch
+        // (view-syncer.ts:2472-2505 -> `updater.received(lc, rows)`), and the
+        // store reads row records solely inside `#flush` under
+        // `if (this.#pendingRowRecordUpdates.size)` (cvr-store.ts:1066-1067).
+        // Rust loaded it in `on_notification` before EVERY advance, so each
+        // notification paid an `offload()` hop plus a store-mutex acquire even
+        // when the commit touched nothing this CG queries — a cost that scales
+        // with (live CGs x commit rate) and produced 1.5M no-op advance cycles
+        // at ~900 CGs against ~3K on the TS arm. Drop the `collected.is_empty()`
+        // guard in `advance_and_sync` and the assertion below fails with 1.
+        engine.existing_rows_calls.set(0);
         let result = engine
-            .advance_and_sync(
-                make_cvr(),
-                "v1".to_string(),
-                &["ws1".to_string()],
-                &existing_rows,
-                0,
-                0,
-                0,
-            )
+            .advance_and_sync(make_cvr(), "v1".to_string(), &["ws1".to_string()], 0, 0, 0)
             .await;
+        let row_map_reads = engine.existing_rows_calls.get();
 
         cleanup();
         let result = result.expect("advance_and_sync must not error/panic");
@@ -11779,6 +11814,11 @@ mod engine_tests {
         assert!(
             !result.version.is_empty(),
             "advance produced an empty version — the updater was built without the header version"
+        );
+        assert_eq!(
+            row_map_reads, 0,
+            "an advance with no collected row changes must not touch the CVR row \
+             map — TS never materialises one for an advance"
         );
     }
 
@@ -11807,6 +11847,7 @@ mod engine_tests {
     /// Revert `handle_config_update` to poke-before-flush and the first case
     /// FAILS (the client receives `WsCommand::Fail`); the second case pins that
     /// the guard does not over-suppress a poke that legitimately advanced.
+
     #[tokio::test]
     async fn config_update_no_op_flush_does_not_close_client() {
         async fn run(flush_outcome: bool) -> (usize, usize, usize) {
