@@ -968,9 +968,22 @@ impl CVRStoreHandle {
 
         // 4. Query upserts (full) — batched into ONE `json_to_recordset` statement
         // (was one awaited upsert per query). Mirrors TS `#flushQueries` full batch.
-        // `clientAST` (JSONB) and `queryArgs` (JSON) are read directly as their JSON
-        // types because rust stores them as parsed `Value`s — unlike TS's
-        // pre-stringified `TEXT::json` — for the identical end state.
+        // `queryArgs` is PRE-STRINGIFIED, exactly as TS does (`StringifiedQueriesRow`,
+        // cvr-store.ts:111-116 "QueriesRow with queryArgs as a stringified JSON
+        // value ... for batched config writes"). An earlier revision embedded the
+        // parsed `Value` directly and declared the column `JSON`, noting the
+        // difference as harmless "for the identical end state". It is NOT: pulling
+        // a JSON field out of `json_to_recordset` makes PG convert it, and
+        // `\u0000 cannot be converted to text` — so a query arg containing a NUL
+        // failed the WHOLE CVR flush, where TS persists it fine. The `json` TYPE
+        // accepts `\u0000` (only `jsonb` rejects it); it is the field extraction
+        // that cannot. Pre-stringifying carries the ESCAPE TEXT through the batch
+        // document, so the extraction is a plain string copy and the `::json` cast
+        // restores the value verbatim. Verified against PG:
+        //   args as JSON value  -> ERROR: unsupported Unicode escape sequence
+        //   args pre-stringified -> [{"userId": "\uffff \u0000ab"}]
+        // `clientAST` stays JSONB and is left as a parsed value: TS binds it to a
+        // JSONB column too, so a NUL there fails on BOTH sides — that is parity.
         if !pending.pending_query_updates.is_empty() {
             let rows_json = Value::Array(
                 pending
@@ -982,7 +995,9 @@ impl CVRStoreHandle {
                             "queryHash": row.query_hash,
                             "clientAST": row.client_ast,
                             "queryName": row.query_name,
-                            "queryArgs": row.query_args,
+                            // TS `StringifiedQueriesRow`: the args travel as JSON
+                            // TEXT, not as a nested JSON value (see the note above).
+                            "queryArgs": row.query_args.as_ref().map(|v| v.to_string()),
                             "patchVersion": row.patch_version,
                             "transformationHash": row.transformation_hash,
                             "transformationVersion": row.transformation_version,
@@ -998,7 +1013,8 @@ impl CVRStoreHandle {
                    ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
                     "patchVersion", "transformationHash", "transformationVersion",
                     "internal", "deleted", "rowSetSignature")
-                   SELECT "clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
+                   SELECT "clientGroupID", "queryHash", "clientAST", "queryName",
+                          "queryArgs"::json,
                           "patchVersion", "transformationHash", "transformationVersion",
                           "internal", "deleted", "rowSetSignature"
                    FROM json_to_recordset($1::json) AS x(
@@ -1006,7 +1022,7 @@ impl CVRStoreHandle {
                      "queryHash" TEXT,
                      "clientAST" JSONB,
                      "queryName" TEXT,
-                     "queryArgs" JSON,
+                     "queryArgs" TEXT,
                      "patchVersion" TEXT,
                      "transformationHash" TEXT,
                      "transformationVersion" TEXT,

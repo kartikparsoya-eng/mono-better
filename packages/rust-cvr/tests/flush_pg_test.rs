@@ -721,3 +721,119 @@ async fn config_flush_disables_the_session_statement_timeout_like_ts_run_tx() {
         result.err()
     );
 }
+
+/// NON-VACUOUS (fix, 2026-09-05): a custom query whose args contain a character
+/// PG cannot convert to `text` must still persist.
+///
+/// TS pre-stringifies `queryArgs` for its batched config write
+/// (`StringifiedQueriesRow`, cvr-store.ts:111-116). Rust embedded the parsed
+/// value directly and declared the recordset column `JSON`, calling the
+/// difference harmless "for the identical end state". It is not: pulling a JSON
+/// field out of `json_to_recordset` makes PG convert it, and a NUL escape cannot
+/// be converted to text — so ONE such arg failed the WHOLE CVR flush, taking
+/// every other query, client and row batched with it. The `json` TYPE accepts a
+/// NUL escape (only `jsonb` rejects it); it is the field extraction that cannot.
+///
+/// Observed cost: 2,281 store-flush failures in a 60-minute prod-replay, 571 of
+/// them surfaced to clients as `Internal`, and the group never reached steady
+/// state (0 advances in the hour against 22,813 repeat hydrations).
+///
+/// Revert the batch to `"queryArgs": row.query_args` + `"queryArgs" JSON` and
+/// this fails with `unsupported Unicode escape sequence`.
+#[tokio::test]
+async fn custom_query_args_with_nul_survive_the_flush() {
+    use rust_cvr::cvr::{CVRConfigDrivenUpdater, DesiredQuerySpec};
+    use rust_cvr::shards::ShardID;
+
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("SKIP custom_query_args_with_nul_survive_the_flush: TEST_CVR_PG_URI unset");
+            return;
+        }
+    };
+    const S: &str = "cvr_nul_args";
+    const CG: &str = "cg-nul-args";
+    // Both appear in real prod-replay query args. `jsonb` rejects both; the
+    // `json` column TS uses accepts both.
+    let nasty = format!("{} {}ab", '\u{FFFF}', '\u{0}');
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{S}" CASCADE"#))
+        .execute(&pool)
+        .await
+        .expect("drop schema");
+    sqlx::raw_sql(&include_str!("../agentic/parity/flush-schema.sql").replace("roze_1/cvr", S))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    sqlx::query(&format!(
+        r#"INSERT INTO "{S}".instances
+             ("clientGroupID","version","lastActive","replicaVersion","ttlClock")
+           VALUES ('{CG}', '01', now(), '00', 0)"#
+    ))
+    .execute(&pool)
+    .await
+    .expect("seed instance");
+    sqlx::query(&format!(
+        r#"INSERT INTO "{S}"."rowsVersion" ("clientGroupID","version") VALUES ('{CG}', '01')"#
+    ))
+    .execute(&pool)
+    .await
+    .expect("seed rowsVersion");
+
+    let mut store = CVRStoreHandle::new(
+        pool.clone(),
+        S.to_string(),
+        CG.to_string(),
+        "nul-args-task".to_string(),
+    );
+    let loaded = store.load(0.0).await.expect("load");
+    let expected_version = loaded.cvr.version.clone();
+
+    let mut cfg = CVRConfigDrivenUpdater::new(
+        loaded.cvr,
+        ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        },
+    );
+    cfg.ensure_client("c1");
+    cfg.put_desired_queries(
+        "c1",
+        &[DesiredQuerySpec {
+            hash: "q-nul".to_string(),
+            ast: None,
+            name: Some("getAllUserGroups".to_string()),
+            args: Some(vec![serde_json::json!({"userId": nasty})]),
+            ttl: None,
+        }],
+    );
+    let (cvr_final, _stats) = cfg.flush(0, 0, 0);
+    store.apply_store_ops(cfg.base.drain_store_ops());
+
+    store
+        .flush(&expected_version, &cvr_final, 0.0)
+        .await
+        .expect(
+            "a NUL in a custom query's args must not fail the CVR flush — TS \
+         persists it via a pre-stringified queryArgs (StringifiedQueriesRow)",
+        );
+
+    // And it must round-trip verbatim, not silently mangled.
+    let (args,): (serde_json::Value,) = sqlx::query_as(&format!(
+        r#"SELECT "queryArgs" FROM "{S}".queries WHERE "queryHash" = 'q-nul'"#
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("read back queryArgs");
+    assert_eq!(
+        args,
+        serde_json::json!([{"userId": nasty}]),
+        "queryArgs must round-trip byte-for-byte"
+    );
+}
