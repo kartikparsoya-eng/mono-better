@@ -8764,6 +8764,21 @@ impl ViewSyncerService {
         &mut self.pipelines
     }
 
+    /// TEST SEAM (no TS twin — rust-only, AGENTS.md rule 5). Production builds
+    /// the service through `new_with_accepting`, which sets `app_id`, `shard`
+    /// and `cg_id` from the CG's `SyncEngineConfig`; the bare `new(pipelines)`
+    /// constructor used by integration tests leaves them blank. Tests that
+    /// assert on the identity TS carries in its LogContext (`appID`,
+    /// `shardNum`, `clientGroupID` on the `flushed cvr@…` line, cvr-store.ts:
+    /// 1249) need those populated to pin the VALUES rather than just the field
+    /// names. Sets only identity; it cannot change serving behavior.
+    #[doc(hidden)]
+    pub fn set_identity_for_tests(&mut self, app_id: &str, shard: ShardID, cg_id: &str) {
+        self.app_id = app_id.to_string();
+        self.shard = shard;
+        self.cg_id = cg_id.to_string();
+    }
+
     /// Create the CVR Postgres store (once, shared across all calls). Port of
     /// napi `set_cvr_store`.
     pub fn set_cvr_store(
@@ -8991,6 +9006,20 @@ impl ViewSyncerService {
         // `Arc::try_unwrap` once this awaited task drops its clone.
         let expected = expected_current_version.clone();
         let flushed = flushed_cvr;
+        // TS's `flushed cvr@…` line is emitted through the view-syncer's
+        // LogContext, so it carries `appID`, `shardNum`, `clientGroupID`,
+        // `instance`, `lock`, `stateVersion` and `cvrFlushID` (cvr-store.ts:1238
+        // `lc.withContext('cvrFlushID', flushCounter++)`, logged at :1249).
+        // Rust emitted the message with NO fields at all, so a flush could not
+        // be attributed to a client group — which is exactly what blocked
+        // localising the 2026-09-06 G8 extra-config-poke divergence from the
+        // logs. `instance` and `lock` have no rust twin: there is no `#lock`
+        // (the CG thread is serial, INVENTIONS.md I-12) and no per-service
+        // instance id.
+        let log_app_id = self.app_id.clone();
+        let log_shard_num = self.shard.shard_num;
+        let log_cg_id = self.cg_id.clone();
+        let cvr_flush_id = rust_cvr::cvr_store::next_cvr_flush_id();
         // TS `#flushUpdater` wraps EVERY CVR flush (config, hydrate, advance)
         // in `#runPriorityOp(lc, 'flushing cvr', ...)` (view-syncer.ts:
         // 1069-1071); this is the one seat all rust flushes pass through.
@@ -9072,8 +9101,14 @@ impl ViewSyncerService {
             // (TS cvr-store.ts:1218), so there is nothing to mirror here.
             if let Some(stats) = &store_flushed {
                 // TS cvr-store.ts:1248 `lc.info?.(`flushed cvr@${versionString(cvr.version)}
-                // ${JSON.stringify(stats)} in (${elapsed} ms)`)`.
+                // ${JSON.stringify(stats)} in (${elapsed} ms)`)`, with the
+                // LogContext TS carries into it (see the note at the captures).
                 tracing::info!(
+                    appID = %log_app_id,
+                    shardNum = log_shard_num,
+                    clientGroupID = %log_cg_id,
+                    stateVersion = %flushed.version.state_version,
+                    cvrFlushID = cvr_flush_id,
                     "flushed cvr@{} {} in ({:.1} ms)",
                     rust_cvr::schema::types::version_string(&flushed.version),
                     serde_json::to_string(stats).unwrap_or_default(),

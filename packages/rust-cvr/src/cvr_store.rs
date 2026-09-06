@@ -23,6 +23,19 @@ use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
 use crate::ttl_clock::TTLClock;
 use std::cmp::Ordering;
 
+// Port of TS `let flushCounter = 0` (cvr-store.ts:77). TS stamps every
+// `flush()` call with `lc.withContext('cvrFlushID', flushCounter++)` (:1238) so
+// the `flushed cvr@…` line it emits at :1249 is attributable to one flush.
+// Atomic rather than a plain counter because rust runs one CG per thread in a
+// single process where TS runs one syncer per process (INVENTIONS.md I-12); the
+// observable — a distinct id per flush — is the same.
+static FLUSH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The next `cvrFlushID`. Port of TS `flushCounter++` (cvr-store.ts:1238).
+pub fn next_cvr_flush_id() -> u64 {
+    FLUSH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 // The time to wait between load() attempts when the rows table is behind the
 // CVR instance version. Port of TS `LOAD_ATTEMPT_INTERVAL_MS`.
 const LOAD_ATTEMPT_INTERVAL_MS: u64 = 500;
