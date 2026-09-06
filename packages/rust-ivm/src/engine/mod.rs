@@ -1193,7 +1193,8 @@ impl Engine {
         F: FnMut(&RowChange),
         H: FnMut(&str, usize),
     {
-        let mut stream = self.start_advance(snapshotter, syncable_tables, all_table_names, None)?;
+        let mut stream =
+            self.start_advance(snapshotter, syncable_tables, all_table_names, None, None)?;
         on_header(&stream.version, stream.num_changes);
         for item in stream.by_ref() {
             if let crate::ivm::stream::StreamItem::Data(rc) = item {
@@ -1222,6 +1223,12 @@ impl Engine {
         syncable_tables: &HashMap<String, crate::snapshotter::spec::LiteAndZqlSpec>,
         all_table_names: &std::collections::HashSet<String>,
         should_yield: Option<Rc<dyn Fn() -> bool>>,
+        // `total_elapsed`: the caller's `TimeSliceTimer.total_elapsed()` — TS's
+        // `advanceTimer.totalElapsed()`, which the economic budget arms compare
+        // against (pipeline-driver.ts:1101). Mirrors the `total_elapsed`
+        // parameter `start_hydrate` already takes. `None` (standalone engine /
+        // tests) falls back to wall clock.
+        total_elapsed: Option<Rc<dyn Fn() -> f64>>,
     ) -> Result<AdvanceStream, crate::snapshotter::DiffError> {
         // Reset cancellation at the start of each advance, exactly as
         // `add_queries_streaming` and `advance_streaming` do. This makes the
@@ -1254,6 +1261,10 @@ impl Engine {
             advance_start,
             total_hydration_time_ms,
             num_changes,
+            // TS's budget clock is the view-syncer's `TimeSliceTimer`
+            // (`advanceTimer.totalElapsed()`, pipeline-driver.ts:1101) — the
+            // same timer `#advancePipelines` hands to `pipelines.advance`.
+            total_elapsed.clone(),
         );
 
         // 3. Iterate the diff, converting each SnapshotChange to SourceChange(s).
@@ -2340,7 +2351,7 @@ pub struct AdvanceStream {
     table_specs: HashMap<String, TableSpecInfo>,
     table_columns: HashMap<String, HashMap<String, crate::ivm::schema::ColumnType>>,
     cancellation_token: CancellationToken,
-    advance_gate: Arc<crate::advance_gate::AdvanceGate>,
+    advance_gate: Rc<crate::advance_gate::AdvanceGate>,
     total_hydration_time_ms: f64,
     curr_conn: crate::snapshotter::SharedConn,
     /// Changes pushed so far (TS `pos`).
@@ -2606,7 +2617,8 @@ impl Iterator for AdvanceStream {
         // identical work, so rust shed LESS eagerly than TS. The wall-clock
         // ceiling arm stays exclusion-free.
         if self.last_was_yield {
-            self.advance_gate.exclude(self.last_return.elapsed());
+            // (no exclusion: the gate now reads the view-syncer's
+            // TimeSliceTimer, which TS stops for the yielded lap itself)
         }
         // Arm the per-fetch gate for THIS pull only. The guard disarms on
         // return (and on unwind), so a suspended stream never leaves its

@@ -205,6 +205,7 @@ impl Fixture {
                 &self.syncable,
                 &self.all_tables,
                 should_yield,
+                None,
             )
             .unwrap();
         assert_eq!(stream.num_changes(), 3, "fixture must produce 3 changes");
@@ -351,32 +352,75 @@ fn the_advance_gate_is_disarmed_while_the_stream_is_suspended_at_a_yield() {
 
 /// TS parity for WHAT THE ADVANCE BUDGET COUNTS.
 ///
-/// `#advancePipelines` builds ONE `TimeSliceTimer` and hands it both to
-/// `pipelines.advance(timer)` — whose budget arms read it as
-/// `advanceTimer.totalElapsed()` (pipeline-driver.ts:1102) — and to
-/// `#processChanges` (view-syncer.ts:2579-2585). `#processChanges` stops that
-/// timer in exactly one place, `await timer.yieldProcess(…)`
-/// (view-syncer.ts:2508-2512). So consumer work between pulls counts against
-/// the budget, and only the awaited time slice does not.
+/// The economic budget's clock is the view-syncer's ONE `TimeSliceTimer`.
 ///
-/// rust excluded ALL time between two pulls (`AdvanceStream::next` →
-/// `exclude(last_return.elapsed())`) plus each row's delivery callback
-/// (`push_source_change` → `exclude_current`), justified by a NAPI boundary
-/// deleted in a5e502ad9. rust therefore measured a smaller `elapsed` than TS
-/// for identical work and shed LESS eagerly.
+/// `#advancePipelines` builds it, hands it to `pipelines.advance(timer)` —
+/// whose budget arms read `advanceTimer.totalElapsed()`
+/// (pipeline-driver.ts:1101) — and to `#processChanges`
+/// (view-syncer.ts:2579-2585). Three properties follow from
+/// `TimeSliceTimer` (view-syncer.ts:2943-3001):
 ///
-/// Both directions are pinned: a stall while holding a DATA item must be
-/// charged (the advance aborts), the same stall while yielded must not be.
-/// Reverting `next()` to exclude unconditionally makes the first case stop
-/// aborting and FAILS this test.
+/// 1. `await timer.start()` yields to the time-slice queue and only THEN zeroes
+///    and starts the clock, so the queue turn before the first pull is not
+///    charged.
+/// 2. `await timer.yieldProcess()` stops the lap, so a yielded slice is not
+///    charged.
+/// 3. Everything else — `updater.received()`, `pokers.addPatch()` — runs with
+///    the timer RUNNING and IS charged.
+///
+/// Rust used a private `Instant` started inside `start_advance` minus an
+/// `exclude()` that fired only after a `Yield`. That got (2) and (3) roughly
+/// right but (1) badly wrong: the `timer.start().await` queue turn landed
+/// inside the budget. On a shard hosting ~1000 client groups that turn costs
+/// tens of ms, so advances blew the 50ms floor at `pos: 0` — before processing
+/// a single change. Measured on the 2026-09-05 60-minute prod-replay: 5,934
+/// `advancement-timeout` resets (27% of them against a budget of exactly 0ms)
+/// versus ~45 on TS, each destroying every pipeline in the group and forcing a
+/// full re-hydrate — 2.9x TS's total hydrations.
+///
+/// All three are pinned below; each fails on its own if the clock regresses to
+/// `start.elapsed()`.
 #[test]
-fn consumer_stall_counts_against_the_budget_but_a_yielded_slice_does_not() {
+fn the_advance_budget_charges_only_time_slice_timer_process_time() {
     // > MIN_ADVANCEMENT_TIME_LIMIT_MS (50) so the timeout arm can fire at all.
     let stall = std::time::Duration::from_millis(140);
 
-    // Drive the fixture's 3-change advance, stalling once — either while
-    // holding a data row (consumer work) or while yielded. Returns `aborted`.
-    let run = |tag: &str, yield_always: bool, stall_on_yield: bool| -> bool {
+    /// Stand-in for the view-syncer's `TimeSliceTimer` (which lives in
+    /// rust-syncer): accumulates wall time except while yielded, exactly as
+    /// TS's `#startLap`/`#stopLap` do.
+    #[derive(Default)]
+    struct ProcessClock {
+        total: std::cell::Cell<f64>,
+        lap: std::cell::Cell<Option<std::time::Instant>>,
+    }
+    impl ProcessClock {
+        /// TS `startWithoutYielding()`: zero the total, start a lap.
+        fn start(&self) {
+            self.total.set(0.0);
+            self.lap.set(Some(std::time::Instant::now()));
+        }
+        fn stop_lap(&self) {
+            if let Some(l) = self.lap.take() {
+                self.total
+                    .set(self.total.get() + l.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        fn start_lap(&self) {
+            self.lap.set(Some(std::time::Instant::now()));
+        }
+        fn total_elapsed(&self) -> f64 {
+            self.total.get()
+                + self
+                    .lap
+                    .get()
+                    .map_or(0.0, |l| l.elapsed().as_secs_f64() * 1000.0)
+        }
+    }
+
+    // `stall_before_start`: sleep before `timer.start()` — the time-slice queue
+    // turn (property 1). Otherwise stall once mid-stream, either while holding
+    // a data row (property 3) or while yielded (property 2). Returns `aborted`.
+    let run = |tag: &str, yield_always: bool, stall_on_yield: bool, stall_before_start: bool| {
         let mut fx = Fixture::new(tag);
         fx.write_three_changes();
         let hook: Option<Rc<dyn Fn() -> bool>> = if yield_always {
@@ -384,33 +428,62 @@ fn consumer_stall_counts_against_the_budget_but_a_yielded_slice_does_not() {
         } else {
             None
         };
+        let clock = Rc::new(ProcessClock::default());
+        let read = Rc::clone(&clock);
         let mut stream = fx
             .eng
-            .start_advance(&mut fx.snap, &fx.syncable, &fx.all_tables, hook)
+            .start_advance(
+                &mut fx.snap,
+                &fx.syncable,
+                &fx.all_tables,
+                hook,
+                Some(Rc::new(move || read.total_elapsed())),
+            )
             .unwrap();
-        let mut stalled = false;
+        // TS: the stream exists BEFORE `await timer.start()`, so anything here
+        // is the queue turn.
+        if stall_before_start {
+            std::thread::sleep(stall);
+        }
+        clock.start();
+        let mut stalled = stall_before_start;
         for item in stream.by_ref() {
             let is_yield = matches!(item, StreamItem::Yield);
-            if !stalled && is_yield == stall_on_yield {
+            if is_yield {
+                clock.stop_lap();
+            }
+            if !stall_before_start && !stalled && is_yield == stall_on_yield {
                 stalled = true;
                 std::thread::sleep(stall);
+            }
+            if is_yield {
+                clock.start_lap();
             }
         }
         assert!(stalled, "{tag}: the stall must have happened");
         fx.eng.finish_advance(stream).unwrap().aborted
     };
 
-    // Stalling while holding a data row is consumer work: TS charges it.
+    // (1) The queue turn before `timer.start()` is NOT charged — the regression.
     assert!(
-        run("stall-data", false, false),
+        !run("stall-before-start", false, false, true),
+        "time before `await timer.start()` is the time-slice QUEUE TURN: TS \
+         zeroes the timer after it (view-syncer.ts:2952-2957), so it must not \
+         be charged and this advance must commit. Charging it is what produced \
+         5,934 pos-0 `advancement-timeout` resets in an hour.",
+    );
+
+    // (3) A consumer stall while holding a data row IS charged.
+    assert!(
+        run("stall-data", false, false, false),
         "a consumer stall between pulls must count against the advance budget \
          (TS stops its TimeSliceTimer only inside yieldProcess), so this \
          advance must abort",
     );
 
-    // Stalling while yielded is the awaited time slice: TS excludes it.
+    // (2) A stall while yielded is the awaited slice: NOT charged.
     assert!(
-        !run("stall-yield", true, true),
+        !run("stall-yield", true, true, false),
         "time spent awaiting a yielded slice must NOT count against the budget \
          (TS `timer.yieldProcess()` stops the timer), so this advance must commit",
     );

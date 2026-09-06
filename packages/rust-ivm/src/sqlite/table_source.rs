@@ -1551,11 +1551,11 @@ mod advance_gate_fetch_tests {
         .count()
     }
 
-    fn past_gate(ms_ago: u64, budget_ms: f64) -> std::sync::Arc<crate::advance_gate::AdvanceGate> {
+    fn past_gate(ms_ago: u64, budget_ms: f64) -> std::rc::Rc<crate::advance_gate::AdvanceGate> {
         let start = Instant::now()
             .checked_sub(Duration::from_millis(ms_ago))
             .unwrap_or_else(Instant::now);
-        crate::advance_gate::AdvanceGate::new(start, budget_ms, 4)
+        crate::advance_gate::AdvanceGate::new(start, budget_ms, 4, None)
     }
 
     #[test]

@@ -21,7 +21,7 @@
 //! truncated push, so the early stream end is harmless).
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -159,7 +159,11 @@ pub struct AdvanceGate {
     /// "timed out mid-fetch".
     tripped_arm: AtomicUsize,
     tripped_value_bits: AtomicU64,
-    excluded_nanos: AtomicU64,
+    /// The view-syncer's `TimeSliceTimer.total_elapsed()`, which is what TS's
+    /// budget arms read (`const elapsed = advanceTimer.totalElapsed()`,
+    /// pipeline-driver.ts:1101). `None` only for callers with no timer (tests,
+    /// the standalone engine), which fall back to `start.elapsed()`.
+    clock: Option<Rc<dyn Fn() -> f64>>,
     /// Elapsed-ms at which the current change's push began; `active` gates it
     /// (a change boundary clears it so the slow-current-change arm only applies
     /// mid-push). TS `AdvanceContext.currentChangeStartMs`.
@@ -168,10 +172,16 @@ pub struct AdvanceGate {
 }
 
 impl AdvanceGate {
-    /// Create a gate sharing the advance's own start instant (so per-row and
-    /// per-change elapsed agree).
-    pub fn new(start: Instant, budget_ms: f64, num_changes: usize) -> Arc<Self> {
-        Arc::new(Self {
+    /// Create a gate reading `clock` — the view-syncer's `TimeSliceTimer`,
+    /// the SAME timer TS's budget arms read. `start` remains only for the
+    /// rust-only `WallClockCeiling` arm, which is deliberately exclusion-free.
+    pub fn new(
+        start: Instant,
+        budget_ms: f64,
+        num_changes: usize,
+        clock: Option<Rc<dyn Fn() -> f64>>,
+    ) -> Rc<Self> {
+        Rc::new(Self {
             start,
             budget_ms,
             num_changes,
@@ -179,7 +189,7 @@ impl AdvanceGate {
             tripped: AtomicBool::new(false),
             tripped_arm: AtomicUsize::new(0),
             tripped_value_bits: AtomicU64::new(0),
-            excluded_nanos: AtomicU64::new(0),
+            clock,
             current_change_start_bits: AtomicU64::new(0),
             current_change_active: AtomicBool::new(false),
         })
@@ -218,29 +228,28 @@ impl AdvanceGate {
         }
     }
 
-    /// Exclude consumer time from the economic budget.
+    /// The budget clock: TS's `advanceTimer.totalElapsed()`
+    /// (pipeline-driver.ts:1101), i.e. the view-syncer's ONE `TimeSliceTimer`.
     ///
-    /// DIVERGENCE (2026-09-04, unregistered): this was justified by the NAPI
-    /// boundary's synchronous row delivery, and that boundary was deleted in
-    /// a5e502ad9. What the sole caller now excludes is ALL time between two
-    /// pulls of `AdvanceStream` — the CVR `received()`/poke work as well as a
-    /// yielded time slice. TS stops its `TimeSliceTimer` ONLY inside
-    /// `timer.yieldProcess()` (view-syncer.ts `TimeSliceTimer.#stopLap`); the
-    /// `#processChanges` consumer work runs with the timer STILL RUNNING, and
-    /// that is the `elapsed` its budget arms compare against
-    /// (pipeline-driver.ts:1102). rust therefore measures a smaller `elapsed`
-    /// than TS for identical work and sheds LESS eagerly. Narrowing this to the
-    /// yield await alone changes load-shedding under pressure, so it needs its
-    /// own change plus an ART gate rather than a comment fix.
-    pub fn exclude(&self, duration: Duration) {
-        let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
-        self.excluded_nanos.fetch_add(nanos, Ordering::Relaxed);
-    }
-
+    /// That timer is reset to zero and started by `await timer.start()` AFTER
+    /// the advance stream is created (view-syncer.ts:2579-2585 ->
+    /// `TimeSliceTimer.start()` = `await yieldProcess()` then
+    /// `startWithoutYielding()`), and it stops for the duration of every
+    /// `await timer.yieldProcess()`. So the initial time-slice-queue turn and
+    /// every yielded lap are OUTSIDE the budget, while all consumer work
+    /// (`updater.received`, `pokers.addPatch`) is inside it.
+    ///
+    /// Rust previously ran a private `Instant` started inside `start_advance`,
+    /// corrected by an `exclude()` that only fired when the PREVIOUS pull had
+    /// returned a `Yield`. The initial `timer.start().await` therefore landed
+    /// inside the budget: on a shard hosting ~1000 client groups that queue turn
+    /// costs tens of ms, so an advance blew the 50ms floor having processed
+    /// ZERO changes.
     fn elapsed(&self) -> Duration {
-        self.start.elapsed().saturating_sub(Duration::from_nanos(
-            self.excluded_nanos.load(Ordering::Relaxed),
-        ))
+        match &self.clock {
+            Some(clock) => Duration::from_secs_f64((clock().max(0.0)) / 1000.0),
+            None => self.start.elapsed(),
+        }
     }
 
     /// Update progress (the number of changes emitted so far).
@@ -363,7 +372,7 @@ impl AdvanceGate {
 }
 
 thread_local! {
-    static ADVANCE_GATE: RefCell<Option<Arc<AdvanceGate>>> = const { RefCell::new(None) };
+    static ADVANCE_GATE: RefCell<Option<Rc<AdvanceGate>>> = const { RefCell::new(None) };
 }
 
 /// RAII guard: clears the thread-local gate on drop — including on a panic
@@ -380,7 +389,7 @@ impl Drop for GateGuard {
 
 /// Arm the per-fetch gate on THIS (actor) thread; the returned guard disarms it
 /// when dropped (scope exit or panic).
-pub fn arm(gate: Arc<AdvanceGate>) -> GateGuard {
+pub fn arm(gate: Rc<AdvanceGate>) -> GateGuard {
     ADVANCE_GATE.with(|g| *g.borrow_mut() = Some(gate));
     GateGuard(())
 }
@@ -407,11 +416,11 @@ mod tests {
     use std::time::Duration;
 
     /// A gate whose start is `ms` in the past (so elapsed ≈ ms), at `pos/num`.
-    fn gate(ms: u64, budget: f64, num: usize, pos: usize) -> Arc<AdvanceGate> {
+    fn gate(ms: u64, budget: f64, num: usize, pos: usize) -> Rc<AdvanceGate> {
         let start = Instant::now()
             .checked_sub(Duration::from_millis(ms))
             .unwrap_or_else(Instant::now);
-        let g = AdvanceGate::new(start, budget, num);
+        let g = AdvanceGate::new(start, budget, num, None);
         g.set_pos(pos);
         g
     }
@@ -449,12 +458,59 @@ mod tests {
         assert!(g.over_budget());
     }
 
+    /// The budget clock is the view-syncer's `TimeSliceTimer`, NOT wall time.
+    ///
+    /// TS reads `advanceTimer.totalElapsed()` (pipeline-driver.ts:1101) from a
+    /// timer that `await timer.start()` zeroes AFTER the initial time-slice
+    /// queue turn (`TimeSliceTimer.start()` = `await yieldProcess()` then
+    /// `startWithoutYielding()`, view-syncer.ts:2952-2963) and that stops for
+    /// every `await timer.yieldProcess()`. So neither the queue turn nor any
+    /// yielded lap is chargeable to the advance.
+    ///
+    /// Rust ran a private `Instant` started in `start_advance` minus an
+    /// `exclude()` that only fired after a `Yield`, so the initial
+    /// `timer.start().await` counted. On a shard hosting ~1000 client groups
+    /// that queue turn is tens of ms, and the advance blew the 50ms floor
+    /// having processed ZERO changes: 5,934 spurious `advancement-timeout`
+    /// resets in a 60-minute prod-replay against TS's ~45, each one destroying
+    /// every pipeline in the group and forcing a full re-hydrate.
+    ///
+    /// NON-VACUOUS: restore `start.elapsed()` and the first assertion reads
+    /// ~200ms instead of the timer's 30ms.
     #[test]
-    fn yield_wait_is_excluded_from_budget() {
-        let g = gate(200, 100.0, 4, 0);
-        g.exclude(Duration::from_millis(175));
-        assert!(g.elapsed_ms() < 50.0);
-        assert!(!g.over_budget());
+    fn the_budget_reads_the_time_slice_timer_not_wall_clock() {
+        use std::cell::Cell;
+        // Wall clock: 200ms since the advance began. The caller's process-time
+        // timer: 30ms (the rest went to the queue turn and yielded laps).
+        let process_ms = Rc::new(Cell::new(30.0f64));
+        let read = process_ms.clone();
+        let g = AdvanceGate::new(
+            Instant::now()
+                .checked_sub(Duration::from_millis(200))
+                .unwrap_or_else(Instant::now),
+            100.0,
+            4,
+            Some(Rc::new(move || read.get())),
+        );
+        g.set_pos(0);
+        assert!(
+            (g.elapsed_ms() - 30.0).abs() < 1.0,
+            "the budget must read the TimeSliceTimer (30ms), not wall clock \
+             (200ms); got {}",
+            g.elapsed_ms()
+        );
+        assert!(
+            !g.over_budget(),
+            "30ms of process time is under both the 50ms floor and the 100ms \
+             budget — TS would not reset here"
+        );
+        // Once the TIMER itself passes the budget, the arm still fires.
+        process_ms.set(150.0);
+        assert!(
+            g.over_budget(),
+            "150ms of process time exceeds the 100ms budget — the arm must \
+             still fire when the timer says so"
+        );
     }
 
     #[test]

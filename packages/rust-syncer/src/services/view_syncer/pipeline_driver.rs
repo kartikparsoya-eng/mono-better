@@ -1112,6 +1112,17 @@ impl IvmPipelines {
             .as_ref()
             .map(|_| self.should_yield_hook());
 
+        // The economic budget's clock: TS reads `advanceTimer.totalElapsed()`
+        // (pipeline-driver.ts:1101) off the SAME `TimeSliceTimer`
+        // `#advancePipelines` hands to `pipelines.advance(timer)`. Hand it down
+        // so the gate charges the advance only the process time TS charges it —
+        // the initial `timer.start()` queue turn and every yielded lap are
+        // outside that timer (view-syncer.ts:2952-2969), so they are outside
+        // the budget.
+        let budget_clock: Rc<dyn Fn() -> f64> = {
+            let t = Rc::clone(&timer);
+            Rc::new(move || t.total_elapsed())
+        };
         let eng = self.engine.as_mut().expect("checked above");
         let snapshotter = self.snapshotter.as_mut().expect("checked above");
         let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1120,6 +1131,7 @@ impl IvmPipelines {
                 &syncable_tables,
                 &all_table_names,
                 should_yield,
+                Some(budget_clock),
             )
         }));
         match started {
