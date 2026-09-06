@@ -403,7 +403,55 @@ pub(crate) async fn yield_process() {
 /// slice's age (what `PipelineDriver#shouldYield` compares to the threshold).
 pub struct TimeSliceTimer {
     total: std::cell::Cell<f64>,
-    start: std::cell::Cell<Option<std::time::Instant>>,
+    /// The running lap's start, on [`process_clock_ms`]'s clock (`None` = not
+    /// running, TS `#start === 0`).
+    start: std::cell::Cell<Option<f64>>,
+}
+
+/// The clock `TimeSliceTimer` laps on: this THREAD's CPU time.
+///
+/// Rust-only adaptation (AGENTS.md rule 5) that makes rust measure the same
+/// QUANTITY as TS, not a different one. TS reads `performance.now()` — wall
+/// time — but TS runs one event loop per sync-worker PROCESS
+/// (`ZERO_NUM_SYNC_WORKERS`, 6 in the ART sandbox), so a running slice is never
+/// preempted and its wall time IS its execution time. Rust's shard model
+/// (INVENTIONS.md I-12) runs `ZERO_SYNCER_SHARDS` `current_thread` executors as
+/// OS threads — 1,523 threads on a 20-core cpuset in the ART sandbox — so wall
+/// time additionally counts OS preemption TS never experiences.
+/// `CLOCK_THREAD_CPUTIME_ID` is the quantity that equals TS's
+/// `performance.now()` delta under TS's execution model.
+///
+/// This matters because `MIN_ADVANCEMENT_TIME_LIMIT_MS` (50ms, advance_gate.rs)
+/// is an ABSOLUTE floor: it is what stops TS's advance budget from firing on
+/// short advances, and inflated wall time walks straight through it. Measured
+/// 2026-09-06 — same image, same compressed 60m trace, ONLY
+/// `ZERO_SYNCER_SHARDS` changed:
+///
+///   1500 shards / 1523 threads -> 1,194 `advancement-timeout` resets / 10 min
+///     40 shards /   63 threads ->     3
+///
+/// Identical work; only the preemption differed. Each reset destroys every
+/// pipeline in the group and forces a full re-hydrate, so this drove a
+/// rehydrate storm (rust 2.9x TS's hydrations) and the client-visible p99 tail.
+/// Dropping the shard count is NOT the fix — at 40 shards the client groups
+/// serialize and steady p95 goes to 6,124 ms.
+///
+/// A lap never spans an `.await` (`stop_lap` runs before, `start_lap` after)
+/// and each shard is a `current_thread` executor, so a lap is always measured
+/// on one thread. Blocking I/O inside a lap is NOT counted, where TS's wall
+/// clock would count it; the rust-only `ADVANCE_WALL_CLOCK_CEILING_MS` arm
+/// (60s, exclusion-free wall time) remains the backstop for that.
+fn process_clock_ms() -> f64 {
+    let cpu = crate::trace::thread_cpu_ms();
+    if cpu.is_nan() {
+        // Platform without CLOCK_THREAD_CPUTIME_ID: fall back to wall time,
+        // which is exactly TS's `performance.now()`.
+        return std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+    }
+    cpu
 }
 
 impl Default for TimeSliceTimer {
@@ -442,19 +490,19 @@ impl TimeSliceTimer {
 
     fn start_lap(&self) {
         assert!(self.start.get().is_none(), "already running");
-        self.start.set(Some(std::time::Instant::now()));
+        self.start.set(Some(process_clock_ms()));
     }
 
     /// TS `elapsedLap()`.
     pub fn elapsed_lap(&self) -> f64 {
         let start = self.start.get().expect("not running");
-        start.elapsed().as_secs_f64() * 1000.0
+        (process_clock_ms() - start).max(0.0)
     }
 
     fn stop_lap(&self) {
         let start = self.start.get().expect("not running");
         self.total
-            .set(self.total.get() + start.elapsed().as_secs_f64() * 1000.0);
+            .set(self.total.get() + (process_clock_ms() - start).max(0.0));
         self.start.set(None);
     }
 
@@ -468,7 +516,7 @@ impl TimeSliceTimer {
     pub fn total_elapsed(&self) -> f64 {
         match self.start.get() {
             None => self.total.get(),
-            Some(start) => self.total.get() + start.elapsed().as_secs_f64() * 1000.0,
+            Some(start) => self.total.get() + (process_clock_ms() - start).max(0.0),
         }
     }
 }
