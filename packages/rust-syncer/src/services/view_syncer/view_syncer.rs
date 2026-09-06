@@ -8373,6 +8373,12 @@ pub struct SyncResult {
     /// Set when the engine requested a reset (rehydrate) rather than advancing.
     pub reset_reason: Option<String>,
     pub reset_msg: Option<String>,
+    /// PROCESS time (yielded time excluded) spent hydrating this pass — TS
+    /// `totalProcessTime`, accumulated across `generateRowChanges`
+    /// (view-syncer.ts:2295) and reported by the caller alongside the wall time
+    /// of the whole add/remove span. 0 on the advance path, which has no such
+    /// TS log line.
+    pub process_time_ms: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -9822,6 +9828,16 @@ impl ViewSyncerService {
             // version. Bounding at the final version replayed the got-`put`
             // just tracked in this pass as a duplicate entry.
             let pre_hydrate_version = cfg_cvr.version.clone();
+            // TS `#addAndRemoveQueries`'s own `const start = performance.now()`
+            // (view-syncer.ts:2168) — a SECOND clock, distinct from
+            // `hydration_start` (`#syncQueryPipelineSet`'s, :1880). It is the
+            // one the `finished processing queries` line reports as `wall`, and
+            // it spans hydrate + deleteUnreferencedRows + flushUpdater +
+            // catchupClients + pokeEnd. Rust reported `fetch_started.elapsed()`
+            // there — the fetch loop ALONE — so the same message meant a
+            // different span on each engine and, worse, hid the CVR flush,
+            // catch-up and poke from the one line built to expose them.
+            let add_and_remove_start = std::time::Instant::now();
             let (result, pokers) = self
                 .hydrate_and_sync(
                     cfg_cvr,
@@ -9870,6 +9886,16 @@ impl ViewSyncerService {
                 pokers.add_patch(p);
             }
             pokers.end(result.cvr.version.clone());
+            // TS view-syncer.ts:2364-2366 `lc.info?.(`finished processing
+            // queries (process: ${totalProcessTime} ms, wall: ${wallTime}
+            // ms)`)` — emitted HERE, at the end of the add/remove span, with
+            // `wall` measured from that span's own start.
+            tracing::info!(
+                cg_id = %self.cg_id,
+                "finished processing queries (process: {:.1} ms, wall: {:.1} ms)",
+                result.process_time_ms,
+                add_and_remove_start.elapsed().as_secs_f64() * 1000.0
+            );
             // TS `#viewSyncerHydration.recordMs(performance.now() - start)` —
             // recorded once per sync that hydrated ≥1 query, after pokeEnd +
             // catchup.
@@ -10496,13 +10522,6 @@ impl ViewSyncerService {
         if let Some(e) = cvr_err {
             return Err(e);
         }
-        // TS view-syncer.ts:2365 `lc.info?.(`finished processing queries (process:
-        // ${totalProcessTime} ms, wall: ${wallTime} ms)`)` — wall = this pass.
-        tracing::info!(
-            cg_id = %self.cg_id,
-            "finished processing queries (process: {total_process_time_ms:.1} ms, wall: {:.1} ms)",
-            fetch_started.elapsed().as_secs_f64() * 1000.0
-        );
         crate::trace::note(
             "hydrate-fetch",
             &format!(
@@ -10611,6 +10630,7 @@ impl ViewSyncerService {
                 num_changes,
                 reset_reason: None,
                 reset_msg: None,
+                process_time_ms: total_process_time_ms,
             },
             pokers,
         ))
@@ -10711,6 +10731,7 @@ impl ViewSyncerService {
                 num_changes,
                 reset_reason: Some(reason),
                 reset_msg: Some(msg),
+                process_time_ms: 0.0,
             });
         }
 
@@ -10827,6 +10848,7 @@ impl ViewSyncerService {
             num_changes,
             reset_reason: None,
             reset_msg: None,
+            process_time_ms: 0.0,
         })
     }
 
