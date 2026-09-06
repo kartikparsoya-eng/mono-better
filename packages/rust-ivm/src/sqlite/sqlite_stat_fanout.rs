@@ -121,13 +121,13 @@ impl SQLiteStatFanout {
         }
 
         // Strategy 1: stat4 (most accurate; excludes NULLs).
-        if let Some(result) = self.fanout_from_stat4(table_name, columns) {
+        if let Some(result) = self.get_fanout_from_stat4(table_name, columns) {
             self.cache.borrow_mut().insert(cache_key, result.clone());
             return result;
         }
 
         // Strategy 2: stat1 (includes NULLs).
-        if let Some(result) = self.fanout_from_stat1(table_name, columns) {
+        if let Some(result) = self.get_fanout_from_stat1(table_name, columns) {
             self.cache.borrow_mut().insert(cache_key, result.clone());
             return result;
         }
@@ -148,7 +148,7 @@ impl SQLiteStatFanout {
     }
 
     /// Port of TS `#getFanoutFromStat4` (sqlite-stat-fanout.ts:225).
-    fn fanout_from_stat4(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
+    fn get_fanout_from_stat4(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
         let conn_rc = self.conn()?;
@@ -227,7 +227,7 @@ impl SQLiteStatFanout {
     }
 
     /// Port of TS `#getFanoutFromStat1` (sqlite-stat-fanout.ts:300).
-    fn fanout_from_stat1(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
+    fn get_fanout_from_stat1(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
         let conn_rc = self.conn()?;

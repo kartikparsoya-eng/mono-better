@@ -126,7 +126,13 @@ impl Cap {
         cap
     }
 
-    fn get_take_state_key(
+    /// Port of TS `getCapStateKey` (zql/src/ivm/cap.ts:300).
+    ///
+    /// Was named `get_take_state_key` here — `take.ts` has its OWN
+    /// `getTakeStateKey` (take.ts:710), so the cap operator carrying take's name
+    /// broke the 1:1 mapping (AGENTS.md rule 2) and made the two state-key
+    /// functions indistinguishable when auditing.
+    fn get_cap_state_key(
         &self,
         row_or_constraint: Option<&Row>,
         constraint: Option<&Constraint>,
@@ -163,7 +169,7 @@ impl Cap {
 
     fn initial_fetch(&self, req: &FetchRequest) -> NodeStream {
         if self.limit == 0 {
-            let state_key = self.get_take_state_key(None, req.constraint.as_ref());
+            let state_key = self.get_cap_state_key(None, req.constraint.as_ref());
             self.storage.borrow_mut().set(
                 state_key,
                 CapState {
@@ -175,7 +181,7 @@ impl Cap {
         }
         let mut stream = self.input.borrow().fetch(req);
         let limit = self.limit;
-        let state_key = self.get_take_state_key(None, req.constraint.as_ref());
+        let state_key = self.get_cap_state_key(None, req.constraint.as_ref());
         let primary_key = self.primary_key.clone();
         let storage = self.storage.clone();
 
@@ -283,7 +289,7 @@ impl Input for Cap {
             );
         }
 
-        let state_key = self.get_take_state_key(None, req.constraint.as_ref());
+        let state_key = self.get_cap_state_key(None, req.constraint.as_ref());
 
         if let Some(cap_state) = self.storage.borrow().get(&state_key) {
             if cap_state.size == 0 {
@@ -294,14 +300,7 @@ impl Input for Cap {
             let req = req.clone();
             let primary_key = self.primary_key.clone();
             return Box::new(pks.into_iter().flat_map(move |pk| {
-                let trimmed = pk.trim_start_matches('[').trim_end_matches(']');
-                let parts = parse_json_array_elements(trimmed);
-                let mut constraint = Constraint::default();
-                for (i, part) in parts.iter().enumerate() {
-                    if i < primary_key.len() {
-                        constraint.insert(primary_key[i].clone(), parse_value(part));
-                    }
-                }
+                let constraint = deserialize_pk_to_constraint(&pk, &primary_key);
                 let mut fetch_req = req.clone();
                 fetch_req.constraint = Some(constraint);
                 input.borrow().fetch(&fetch_req)
@@ -352,7 +351,7 @@ impl Output for CapOutput {
                     );
                 }
 
-                let state_key = cap.get_take_state_key(Some(&old_node.row), None);
+                let state_key = cap.get_cap_state_key(Some(&old_node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 if let Some(state) = cap_state {
@@ -390,7 +389,7 @@ impl Output for CapOutput {
             }
             ChangeType::Add | ChangeType::Remove => {
                 let node = change.node().clone();
-                let state_key = cap.get_take_state_key(Some(&node.row), None);
+                let state_key = cap.get_cap_state_key(Some(&node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 let cap_state = match cap_state {
@@ -505,7 +504,7 @@ impl Output for CapOutput {
             }
             ChangeType::Child => {
                 let node = change.node().clone();
-                let state_key = cap.get_take_state_key(Some(&node.row), None);
+                let state_key = cap.get_cap_state_key(Some(&node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 if let Some(state) = cap_state {
@@ -581,6 +580,40 @@ fn parse_value(s: &str) -> Value {
     Value::Null
 }
 
+/// Port of TS `deserializePKToConstraint` (zql/src/ivm/cap.ts:319) — the
+/// inverse of [`Cap::serialize_pk`].
+///
+/// TS is `JSON.parse(pk)` then one constraint entry per primary-key column.
+/// Rust reverses `value_to_string`'s encoding with `parse_json_array_elements`
+/// and `parse_value` instead of a JSON parser; that is sound HERE because
+/// `primaryKeyValueSchema` admits only `string | number | boolean`
+/// (zero-protocol/src/primary-key.ts:10-14), so a PK component can never carry
+/// nested JSON whose commas or brackets would break element splitting, and
+/// `value_to_string` emits no escape other than a doubled backslash or an
+/// escaped quote, which `unescape_json_string` reverses exactly.
+///
+/// TS walks `primaryKey.length` and assigns `values[i]`, so a short array
+/// yields entries whose value is `undefined`. Rust walks the parsed parts
+/// instead: `Constraint` is `FxHashMap<String, Value>` with no `undefined`
+/// (constraint.rs:8), and inserting `Value::Null` for a missing component would
+/// be a DIFFERENT constraint (null is a real matchable value here), so the key
+/// is omitted. Unreachable in practice — `serialize_pk` always emits exactly
+/// `primary_key.len()` elements.
+///
+/// It was inlined in `fetch` with no name of its own, which is what hid it from
+/// the Layer-1 fn ledger (AGENTS.md rule 2: keep the TS name, do not fold).
+fn deserialize_pk_to_constraint(pk: &str, primary_key: &[String]) -> Constraint {
+    let trimmed = pk.trim_start_matches('[').trim_end_matches(']');
+    let parts = parse_json_array_elements(trimmed);
+    let mut constraint = Constraint::default();
+    for (i, part) in parts.iter().enumerate() {
+        if i < primary_key.len() {
+            constraint.insert(primary_key[i].clone(), parse_value(part));
+        }
+    }
+    constraint
+}
+
 /// Parse JSON array elements, respecting quoted strings that may contain commas.
 fn parse_json_array_elements(s: &str) -> Vec<String> {
     let mut elements = Vec::new();
@@ -651,6 +684,65 @@ mod pk_serialization_tests {
         ] {
             let v = Value::Str(Arc::from(raw));
             assert_eq!(roundtrip(v.clone()), v, "round-trip failed for {raw:?}");
+        }
+    }
+
+    /// NON-VACUOUS (2026-09-06): `deserializePKToConstraint` (cap.ts:319) is the
+    /// inverse of `serializePK` (cap.ts:315), and `Cap::fetch` rebuilds the
+    /// child constraint from a stored PK with it. It had no named twin in rust
+    /// — the body was inlined in `fetch`, so nothing could call it and the
+    /// round-trip contract was untested; the Layer-1 fn ledger flagged it as a
+    /// TS function with no rust twin.
+    ///
+    /// Pins the full PK value domain `primaryKeyValueSchema` admits (string |
+    /// number | boolean, zero-protocol/src/primary-key.ts:10-14) plus the
+    /// separator hazards: a comma inside a string must NOT split an element, and
+    /// a quote/backslash must survive escaping. Replace the body with a naive
+    /// `trimmed.split(',')` and the comma case recovers `"a` and fails.
+    #[test]
+    fn deserialize_pk_to_constraint_inverts_serialize_pk_over_the_pk_value_domain() {
+        let primary_key = vec![
+            "s".to_string(),
+            "comma".to_string(),
+            "quote".to_string(),
+            "back".to_string(),
+            "n".to_string(),
+            "f".to_string(),
+            "b".to_string(),
+        ];
+        let values: Vec<Value> = vec![
+            Value::Str(Arc::from("plain")),
+            Value::Str(Arc::from("a,b")),
+            Value::Str(Arc::from("he said \"hi\"")),
+            Value::Str(Arc::from("back\\slash")),
+            Value::F64(42.0),
+            Value::F64(-1.5),
+            Value::Bool(true),
+        ];
+        // Encode exactly as `Cap::serialize_pk` does.
+        let encoded = format!(
+            "[{}]",
+            values
+                .iter()
+                .map(value_to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let got = deserialize_pk_to_constraint(&encoded, &primary_key);
+
+        assert_eq!(
+            got.len(),
+            primary_key.len(),
+            "every PK component must round-trip; encoded={encoded} got={got:?}"
+        );
+        for (col, want) in primary_key.iter().zip(values.iter()) {
+            assert_eq!(
+                got.get(col),
+                Some(want),
+                "column {col} did not round-trip through serialize_pk -> \
+                 deserialize_pk_to_constraint; encoded={encoded}"
+            );
         }
     }
 

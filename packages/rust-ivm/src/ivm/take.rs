@@ -224,45 +224,54 @@ impl Take {
         &self.schema.compare_rows
     }
 
-    fn take_state_key_for_row(&self, row: &Row) -> String {
-        let Some(partition_key) = &self.partition_key else {
-            return "global".to_string();
-        };
-        let mut key = String::new();
-        for col in partition_key {
-            let value = row.get(col).unwrap_or(&Value::Null);
-            let _ = write!(
-                key,
-                "{}={};",
-                col,
-                crate::ivm::data::js_stringify_value(value)
-            );
+    /// Port of TS `getTakeStateKey` (zql/src/ivm/take.ts:710).
+    ///
+    /// TS takes ONE `rowOrConstraint` parameter; rust splits the union across
+    /// two `Option`s because `Row` and `Constraint` are distinct types — the
+    /// same accommodation `Cap::get_cap_state_key` already makes (cap.rs). This
+    /// used to be TWO functions, `take_state_key_for_row` and
+    /// `take_state_key_for_constraint`, which is the split AGENTS.md rule 2
+    /// forbids; worse, the ledger could not see the gap because `cap.rs` was
+    /// simultaneously MISNAMING its own key function `get_take_state_key`, so
+    /// TS's `getTakeStateKey` matched that instead.
+    ///
+    /// The key format is TS's `JSON.stringify(['take', ...partitionValues])`.
+    /// Rust previously emitted `col=value;` pairs, or the bare string `global`
+    /// when unpartitioned — a wholly different encoding from TS's, and from the
+    /// `["cap",…]` that the sibling `Cap` operator already produces correctly.
+    /// Self-consistent (this key is produced and looked up only here, never
+    /// parsed or persisted across engines), so this is a parity fix, not a
+    /// behavior fix; but `col=value;` is also ambiguous in a way TS's JSON
+    /// encoding is not.
+    fn get_take_state_key(&self, row: Option<&Row>, constraint: Option<&Constraint>) -> String {
+        // TS: `if (partitionKey && rowOrConstraint)` — otherwise no partition
+        // values at all, yielding the bare `["take"]`.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(partition_key) = &self.partition_key {
+            for col in partition_key {
+                let value = match (row, constraint) {
+                    (Some(row), _) => Some(row.get(col).unwrap_or(&Value::Null)),
+                    (None, Some(c)) => Some(c.get(col).unwrap_or(&Value::Null)),
+                    (None, None) => None,
+                };
+                match value {
+                    Some(v) => parts.push(crate::ivm::data::js_stringify_value(v)),
+                    None => break,
+                }
+            }
         }
-        key
-    }
-
-    fn take_state_key_for_constraint(&self, constraint: Option<&Constraint>) -> String {
-        let (Some(partition_key), Some(constraint)) = (&self.partition_key, constraint) else {
-            return "global".to_string();
-        };
-        let mut key = String::new();
-        for col in partition_key {
-            let value = constraint.get(col).unwrap_or(&Value::Null);
-            let _ = write!(
-                key,
-                "{}={};",
-                col,
-                crate::ivm::data::js_stringify_value(value)
-            );
+        if parts.is_empty() {
+            "[\"take\"]".to_string()
+        } else {
+            format!("[\"take\",{}]", parts.join(","))
         }
-        key
     }
 
     fn get_state_and_constraint(
         &self,
         row: &Row,
     ) -> Option<(TakeState, String, Option<Row>, Option<Constraint>)> {
-        let take_state_key = self.take_state_key_for_row(row);
+        let take_state_key = self.get_take_state_key(Some(row), None);
 
         let take_state = self.storage.borrow().get(&take_state_key)?;
         let max_bound = self
@@ -937,7 +946,7 @@ impl Input for Take {
                 self.partition_key.as_ref(),
             )
         {
-            let take_state_key = self.take_state_key_for_constraint(req.constraint.as_ref());
+            let take_state_key = self.get_take_state_key(None, req.constraint.as_ref());
             let take_state = self.storage.borrow().get(&take_state_key);
             let Some(take_state) = take_state else {
                 return self.initial_fetch(req, &take_state_key);
@@ -1131,7 +1140,8 @@ mod bound_none_edit_tests {
 
         // Simulate a partition that hydrated EMPTY: size 0, no bound row.
         storage.borrow_mut().set(
-            "global".to_string(),
+            // TS `getTakeStateKey(undefined, ...)` -> JSON.stringify(['take'])
+            "[\"take\"]".to_string(),
             TakeState {
                 size: 0,
                 bound: None,
