@@ -161,6 +161,51 @@ CRATES = {
         # inlined, renamed, relocated cross-crate, a JS-only idiom Rust drops, or
         # replaced by SQLite. Zero genuine gaps found in the triaged set.
         "aliases": {
+            # database-storage.ts commit batching. TS keeps a transaction open
+            # and commits every `commitInterval` writes, explicitly as a COST
+            # optimisation, not for durability ("We don't need to commit every
+            # single write to the DB since we're not concerned with durability.
+            # Waiting on commits can be expensive." database-storage.ts:129-134).
+            # Rust reaches the same trade-off with `PRAGMA journal_mode = OFF` +
+            # `PRAGMA synchronous = OFF` (database_storage.rs:150-152), so there
+            # is no transaction to batch and nothing to checkpoint. Same
+            # observable: operator storage is non-durable and writes are cheap;
+            # neither is client-visible.
+            "checkpoint": ("sqlite/database_storage.rs PRAGMA journal_mode=OFF/synchronous=OFF",
+                           "TS commits a batched transaction; rust disables journalling instead"),
+            "maybecheckpoint": ("sqlite/database_storage.rs PRAGMA journal_mode=OFF/synchronous=OFF",
+                                "TS's every-N-writes commit trigger; no transaction to batch in rust"),
+            # table-source.ts READ path: rust builds the SELECT in its own
+            # query_builder.rs (build_select_query) rather than inline in the
+            # source, so TS's private SQL helpers have no same-file twin.
+            "requesttosql": ("sqlite/query_builder.rs build_select_query",
+                             "TS #requestToSQL builds the fetch SELECT inline; rust factors it into query_builder"),
+            "allcolumns": ("sqlite/query_builder.rs build_select_query",
+                           "TS #allColumns is the SELECT column list, produced inside build_select_query"),
+            "mapfromsqlitetypes": ("sqlite/table_source.rs sqlite_value_to_ivm",
+                                   "SQLite cell -> IVM Value conversion (see also json_sqlite_text_to_ivm)"),
+            "createclientgroupstorage": ("sqlite/database_storage.rs create_storage",
+                                         "TS DatabaseStorage.createClientGroupStorage (database-storage.ts:157); cited in that file's doc"),
+            "makeaddemptyrelationships": ("ivm/push_accumulated.rs add_empty_relationships",
+                                          "TS returns a closure (make*); rust applies directly — factory fold, cited at push_accumulated.rs:131"),
+            # table-source.ts WRITE path. Rust's `TableSource::write_change` is a
+            # documented NO-OP (sqlite/table_source.rs:1002-1008): zero.db is
+            # written by the change-streamer, and rusqlite cannot open WAL2, so
+            # the Rust IVM only READS the replica and keeps pushed changes in an
+            # in-memory overlay. Nothing in rust ever builds an INSERT/UPDATE/
+            # DELETE for a TableSource (grep: zero `UPDATE ` statements in
+            # table_source.rs), so TS's whole write-statement cluster has no
+            # twin BY DESIGN rather than by omission.
+            "canuseupdate": ("sqlite/table_source.rs write_change (no-op)",
+                             "TS picks UPDATE over DELETE+INSERT when the PK is unchanged; rust never writes"),
+            "nonprimarykeys": ("sqlite/table_source.rs write_change (no-op)",
+                               "non-PK column list, used only to bind TS's UPDATE params"),
+            "nonprimaryvalues": ("sqlite/table_source.rs write_change (no-op)",
+                                 "non-PK values, used only to bind TS's UPDATE params"),
+            "getstatementsfor": ("sqlite/table_source.rs write_change (no-op)",
+                                 "prepared insert/update/delete cache (table-source.ts:136); rust prepares reads only"),
+            "getuniqueindexes": ("sqlite/table_source.rs try_new",
+                                 "TS uses it once, to ASSERT the PK is a unique index (table-source.ts:115); not a runtime path"),
             # maybe-split-and-push-edit-change.ts — rust inlines it into the
             # filter_push.rs EDIT arm (predicate-crossing edit → remove+add),
             # per the Rust-only signature-delta note in that file's doc.
