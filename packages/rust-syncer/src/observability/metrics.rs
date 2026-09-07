@@ -658,59 +658,13 @@ pub fn record_cvr_flush_failure() {
     cvr_flush_failures().add(1, &[]);
 }
 
-/// CVR load/flush attempt instruments — TS `zero.sync.cvr.load_attempts` /
-/// `load_duration` / `flush_attempts` (cvr-store.ts:207-217). Alert rules on
-/// `flush_attempts{result="error"}` / load-latency dashboards written for the
-/// TS syncer keep working under rust.
-struct CvrAttemptOtel {
-    load_attempts: Counter<u64>,
-    load_duration: OtelHistogram<f64>,
-    flush_attempts: Counter<u64>,
-}
-
-fn cvr_attempt_otel() -> &'static CvrAttemptOtel {
-    static I: OnceLock<CvrAttemptOtel> = OnceLock::new();
-    I.get_or_init(|| {
-        let m = global::meter("zero");
-        CvrAttemptOtel {
-            load_attempts: m
-                .u64_counter("zero.sync.cvr.load_attempts")
-                .with_description("CVR load attempts, labeled by result.")
-                .build(),
-            load_duration: m
-                .f64_histogram("zero.sync.cvr.load_duration")
-                .with_unit("s")
-                .with_description("CVR load duration.")
-                .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
-                .build(),
-            flush_attempts: m
-                .u64_counter("zero.sync.cvr.flush_attempts")
-                .with_description("CVR flush attempts, labeled by result and flush.type.")
-                .build(),
-        }
-    })
-}
-
-pub fn record_cvr_load_attempt(success: bool, elapsed_ms: f64) {
-    let result = if success { "success" } else { "error" };
-    let attrs = [KeyValue::new("result", result)];
-    cvr_attempt_otel().load_attempts.add(1, &attrs);
-    cvr_attempt_otel()
-        .load_duration
-        .record(elapsed_ms / 1000.0, &attrs);
-}
-
-/// `flush.type` is always `sync` in rust — there is no deferred-flush path.
-pub fn record_cvr_flush_attempt(success: bool) {
-    let result = if success { "success" } else { "error" };
-    cvr_attempt_otel().flush_attempts.add(
-        1,
-        &[
-            KeyValue::new("result", result),
-            KeyValue::new("flush.type", "sync"),
-        ],
-    );
-}
+// The CVRStore instruments (`zero.sync.cvr.load_attempts` / `load_duration` /
+// `flush_attempts`, cvr-store.ts:207-217) are built and bumped ONLY by the
+// cvr-store port, rust-cvr/src/otel_metrics.rs (record_load /
+// record_flush_attempt), so alert rules and dashboards written for the TS
+// syncer keep working under rust. A second copy used to live here and doubled
+// every load/flush count (caught at the collector 2026-09-07: 12 attempts vs
+// 6 durations); tests/metric_ownership_test.rs pins the single owner.
 
 /// Client groups torn down via `fail_group` (all their clients rehomed).
 fn failed_client_groups() -> &'static Counter<u64> {

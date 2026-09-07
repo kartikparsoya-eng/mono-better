@@ -8751,10 +8751,9 @@ impl ViewSyncerService {
             }),
         )
         .await;
-        crate::metrics::record_cvr_load_attempt(
-            result.is_ok(),
-            load_started.elapsed().as_secs_f64() * 1000.0,
-        );
+        // `cvr.load_attempts` / `cvr.load_duration` are recorded inside
+        // `CVRStore::load` (rust-cvr otel_metrics::record_load, the port of TS
+        // `#recordLoad` cvr-store.ts:308-311) — not here, or every load counts twice.
         let result = result?;
         // TS cvr-store.ts:511 `lc.info?.(`loaded cvr@${versionString(cvr.version)} (${ms} ms)`)`.
         tracing::info!(
@@ -9094,7 +9093,8 @@ impl ViewSyncerService {
                         }
                     }
                 };
-                crate::metrics::record_cvr_flush_attempt(result.is_ok());
+                // `cvr.flush_attempts` is recorded inside `CVRStore::flush`
+                // (rust-cvr otel_metrics::record_flush_attempt, TS cvr-store.ts:1254-1264).
                 result.map_err(|e| {
                     // Counted, not just logged: a rising flush-failure rate
                     // (pool exhaustion, ownership churn) is the leading
