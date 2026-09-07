@@ -2374,6 +2374,12 @@ impl ViewSyncerService {
         self.active_client_pv
             .insert(ws_id.clone(), params.protocol_version);
         crate::metrics::record_active_client_delta(1, params.protocol_version);
+        // TS's dispatcher tracks the highest protocol version any client has
+        // connected with (`zero.sync.max-protocol-version`,
+        // server/worker-dispatcher.ts:56-64). Rust has no worker_dispatcher
+        // twin, so it is fed from the same connect point that already moves the
+        // active-clients gauge.
+        crate::metrics::record_client_protocol_version(params.protocol_version);
         // Connection fully initialized (TS `recordConnectionSuccessMetric`).
         crate::metrics::record_ws_connection_success(params.protocol_version);
         self.registered_ws.insert(client_id.clone(), ws_id.clone());

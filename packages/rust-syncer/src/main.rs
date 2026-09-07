@@ -306,6 +306,11 @@ fn main() {
     // eligible CG's earliest-unserved change.
     let serving_lag_registry = router.serving_lag_registry();
     rust_syncer::metrics::register_serving_lag_gauges(serving_lag_registry.clone());
+    // `zero.sync.max-protocol-version` + `zero.server.uptime` — TS registers
+    // both in server/worker-dispatcher.ts; rust has no dispatcher twin, so they
+    // are registered here, where serving begins (TS starts its uptime clock in
+    // `run()`, when requests begin being served).
+    rust_syncer::metrics::register_process_gauges();
     runtime.spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
             rust_syncer::workers::syncer::VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS,

@@ -227,7 +227,6 @@ pub async fn serve_http(
         .route("/healthz", get(|| async { "OK" }))
         .route("/readyz", get(readyz_handler))
         .route("/statz", get(statz_handler))
-        .route("/metrics", get(metrics_handler))
         .route("/heapz", get(heapz_handler))
         // Live-object census across all three Rust crates (leak hunt). Poll with
         // `curl http://<http-port>/census` during a load run to see which
@@ -306,17 +305,6 @@ async fn statz_handler(
     });
 
     (StatusCode::OK, Json(response)).into_response()
-}
-
-/// GET /metrics — Prometheus text-format metrics. Scraped by the ART G17
-/// telemetry gate; exposes `zero_sync_*` counters + hydration/advance latency
-/// histograms (TS pushes OTLP; we expose a pull endpoint — same metric names).
-async fn metrics_handler(State(state): State<Arc<HttpServerState>>) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4")],
-        state.router.metrics_prometheus(),
-    )
 }
 
 /// GET /census — live-object census aggregated across the three Rust crates.

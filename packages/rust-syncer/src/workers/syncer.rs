@@ -355,6 +355,14 @@ impl ServingLagRegistry {
     }
 
     /// Sum of active queries across all CGs (TS `queries` gauge).
+    /// Number of active client groups — TS `this.#viewSyncers.size`, the
+    /// source for the `zero.sync.active-client-groups` gauge
+    /// (workers/syncer.ts:396-402). `view_syncers` holds one entry per CG, the
+    /// same map the `queries`/`rows` gauges beside it already read.
+    pub fn total_client_groups(&self) -> u64 {
+        self.view_syncers.len() as u64
+    }
+
     pub fn total_queries(&self) -> u64 {
         self.view_syncers
             .iter()
@@ -836,12 +844,6 @@ impl Syncer {
     /// A JSON snapshot of the process metrics (for `/statz`).
     pub fn metrics_snapshot(&self) -> serde_json::Value {
         self.metrics.snapshot()
-    }
-
-    /// Prometheus text-format metrics (for `/metrics`), including the live
-    /// active-client-groups gauge.
-    pub fn metrics_prometheus(&self) -> String {
-        self.metrics.render_prometheus(self.cg_count() as u64)
     }
 
     /// Handle a new WebSocket connection.

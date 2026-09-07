@@ -272,6 +272,25 @@ impl PusherService {
                     payload, target, ..
                 } in combine_pushes(batch)
                 {
+                    // TS `#processPush` opens by counting the push and its
+                    // mutations, tagged with the clientGroupID (pusher.ts:
+                    // 490-495) — before the POST, so a failing push still
+                    // counts. Recorded here, the rust site that performs the
+                    // same per-push work, rather than at enqueue: a push
+                    // dropped at the queue cap is never processed and TS would
+                    // never have counted it.
+                    crate::metrics::record_push(
+                        payload
+                            .get("clientGroupID")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default(),
+                        payload
+                            .get("push")
+                            .and_then(|p| p.get("mutations"))
+                            .and_then(|m| m.as_array())
+                            .map(|m| m.len() as u64)
+                            .unwrap_or(0),
+                    );
                     let mut req = client
                         .post(&relay_url)
                         .timeout(RELAY_TIMEOUT)
