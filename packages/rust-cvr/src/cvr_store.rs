@@ -44,15 +44,57 @@ const LOAD_ATTEMPT_INTERVAL_MS: u64 = 500;
 // `MAX_LOAD_ATTEMPTS`.
 const MAX_LOAD_ATTEMPTS: u32 = 10;
 
+/// Port of JS `new Date(ms).toISOString()` — UTC, always millisecond precision,
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`. No TS file twin (a JS builtin), so it is folded
+/// into the file whose messages need it: TS interpolates it into
+/// `OwnershipError`'s message, which reaches the client verbatim, so the
+/// rendering must match JS byte-for-byte (fractional input truncates toward
+/// zero, like the `Date` constructor's ToInteger).
+pub fn to_iso_string(epoch_ms: f64) -> String {
+    let ms = epoch_ms.trunc() as i64;
+    let days = ms.div_euclid(86_400_000);
+    let ms_of_day = ms.rem_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    let (h, m, sec, milli) = (
+        ms_of_day / 3_600_000,
+        (ms_of_day / 60_000) % 60,
+        (ms_of_day / 1_000) % 60,
+        ms_of_day % 1_000,
+    );
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{sec:02}.{milli:03}Z")
+}
+
+/// Days-since-epoch -> (year, month, day), Howard Hinnant's `civil_from_days`
+/// (the same proleptic Gregorian calendar JS `Date` uses).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 // ─── Error types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum CVRStoreError {
+    /// TS `OwnershipError` (cvr-store.ts:1381-1398). The text is byte-exact with
+    /// TS because it reaches the client verbatim as the `["error", …]` frame
+    /// message: a NULL owner renders as `null` (JS template of a null column)
+    /// and both instants as `new Date(x).toISOString()`.
     #[error(
-        "CVR ownership was transferred to {owner} at {granted_at} (last connect: {last_connect_time})"
+        "CVR ownership was transferred to {} at {} (last connect time: {})",
+        owner.as_deref().unwrap_or("null"),
+        to_iso_string(*granted_at),
+        to_iso_string(*last_connect_time)
     )]
     OwnershipError {
-        owner: String,
+        owner: Option<String>,
         granted_at: f64,
         last_connect_time: f64,
     },
@@ -895,7 +937,7 @@ impl CVRStoreHandle {
                 && granted_at.unwrap_or(0.0) > last_connect_time
             {
                 return Err(CVRStoreError::OwnershipError {
-                    owner: owner.unwrap_or_default(),
+                    owner,
                     granted_at: granted_at.unwrap_or(0.0),
                     last_connect_time,
                 });
@@ -1571,7 +1613,7 @@ impl CVRStoreHandle {
                     if granted_at.unwrap_or(0.0) > last_connect_time {
                         drop(tx);
                         return Err(CVRStoreError::OwnershipError {
-                            owner: owner.unwrap_or_default(),
+                            owner,
                             granted_at: granted_at.unwrap_or(0.0),
                             last_connect_time,
                         });
@@ -2014,6 +2056,59 @@ mod tests {
         assert_eq!(store.cvr("rows"), "\"test/cvr\".\"rows\"");
     }
 
+    /// `to_iso_string` == JS `new Date(ms).toISOString()`. Golden values taken
+    /// from node (the epoch, the ms tick, a real grantedAt, Y2K, a PRE-epoch
+    /// instant, the max JS date, and a FRACTIONAL input the `Date` constructor
+    /// truncates toward zero). The pre-epoch and fractional cases are the ones a
+    /// naive `ms / 86_400_000` port gets wrong.
+    #[test]
+    fn to_iso_string_matches_js_date_to_iso_string() {
+        for (ms, want) in [
+            (0.0, "1970-01-01T00:00:00.000Z"),
+            (1.0, "1970-01-01T00:00:00.001Z"),
+            (1_757_243_985_123.0, "2025-09-07T11:19:45.123Z"),
+            (946_684_800_000.0, "2000-01-01T00:00:00.000Z"),
+            (-1.0, "1969-12-31T23:59:59.999Z"),
+            (253_402_300_799_999.0, "9999-12-31T23:59:59.999Z"),
+            (1_234_567_890_123.7, "2009-02-13T23:31:30.123Z"),
+        ] {
+            assert_eq!(to_iso_string(ms), want, "new Date({ms}).toISOString()");
+        }
+    }
+
+    /// TS `OwnershipError`'s message reaches the client verbatim, so it is
+    /// byte-exact here: ISO instants (not raw epoch floats), "last connect
+    /// time:" (not "last connect:"), and `null` for a NULL owner column —
+    /// JS interpolates `${owner}` where owner is `string | null`
+    /// (cvr-store.ts:1385-1393).
+    #[test]
+    fn ownership_error_message_is_byte_exact_with_ts() {
+        let e = CVRStoreError::OwnershipError {
+            owner: Some("task-B".to_string()),
+            granted_at: 1_757_243_985_123.0,
+            last_connect_time: 1_757_243_000_000.0,
+        };
+        assert_eq!(
+            e.to_string(),
+            concat!(
+                "CVR ownership was transferred to task-B at 2025-09-07T11:19:45.123Z ",
+                "(last connect time: 2025-09-07T11:03:20.000Z)"
+            )
+        );
+        let anon = CVRStoreError::OwnershipError {
+            owner: None,
+            granted_at: 0.0,
+            last_connect_time: 0.0,
+        };
+        assert_eq!(
+            anon.to_string(),
+            concat!(
+                "CVR ownership was transferred to null at 1970-01-01T00:00:00.000Z ",
+                "(last connect time: 1970-01-01T00:00:00.000Z)"
+            )
+        );
+    }
+
     /// Port of TS `cvrErrorKind` (cvr-store.ts:1421-1435): pins the exact otel
     /// `error.kind` attribute string for every `CVRStoreError` variant. TS keys
     /// on `instanceof` of four named errors and falls back to `"error"`; Rust
@@ -2037,7 +2132,7 @@ mod tests {
             ),
             (
                 CVRStoreError::OwnershipError {
-                    owner: "task-2".to_string(),
+                    owner: Some("task-2".to_string()),
                     granted_at: 1.0,
                     last_connect_time: 0.0,
                 },

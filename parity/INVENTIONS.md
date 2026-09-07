@@ -225,6 +225,19 @@ guarantees, error semantics) versus TS.
      `store_failure_fails_clients_with_internal_like_ts_wrap_with_protocol_error`.
      Failures inside the advance loop / timer ops fail every client in TS too
      (`#cleanup(err)`), so those sites are 1:1.
+     **BOUNDED 2026-09-07:** the deviation covers store FAILURES only. A
+     `ClientNotFound` VERDICT from the load (purged CVR, or rows-behind after
+     `MAX_LOAD_ATTEMPTS` — cvr-store.ts:295/423) served nothing, so no
+     write-behind durability argument applies to it and the blast radius stays
+     TS's: only the requesting client is failed. TS reaches that through
+     `#runInLockForClient`'s RETHROW (the load throws inside
+     `#runInLockWithCVR` before `client` is looked up, view-syncer.ts:1249) →
+     `Connection.#handleMessage` catch → `#closeWithThrown`
+     (workers/connection.ts:229-230). Until 2026-09-07 rust's
+     `apply_client_deletions` called `fail_group_with_error` there, so ONE
+     client's `deleteClients` on a purged CVR wiped every other client of the
+     group. Pinned by
+     `client_not_found_at_load_fails_only_the_requesting_client`.
   3. ~~The store does not OWN the `RowRecordCache`~~ — **CLOSED 2026-09-02.**
      `CVRStoreHandle` now holds `row_cache` like TS's `CVRStore.#rowCache`
      (cvr-store.ts:246), builds it in `new()` with TS's default arguments, and

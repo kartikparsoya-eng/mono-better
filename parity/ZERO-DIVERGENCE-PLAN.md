@@ -677,10 +677,22 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
 - [ ] Sandbox pod (2026-09-07, 2a45181): one query shape (likely
       `getStagesByBoardIds`) hydrates 1.43M rows for 61 results — 36 s warm /
       353 s cold per hydration, ~2.9 GB resident each; a query-shape problem,
-      not an engine divergence (planner flips identical). Also: rust ends a
-      single-client CG on `ClientNotFound` at load ("terminating after fatal
-      synchronization error") where TS keeps the group for other clients —
-      verify the multi-client case (view-syncer.ts:565 vs view_syncer.rs:1639).
+      not an engine divergence (planner flips identical).
+- [x] **Multi-client `ClientNotFound` scope (verified 2026-09-07, one real
+      divergence fixed).** Two distinct TS paths, now both 1:1: (a) the RUN
+      LOOP (older-replica check, view-syncer.ts:556-565) throws out of
+      `#stateChanges` → `#cleanup(err)` fails EVERY client and stops the
+      service — rust `ensure_cvr` / `on_notification` `fail_group_with_error`
+      already matched; (b) a CLIENT-INITIATED op (`initConnection` /
+      `changeDesiredQueries` / `deleteClients`) whose CVR load throws is
+      rethrown by `#runInLockForClient` (the throw happens inside
+      `#runInLockWithCVR` before `client` is bound, view-syncer.ts:1249) and
+      closes only THAT socket (workers/connection.ts:229-230). Rust's
+      `config_and_hydrate` load site already did this; `apply_client_deletions`
+      did NOT — it failed the whole group, so one client's `deleteClients` on a
+      purged CVR took every other client down with it. Fixed + pinned by
+      `client_not_found_at_load_fails_only_the_requesting_client`; I-6 2b's
+      group-teardown deviation is now explicitly bounded to store FAILURES.
 
 ### In flight (this session)
 - [x] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4` — superseded

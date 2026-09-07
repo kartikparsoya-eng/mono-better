@@ -351,6 +351,20 @@ impl ErrorBody {
         })
     }
 
+    /// TS `OwnershipError` (cvr-store.ts:1381-1398) sets `maxBackoffMs: 0` on
+    /// its Rehome body: the CVR now belongs to a task that is ready to serve it,
+    /// so the client must reconnect immediately instead of backing off.
+    pub fn rehome_with_max_backoff_ms(message: impl Into<String>, max_backoff_ms: i64) -> Self {
+        ErrorBody::Backoff(BackoffBody {
+            kind: ErrorKind::Rehome,
+            message: message.into(),
+            min_backoff_ms: None,
+            max_backoff_ms: Some(max_backoff_ms),
+            reconnect_params: None,
+            origin: Some(ErrorOrigin::ZeroCache),
+        })
+    }
+
     pub fn rehome(message: impl Into<String>) -> Self {
         ErrorBody::Backoff(BackoffBody {
             kind: ErrorKind::Rehome,

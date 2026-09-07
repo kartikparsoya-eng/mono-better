@@ -702,6 +702,36 @@ fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {
     crate::protocol::ErrorBody::basic(crate::protocol::ErrorKind::Internal, message.to_string())
 }
 
+/// Port of `wrapWithProtocolError`'s PASSTHROUGH branch (error-with-level.ts:
+/// 33-35 — `if (isProtocolError(error)) return error`) for the errors
+/// `CVRStore` raises. TS defines them as ProtocolError SUBCLASSES
+/// (cvr-store.ts:1354-1420), so each reaches the client with its OWN kind:
+/// `OwnershipError` → Rehome + `maxBackoffMs: 0` (the CVR moved to another
+/// task — reconnect NOW, do not back off), `ConcurrentModificationException` →
+/// Rehome, `InvalidClientSchemaError` → SchemaVersionNotSupported,
+/// `ClientNotFoundError` → ClientNotFound. Only the non-protocol errors
+/// (sqlx, version parse, rows-behind) wrap as `Internal`.
+///
+/// Lives in the consumer because the twin file (`rust-cvr/src/cvr_store.rs`,
+/// where the messages are built) cannot construct a rust-syncer `ErrorBody`:
+/// rust-syncer depends on rust-cvr, not the other way round.
+fn cvr_store_error_body(error: &CVRStoreError) -> crate::protocol::ErrorBody {
+    use crate::protocol::{ErrorBody, ErrorKind};
+    match error {
+        CVRStoreError::ClientNotFound(message) => ErrorBody::client_not_found(message.clone()),
+        // TS OwnershipError sets `maxBackoffMs: 0` (cvr-store.ts:1391).
+        CVRStoreError::OwnershipError { .. } => {
+            ErrorBody::rehome_with_max_backoff_ms(error.to_string(), 0)
+        }
+        CVRStoreError::ConcurrentModification { .. } => ErrorBody::rehome(error.to_string()),
+        CVRStoreError::InvalidClientSchema(cause) => ErrorBody::basic(
+            ErrorKind::SchemaVersionNotSupported,
+            format!("Could not parse clientSchema stored in CVR: {cause}"),
+        ),
+        _ => wrap_with_protocol_error(&error.to_string()),
+    }
+}
+
 /// Rust-only adapter for the TS union parameter of
 /// `#sendQueryTransformErrorToClients` (`ErroredQuery[] | TransformFailedBody`,
 /// view-syncer.ts:1730): `Failed` = the whole-batch `TransformFailedBody`
@@ -1634,6 +1664,10 @@ impl ViewSyncerService {
             return Ok(true);
         }
         if self.cvr_pg {
+            #[cfg(test)]
+            if let Some(error) = force_load_error_take() {
+                return Err(LoadCvrError::Store(error));
+            }
             match self.load_cvr(self.last_connect_time as f64).await {
                 Ok(cvr) => self.cvr = cvr,
                 Err(e) => {
@@ -2725,9 +2759,9 @@ impl ViewSyncerService {
                 self.delete_client_due_to_disconnect(client_id, &ws_id);
                 return false;
             }
-            Err(error) => {
+            Err(LoadCvrError::Store(error)) => {
                 tracing::error!("CG {}: unable to load CVR: {error}", self.cg_id);
-                self.fail_group(&error.to_string());
+                self.fail_group_with_error(cvr_store_error_body(&error));
                 return false;
             }
         }
@@ -3207,16 +3241,33 @@ impl ViewSyncerService {
                 self.fail_group("Unable to load the client view state");
                 return;
             }
-            // A protocol error passes through TS `wrapWithProtocolError` unchanged:
-            // the store's ClientNotFound reaches the clients as ClientNotFound.
+            // SCOPE: only the REQUESTING client, like TS. `deleteClients` and the
+            // deletion pass of `initConnection`/`changeDesiredQueries` all run
+            // inside `#runInLockForClient`; `CVRStore.load` throws inside
+            // `#runInLockWithCVR` (view-syncer.ts:489-493) BEFORE the callback,
+            // so `client` is still undefined in the catch and the error is
+            // RETHROWN (view-syncer.ts:1249) -> `Connection.#handleMessage`'s
+            // catch -> `#closeWithThrown` closes that ONE socket
+            // (workers/connection.ts:229-230). The group keeps serving its other
+            // clients. This is NOT the I-6 2b group-teardown case: that deviation
+            // covers store WRITE failures (a write-behind batch may already have
+            // been served); a failed load served nothing, so there is no
+            // durability reason to widen the blast radius past TS's.
             Err(LoadCvrError::Store(rust_cvr::cvr_store::CVRStoreError::ClientNotFound(
                 message,
             ))) => {
-                self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                let ws_id = self.registered_ws.get(caller_client_id).cloned();
+                if let Some(conn) = self.connections.get(caller_client_id) {
+                    conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                }
+                if let Some(ws_id) = ws_id {
+                    self.delete_client_due_to_disconnect(caller_client_id, &ws_id);
+                }
                 return;
             }
-            Err(e) => {
-                self.fail_group(&e.to_string());
+            Err(LoadCvrError::Store(e)) => {
+                tracing::error!("CG {}: unable to load CVR: {e}", self.cg_id);
+                self.fail_group_with_error(cvr_store_error_body(&e));
                 return;
             }
         }
@@ -3459,8 +3510,9 @@ impl ViewSyncerService {
                 self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(message));
                 return;
             }
-            Err(e) => {
-                self.fail_group(&e.to_string());
+            Err(LoadCvrError::Store(e)) => {
+                tracing::error!("CG {}: unable to load CVR: {e}", self.cg_id);
+                self.fail_group_with_error(cvr_store_error_body(&e));
                 return;
             }
         }
@@ -4193,6 +4245,28 @@ fn merge_notifications(prev: serde_json::Value, next: serde_json::Value) -> serd
         );
     }
     merged
+}
+
+// TEST SEAM (rust-only, `#[cfg(test)]`, no TS twin — TS drives these cases from
+// real `instances` rows in view-syncer.pg.test.ts / cvr-store.pg.test.ts). Arms
+// the next `ensure_cvr` store load to fail with the given `CVRStoreError` so the
+// failure SCOPE (requesting client vs whole group) and the client-visible error
+// KIND can be pinned without Postgres. Consumed once, per thread (a CG owns its
+// thread). A doc comment cannot document a macro invocation (rustc
+// `unused_doc_comments`), hence `//`.
+#[cfg(test)]
+thread_local! {
+    static FORCE_LOAD_ERROR: RefCell<Option<CVRStoreError>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn force_load_error(error: CVRStoreError) {
+    FORCE_LOAD_ERROR.with(|c| *c.borrow_mut() = Some(error));
+}
+
+#[cfg(test)]
+fn force_load_error_take() -> Option<CVRStoreError> {
+    FORCE_LOAD_ERROR.with(|c| c.borrow_mut().take())
 }
 
 #[cfg(test)]
@@ -5317,6 +5391,218 @@ mod tests {
                 && msg != "Client view synchronization failed",
             "TS sends getErrorMessage(e) — the underlying error text, not a fixed label; got {msg:?}"
         );
+    }
+
+    /// A `ClientNotFound` from the CVR *load* on a client-initiated lock op must
+    /// fail ONLY the requesting client. TS: `deleteClients` runs inside
+    /// `#runInLockForClient`; `CVRStore.load` throws inside `#runInLockWithCVR`
+    /// (view-syncer.ts:489-493) BEFORE the callback runs, so `client` is still
+    /// undefined in the catch and the error is RETHROWN (view-syncer.ts:1249)
+    /// -> `Connection.#handleMessage`'s catch -> `#closeWithThrown` closes that
+    /// ONE socket (workers/connection.ts:229-230); every other client of the
+    /// group keeps its stream. Rust used to `fail_group_with_error` here, so a
+    /// purged CVR ("Client has been purged due to inactivity", cvr-store.ts:423)
+    /// surfaced by ONE client's `deleteClients` wiped every other client of the
+    /// group. Non-vacuous: restoring `fail_group_with_error` makes clientB
+    /// receive the error frame and the group go terminal.
+    #[test]
+    fn client_not_found_at_load_fails_only_the_requesting_client() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("clientA", "wsA", "user-1"),
+            DirectWebSocketSink::new(tx_a),
+        ));
+        rt.block_on(state.on_new_connection(
+            pinned_params("clientB", "wsB", "user-1"),
+            DirectWebSocketSink::new(tx_b),
+        ));
+
+        // The next store load answers with TS's purge verdict (cvr-store.ts:423).
+        state.cvr = None;
+        state.cvr_pg = true;
+        force_load_error(CVRStoreError::ClientNotFound(
+            "Client has been purged due to inactivity".to_string(),
+        ));
+
+        rt.block_on(state.apply_client_deletions("clientA", None, &["clientC".to_string()], &[]));
+
+        let mut errors_a: Vec<serde_json::Value> = Vec::new();
+        while let Ok(cmd) = rx_a.try_recv() {
+            match cmd {
+                WsCommand::Send { msg, .. } if msg[0] == "error" => errors_a.push(msg[1].clone()),
+                WsCommand::Fail(e) => errors_a.push(crate::protocol::error_message(&e)[1].clone()),
+                _ => {}
+            }
+        }
+        let mut errors_b: Vec<serde_json::Value> = Vec::new();
+        while let Ok(cmd) = rx_b.try_recv() {
+            match cmd {
+                WsCommand::Send { msg, .. } if msg[0] == "error" => errors_b.push(msg[1].clone()),
+                WsCommand::Fail(e) => errors_b.push(crate::protocol::error_message(&e)[1].clone()),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            errors_a.len(),
+            1,
+            "the requesting client must be failed exactly once; got {errors_a:?}"
+        );
+        assert_eq!(errors_a[0]["kind"], "ClientNotFound");
+        assert_eq!(
+            errors_a[0]["message"], "Client has been purged due to inactivity",
+            "the store message reaches the client verbatim (cvr-store.ts:424)"
+        );
+        assert!(
+            errors_b.is_empty(),
+            "TS keeps serving the group's other clients; clientB received {errors_b:?}"
+        );
+        assert!(
+            !state.terminal,
+            "the group must stay alive for its other clients (TS never reaches #cleanup here)"
+        );
+        assert!(
+            state.connections.contains_key("clientB"),
+            "clientB's connection must survive the requesting client's failure"
+        );
+    }
+
+    /// TS `wrapWithProtocolError` returns a ProtocolError UNCHANGED
+    /// (error-with-level.ts:33-35) and EVERY error `CVRStore` raises is one
+    /// (cvr-store.ts:1354-1420). Rust stringified them all into `fail_group`, so
+    /// an ownership transfer — what a rolling restart does to every client group
+    /// when the new task takes the CVR — reached the client as `{kind: Internal}`.
+    /// The zero-client BACKS OFF on Internal and reconnects immediately on
+    /// Rehome (`maxBackoffMs: 0`), so every client of that group waited out a
+    /// backoff TS never imposes. Table-driven: a new variant that forgets its arm
+    /// falls into the Internal fallback and fails its row.
+    #[test]
+    fn cvr_store_errors_reach_the_client_with_their_ts_kind() {
+        let cases: Vec<(CVRStoreError, serde_json::Value)> = vec![
+            (
+                CVRStoreError::OwnershipError {
+                    owner: Some("task-B".to_string()),
+                    granted_at: 1_757_243_985_123.0,
+                    last_connect_time: 1_757_243_000_000.0,
+                },
+                serde_json::json!({
+                    "kind": "Rehome",
+                    "message": "CVR ownership was transferred to task-B at \
+                                2025-09-07T11:19:45.123Z (last connect time: \
+                                2025-09-07T11:03:20.000Z)",
+                    "maxBackoffMs": 0,
+                    "origin": "zeroCache",
+                }),
+            ),
+            (
+                CVRStoreError::ConcurrentModification {
+                    expected: "01".to_string(),
+                    actual: "02".to_string(),
+                },
+                serde_json::json!({
+                    "kind": "Rehome",
+                    "message": "CVR has been concurrently modified. Expected 01, got 02",
+                    "origin": "zeroCache",
+                }),
+            ),
+            (
+                CVRStoreError::InvalidClientSchema("bad".to_string()),
+                serde_json::json!({
+                    "kind": "SchemaVersionNotSupported",
+                    "message": "Could not parse clientSchema stored in CVR: bad",
+                    "origin": "zeroCache",
+                }),
+            ),
+            (
+                CVRStoreError::ClientNotFound(
+                    "Client has been purged due to inactivity".to_string(),
+                ),
+                serde_json::json!({
+                    "kind": "ClientNotFound",
+                    "message": "Client has been purged due to inactivity",
+                    "origin": "zeroCache",
+                }),
+            ),
+            // NOT a TS ProtocolError → `wrapWithProtocolError` wraps it.
+            (
+                CVRStoreError::RowsVersionBehind {
+                    cvr_version: "03".to_string(),
+                    rows_version: None,
+                },
+                serde_json::json!({
+                    "kind": "Internal",
+                    "message": "Rows version behind: cvr=03, rows=None",
+                    "origin": "zeroCache",
+                }),
+            ),
+        ];
+        for (error, want) in cases {
+            let got = serde_json::to_value(cvr_store_error_body(&error)).unwrap();
+            assert_eq!(got, want, "wire body for {error:?}");
+        }
+    }
+
+    /// The same, at the live seam: a load that loses ownership must reach EVERY
+    /// client of the group as TS's Rehome body. This is the run-loop path, where
+    /// TS's throw exits `#stateChanges` and `#cleanup(err)` fails every client
+    /// (view-syncer.ts:2820-2826), so the group scope is 1:1 — only the KIND was
+    /// wrong. Non-vacuous: restoring `fail_group(&e.to_string())` makes both
+    /// clients receive `{kind: Internal}`.
+    #[test]
+    fn ownership_loss_at_load_rehomes_every_client() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("clientA", "wsA", "user-1"),
+            DirectWebSocketSink::new(tx_a),
+        ));
+        rt.block_on(state.on_new_connection(
+            pinned_params("clientB", "wsB", "user-1"),
+            DirectWebSocketSink::new(tx_b),
+        ));
+        state.cvr = None;
+        state.cvr_pg = true;
+        force_load_error(CVRStoreError::OwnershipError {
+            owner: Some("task-B".to_string()),
+            granted_at: 1_757_243_985_123.0,
+            last_connect_time: 1_757_243_000_000.0,
+        });
+
+        rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
+
+        for (who, rx) in [("clientA", &mut rx_a), ("clientB", &mut rx_b)] {
+            let mut errors: Vec<serde_json::Value> = Vec::new();
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    WsCommand::Send { msg, .. } if msg[0] == "error" => errors.push(msg[1].clone()),
+                    WsCommand::Fail(e) => {
+                        errors.push(crate::protocol::error_message(&e)[1].clone())
+                    }
+                    _ => {}
+                }
+            }
+            let e = errors
+                .last()
+                .cloned()
+                .unwrap_or_else(|| panic!("{who} must be failed when the CVR is owned elsewhere"));
+            assert_eq!(e["kind"], "Rehome", "{who} got {e}");
+            assert_eq!(
+                e["maxBackoffMs"], 0,
+                "{who} must reconnect NOW, not back off: {e}"
+            );
+            assert_eq!(
+                e["message"],
+                "CVR ownership was transferred to task-B at 2025-09-07T11:19:45.123Z \
+                 (last connect time: 2025-09-07T11:03:20.000Z)",
+                "{who} message must be TS's verbatim"
+            );
+        }
     }
 
     #[test]
