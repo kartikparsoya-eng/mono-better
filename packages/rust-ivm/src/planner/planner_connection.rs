@@ -97,6 +97,14 @@ impl PlannerConnection {
         self.output = Some(node.downgrade());
     }
 
+    /// Port of TS `get output()` (planner-connection.ts:143): asserts the output was set.
+    pub fn output(&self) -> crate::planner::planner_node::PlannerNode {
+        self.output
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .expect("Output not set")
+    }
+
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
         JoinOrConnection::Connection
     }

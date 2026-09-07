@@ -229,8 +229,12 @@ impl PlannerJoin {
         cost_estimate
     }
 
-    pub fn get_output(&self) -> Option<PlannerNode> {
-        self.output.as_ref().and_then(|w| w.upgrade())
+    /// Port of TS `get output()` (planner-join.ts:134): asserts the output was set.
+    pub fn output(&self) -> PlannerNode {
+        self.output
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .expect("Output not set")
     }
 
     pub fn reset(&mut self) {

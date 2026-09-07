@@ -175,6 +175,13 @@ pub type FailCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 /// Callback for async flush metrics (mirrors TS `#recordAsyncFlushStats`).
 pub type MetricsCallback = Arc<dyn Fn(usize, f64) + Send + Sync + 'static>;
+/// Port of TS `#cvr` (row-record-cache.ts:160): the schema-qualified CVR table identifier,
+/// rendered the way postgres.js renders `sql(`${schema}.${table}`)`
+/// (`"schema"."table"`). A free fn as well as a method because the
+/// flush/catchup tasks (rust-only inventions) run outside the struct.
+fn cvr(schema: &str, table: &str) -> String {
+    format!("\"{schema}\".\"{table}\"")
+}
 
 /// The RowRecordCache — write-through/write-back adapter for `cvr.rows`.
 ///
@@ -187,6 +194,7 @@ pub type MetricsCallback = Arc<dyn Fn(usize, f64) + Send + Sync + 'static>;
 /// into a spawned task (doc 91 spawn-offload), so the clone must alias the same
 /// underlying state.
 #[derive(Clone)]
+
 pub struct RowRecordCache {
     state: Arc<TokioMutex<CacheState>>,
     pool: sqlx::PgPool,
@@ -213,6 +221,11 @@ pub const DEFAULT_DEFERRED_THRESHOLD: usize = 100;
 pub(crate) const IDLE_TX_TIMEOUT_MS: u32 = 60_000;
 
 impl RowRecordCache {
+    /// Port of TS `#cvr` (row-record-cache.ts:160).
+    fn cvr(&self, table: &str) -> String {
+        cvr(&self.schema, table)
+    }
+
     pub fn new(
         pool: sqlx::PgPool,
         schema: String,
@@ -255,9 +268,9 @@ impl RowRecordCache {
 
         let sql = format!(
             r#"SELECT "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
-            FROM "{}"."rows"
+            FROM {}
               WHERE "clientGroupID" = $1 AND "refCounts" IS NOT NULL"#,
-            self.schema
+            self.cvr("rows")
         );
 
         let mut stream = sqlx::query_as::<_, RowsRowDb>(&sql)
@@ -554,11 +567,11 @@ impl RowRecordCache {
         // Build the SQL.
         let base_select = format!(
             r#"SELECT "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
-            FROM "{}"."rows"
+            FROM {}
         WHERE "clientGroupID" = $1
           AND "patchVersion" > $2
           AND "patchVersion" <= $3"#,
-            self.schema
+            self.cvr("rows")
         );
 
         let sql = if exclude_query_hashes.is_empty() {
@@ -780,10 +793,10 @@ async fn flush_one_iteration(
 
     // 1. Upsert rowsVersion.
     let rows_version_sql = format!(
-        r#"INSERT INTO "{}"."rowsVersion" ("clientGroupID", "version") VALUES ($1, $2)
+        r#"INSERT INTO {} ("clientGroupID", "version") VALUES ($1, $2)
            ON CONFLICT ("clientGroupID")
            DO UPDATE SET "clientGroupID" = $1, "version" = $2"#,
-        schema
+        cvr(schema, "rowsVersion")
     );
     sqlx::query(&rows_version_sql)
         .bind(cvr_id)
@@ -827,7 +840,7 @@ async fn flush_one_iteration(
     if !deletes.is_empty() {
         let del_json = serde_json::Value::Array(deletes);
         let del_sql = format!(
-            r#"DELETE FROM "{}".rows AS r
+            r#"DELETE FROM {} AS r
                USING json_to_recordset($1::json) AS d(
                  "schema" TEXT,
                  "table" TEXT,
@@ -837,7 +850,7 @@ async fn flush_one_iteration(
                  AND r."schema" = d."schema"
                  AND r."table" = d."table"
                  AND r."rowKey" = d."rowKey""#,
-            schema
+            cvr(schema, "rows")
         );
         sqlx::query(&del_sql)
             .bind(&del_json)
@@ -851,7 +864,7 @@ async fn flush_one_iteration(
         let inserts_json =
             serde_json::to_value(&inserts).unwrap_or(serde_json::Value::Array(vec![]));
         let bulk_sql = format!(
-            r#"INSERT INTO "{}"."rows"(
+            r#"INSERT INTO {}(
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
   ) SELECT
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
@@ -867,7 +880,7 @@ async fn flush_one_iteration(
     DO UPDATE SET "rowVersion" = excluded."rowVersion",
       "patchVersion" = excluded."patchVersion",
       "refCounts" = excluded."refCounts""#,
-            schema
+            cvr(schema, "rows")
         );
         sqlx::query(&bulk_sql)
             .bind(inserts_json)
@@ -936,8 +949,8 @@ async fn catchup_task_inner(context: &CatchupTaskContext) -> Result<(), String> 
 
     // checkVersion: verify the CVR version matches.
     let check_sql = format!(
-        r#"SELECT version FROM "{}".instances WHERE "clientGroupID" = $1"#,
-        schema
+        r#"SELECT version FROM {} WHERE "clientGroupID" = $1"#,
+        cvr(schema, "instances")
     );
     let version_row: Option<(String,)> = sqlx::query_as(&check_sql)
         .bind(cvr_id)

@@ -35,6 +35,14 @@ impl PlannerFanIn {
         self.output = Some(node.downgrade());
     }
 
+    /// Port of TS `get output()` (planner-fan-in.ts:51): asserts the output was set.
+    pub fn output(&self) -> PlannerNode {
+        self.output
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .expect("Output not set")
+    }
+
     pub fn reset(&mut self) {
         self.node_type = FanInType::FI;
     }

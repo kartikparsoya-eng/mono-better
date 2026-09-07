@@ -382,7 +382,7 @@ fn apply_add_plural(
     mutate: Mutate,
 ) -> Entry {
     let view = get_child_entry_list(parent_entry, relationship);
-    let result = add_to_list(node.row(), &view, schema, with_ids, mutate);
+    let result = add(node.row(), &view, schema, with_ids, mutate);
     let mut new_view = result.view;
 
     if let Some((pos, new_entry)) = result.new_entry {
@@ -401,15 +401,16 @@ fn apply_add_plural(
     set_relation(parent_entry, relationship, View::List(new_view), mutate)
 }
 
-/// Result of add_to_list: the new view and optionally the position + entry to initialize.
+/// Result of `add`: the new view and optionally the position + entry to initialize.
 struct AddResult {
     new_entry: Option<(usize, Rc<Entry>)>,
     view: Vec<Rc<Entry>>,
 }
 
-/// Insert into a sorted list, or increment refCount if duplicate.
+/// Port of TS `add` (view-apply-change.ts:694): binary-search the sorted
+/// list; bump refCount on a hit, otherwise insert at `~rawPos`.
 /// Returns the new view and optionally the position + entry to initialize.
-fn add_to_list(
+fn add(
     row: &Row,
     view: &[Rc<Entry>],
     schema: &SourceSchema,

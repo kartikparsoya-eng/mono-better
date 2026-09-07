@@ -265,6 +265,14 @@ impl From<InspectQueryRowDb> for InspectQueryRow {
     }
 }
 
+/// Port of TS `#cvr` (cvr-store.ts:259): the schema-qualified CVR table identifier,
+/// rendered the way postgres.js renders `sql(`${schema}.${table}`)`
+/// (`"schema"."table"`). A free fn as well as a method because the
+/// flush/catchup tasks (rust-only inventions) run outside the struct.
+fn cvr(schema: &str, table: &str) -> String {
+    format!("\"{schema}\".\"{table}\"")
+}
+
 pub struct CVRStoreHandle {
     pool: PgPool,
     schema: String,
@@ -302,6 +310,11 @@ impl Drop for CVRStoreHandle {
 }
 
 impl CVRStoreHandle {
+    /// Port of TS `#cvr` (cvr-store.ts:259).
+    fn cvr(&self, table: &str) -> String {
+        cvr(&self.schema, table)
+    }
+
     /// Port of TS `new CVRStore(...)` (cvr-store.ts:229). TS's constructor also
     /// takes `failService`, `loadAttemptIntervalMs`, `maxLoadAttempts`,
     /// `deferredRowFlushThreshold` and `setTimeoutFn`, all with DEFAULTS. Rust
@@ -410,7 +423,7 @@ impl CVRStoreHandle {
                 d."queryHash"                                   AS "queryID",
                 (COALESCE(d."ttlMs", {default_ttl}))::bigint    AS "ttl",
                 d."inactivatedAtMs"::bigint                     AS "inactivatedAt",
-                (SELECT COUNT(*)::bigint FROM "{schema}".rows r
+                (SELECT COUNT(*)::bigint FROM {rows} r
                    WHERE r."clientGroupID" = d."clientGroupID"
                      AND jsonb_exists(r."refCounts", d."queryHash")) AS "rowCount",
                 q."clientAST"                                   AS "ast",
@@ -418,8 +431,8 @@ impl CVRStoreHandle {
                 COALESCE(d."deleted", FALSE)                    AS "deleted",
                 q."queryName"                                   AS "name",
                 q."queryArgs"                                   AS "args"
-            FROM "{schema}".desires d
-            LEFT JOIN "{schema}".queries q
+            FROM {desires} d
+            LEFT JOIN {queries} q
                 ON q."clientGroupID" = d."clientGroupID"
                AND q."queryHash" = d."queryHash"
             WHERE d."clientGroupID" = $1
@@ -431,7 +444,9 @@ impl CVRStoreHandle {
               )
             ORDER BY d."clientID", d."queryHash""#,
             default_ttl = DEFAULT_TTL_MS,
-            schema = self.schema,
+            rows = self.cvr("rows"),
+            desires = self.cvr("desires"),
+            queries = self.cvr("queries"),
         );
         let rows = sqlx::query_as::<_, InspectQueryRowDb>(&sql)
             .bind(&self.cvr_id)
@@ -454,11 +469,11 @@ impl CVRStoreHandle {
         last_active: f64,
     ) -> Result<(), CVRStoreError> {
         sqlx::query(&format!(
-            r#"UPDATE "{}".instances
+            r#"UPDATE {}
                SET "lastActive" = to_timestamp($1 / 1000.0),
                    "ttlClock" = $2
                WHERE "clientGroupID" = $3"#,
-            self.schema
+            self.cvr("instances")
         ))
         .bind(last_active)
         .bind(ttl_clock as f64)
@@ -473,9 +488,9 @@ impl CVRStoreHandle {
     /// been initialized for this client group.
     pub async fn get_ttl_clock(&self) -> Result<Option<TTLClock>, CVRStoreError> {
         let row: Option<(f64,)> = sqlx::query_as(&format!(
-            r#"SELECT "ttlClock" FROM "{}".instances
+            r#"SELECT "ttlClock" FROM {}
                WHERE "clientGroupID" = $1"#,
-            self.schema
+            self.cvr("instances")
         ))
         .bind(&self.cvr_id)
         .fetch_optional(&self.pool)
@@ -856,10 +871,10 @@ impl CVRStoreHandle {
             let row: Option<(String, Option<String>, Option<f64>)> = sqlx::query_as(&format!(
                 r#"SELECT "version", "owner",
                           (extract(epoch from "grantedAt") * 1000.0)::double precision
-                   FROM "{}".instances
+                   FROM {}
                    WHERE "clientGroupID" = $1
                    FOR UPDATE"#,
-                self.schema
+                self.cvr("instances")
             ))
             .bind(&self.cvr_id)
             .fetch_optional(&mut *tx)
@@ -902,7 +917,7 @@ impl CVRStoreHandle {
                 // `owner=taskID, grantedAt=lastConnectTime` and updates BOTH
                 // unconditionally on conflict. The `#checkVersionAndOwnership`
                 // guard above has already ensured we're allowed to take it.
-                r#"INSERT INTO "{}".instances
+                r#"INSERT INTO {}
                    ("clientGroupID", "version", "lastActive", "ttlClock",
                     "replicaVersion", "owner", "grantedAt", "clientSchema", "profileID")
                    VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6,
@@ -914,10 +929,12 @@ impl CVRStoreHandle {
                     "replicaVersion" = excluded."replicaVersion",
                     "owner" = excluded."owner",
                     "grantedAt" = excluded."grantedAt",
-                    "clientSchema" = COALESCE("{}".instances."clientSchema", excluded."clientSchema"),
-                    "profileID" = COALESCE("{}".instances."profileID", excluded."profileID")
+                    "clientSchema" = COALESCE({}."clientSchema", excluded."clientSchema"),
+                    "profileID" = COALESCE({}."profileID", excluded."profileID")
                 "#,
-                self.schema, self.schema, self.schema
+                self.cvr("instances"),
+                self.cvr("instances"),
+                self.cvr("instances")
             );
             sqlx::query(&sql)
                 .bind(&instance.client_group_id)
@@ -952,14 +969,14 @@ impl CVRStoreHandle {
                     .collect(),
             );
             let sql = format!(
-                r#"INSERT INTO "{}".clients ("clientGroupID", "clientID")
+                r#"INSERT INTO {} ("clientGroupID", "clientID")
                    SELECT "clientGroupID", "clientID"
                    FROM json_to_recordset($1::json) AS x(
                      "clientGroupID" TEXT,
                      "clientID" TEXT
                    )
                    ON CONFLICT ("clientGroupID", "clientID") DO NOTHING"#,
-                self.schema
+                self.cvr("clients")
             );
             sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.clients = pending.pending_clients_insert.len();
@@ -968,9 +985,9 @@ impl CVRStoreHandle {
         // 3. Clients deletes — batched into ONE statement via `= ANY`.
         if !pending.pending_clients_delete.is_empty() {
             let sql = format!(
-                r#"DELETE FROM "{}".clients
+                r#"DELETE FROM {}
                    WHERE "clientGroupID" = $1 AND "clientID" = ANY($2)"#,
-                self.schema
+                self.cvr("clients")
             );
             sqlx::query(&sql)
                 .bind(&self.cvr_id)
@@ -1022,7 +1039,7 @@ impl CVRStoreHandle {
                     .collect(),
             );
             let sql = format!(
-                r#"INSERT INTO "{}".queries
+                r#"INSERT INTO {}
                    ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
                     "patchVersion", "transformationHash", "transformationVersion",
                     "internal", "deleted", "rowSetSignature")
@@ -1053,7 +1070,7 @@ impl CVRStoreHandle {
                     "internal" = excluded."internal",
                     "deleted" = excluded."deleted",
                     "rowSetSignature" = excluded."rowSetSignature""#,
-                self.schema
+                self.cvr("queries")
             );
             sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.queries += pending.pending_query_updates.len();
@@ -1088,7 +1105,7 @@ impl CVRStoreHandle {
                     .collect(),
             );
             let sql = format!(
-                r#"UPDATE "{}".queries AS q SET
+                r#"UPDATE {} AS q SET
                     "patchVersion" = CASE WHEN u."patchVersionSet" THEN u."patchVersion" ELSE q."patchVersion" END,
                     "deleted" = CASE WHEN u."deletedSet" THEN u."deleted" ELSE q."deleted" END,
                     "transformationHash" = CASE WHEN u."transformationHashSet" THEN u."transformationHash" ELSE q."transformationHash" END,
@@ -1110,7 +1127,7 @@ impl CVRStoreHandle {
                    )
                    WHERE q."clientGroupID" = u."clientGroupID"
                      AND q."queryHash" = u."queryHash""#,
-                self.schema
+                self.cvr("queries")
             );
             sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.queries += pending.pending_query_partial_updates.len();
@@ -1150,7 +1167,7 @@ impl CVRStoreHandle {
                     .collect(),
             );
             let sql = format!(
-                r#"INSERT INTO "{}".desires
+                r#"INSERT INTO {}
                    ("clientGroupID", "clientID", "queryHash", "patchVersion",
                     "deleted", "ttl", "ttlMs", "inactivatedAt", "inactivatedAtMs")
                    SELECT "clientGroupID", "clientID", "queryHash", "patchVersion", "deleted",
@@ -1176,7 +1193,7 @@ impl CVRStoreHandle {
                     "ttlMs" = excluded."ttlMs",
                     "inactivatedAt" = excluded."inactivatedAt",
                     "inactivatedAtMs" = excluded."inactivatedAtMs""#,
-                self.schema
+                self.cvr("desires")
             );
             sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.desires += pending.pending_desire_updates.len();
@@ -1223,10 +1240,10 @@ impl CVRStoreHandle {
         // statement regardless of how many row updates there are.
         if statements.is_some() {
             let rv_sql = format!(
-                r#"INSERT INTO "{}"."rowsVersion" ("clientGroupID", "version")
+                r#"INSERT INTO {} ("clientGroupID", "version")
                    VALUES ($1, $2)
                    ON CONFLICT ("clientGroupID") DO UPDATE SET "version" = excluded."version""#,
-                self.schema
+                self.cvr("rowsVersion")
             );
             sqlx::query(&rv_sql)
                 .bind(&self.cvr_id)
@@ -1263,7 +1280,7 @@ impl CVRStoreHandle {
                         .collect(),
                 );
                 let sql = format!(
-                    r#"DELETE FROM "{}".rows AS r
+                    r#"DELETE FROM {} AS r
                    USING json_to_recordset($1::json) AS d(
                      "schema" TEXT,
                      "table" TEXT,
@@ -1273,7 +1290,7 @@ impl CVRStoreHandle {
                      AND r."schema" = d."schema"
                      AND r."table" = d."table"
                      AND r."rowKey" = d."rowKey""#,
-                    self.schema
+                    self.cvr("rows")
                 );
                 sqlx::query(&sql)
                     .bind(&del_json)
@@ -1291,7 +1308,7 @@ impl CVRStoreHandle {
                         .collect(),
                 );
                 let sql = format!(
-                    r#"INSERT INTO "{}".rows
+                    r#"INSERT INTO {}
                    ("clientGroupID", "schema", "table", "rowKey",
                     "rowVersion", "patchVersion", "refCounts")
                    SELECT "clientGroupID", "schema", "table", "rowKey",
@@ -1310,7 +1327,7 @@ impl CVRStoreHandle {
                     "rowVersion" = excluded."rowVersion",
                     "patchVersion" = excluded."patchVersion",
                     "refCounts" = excluded."refCounts""#,
-                    self.schema
+                    self.cvr("rows")
                 );
                 sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
                 stats.rows += stmts.inserts.len();
@@ -1591,8 +1608,8 @@ impl CVRStoreHandle {
 
         // Load clients
         let clients_sql = format!(
-            r#"SELECT "clientID" FROM "{}".clients WHERE "clientGroupID" = $1"#,
-            self.schema
+            r#"SELECT "clientID" FROM {} WHERE "clientGroupID" = $1"#,
+            self.cvr("clients")
         );
         let clients: Vec<(String,)> = sqlx::query_as(&clients_sql)
             .bind(&self.cvr_id)
@@ -1604,8 +1621,8 @@ impl CVRStoreHandle {
             r#"SELECT "queryHash", "clientAST", "queryName", "queryArgs",
                       "patchVersion", "transformationHash", "transformationVersion",
                       "internal", "deleted", "rowSetSignature"
-               FROM "{}".queries WHERE "clientGroupID" = $1 AND COALESCE("deleted", false) = false"#,
-            self.schema
+               FROM {} WHERE "clientGroupID" = $1 AND COALESCE("deleted", false) = false"#,
+            self.cvr("queries")
         );
         let queries: Vec<QueryLoadRow> = sqlx::query_as(&queries_sql)
             .bind(&self.cvr_id)
@@ -1615,8 +1632,8 @@ impl CVRStoreHandle {
         // Load desires
         let desires_sql = format!(
             r#"SELECT "clientID", "queryHash", "patchVersion", "deleted", "ttlMs", "inactivatedAtMs"
-               FROM "{}".desires WHERE "clientGroupID" = $1"#,
-            self.schema
+               FROM {} WHERE "clientGroupID" = $1"#,
+            self.cvr("desires")
         );
         let desires: Vec<DesireLoadRow> = sqlx::query_as(&desires_sql)
             .bind(&self.cvr_id)
@@ -1708,12 +1725,12 @@ impl CVRStoreHandle {
         // UPDATE. Once granted, our own `flush` guard rejects a stale ex-owner.
         if grant_ownership {
             let grant_sql = format!(
-                r#"UPDATE "{}".instances
+                r#"UPDATE {}
                    SET "owner" = $1, "grantedAt" = to_timestamp($2 / 1000.0)
                    WHERE "clientGroupID" = $3
                      AND ("grantedAt" IS NULL
                           OR "grantedAt" <= to_timestamp($2 / 1000.0))"#,
-                self.schema
+                self.cvr("instances")
             );
             let _ = sqlx::query(&grant_sql)
                 .bind(&self.task_id)
@@ -1778,8 +1795,8 @@ impl CVRStoreHandle {
 
         // Check version
         let check_sql = format!(
-            r#"SELECT "version" FROM "{}".instances WHERE "clientGroupID" = $1"#,
-            self.schema
+            r#"SELECT "version" FROM {} WHERE "clientGroupID" = $1"#,
+            self.cvr("instances")
         );
         let current_version: Option<(String,)> = sqlx::query_as(&check_sql)
             .bind(&self.cvr_id)
@@ -1815,9 +1832,9 @@ impl CVRStoreHandle {
         // become "got" between their cookie and now.
         let queries_sql = format!(
             r#"SELECT "deleted", "queryHash", "patchVersion"
-               FROM "{}".queries
+               FROM {}
                WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3"#,
-            self.schema
+            self.cvr("queries")
         );
         let query_rows: Vec<(Option<bool>, String, Option<String>)> = sqlx::query_as(&queries_sql)
             .bind(&self.cvr_id)
@@ -1829,9 +1846,9 @@ impl CVRStoreHandle {
         // Read desires patches (per-client)
         let desires_sql = format!(
             r#"SELECT "clientID", "queryHash", "patchVersion", "deleted", "ttlMs", "inactivatedAtMs"
-               FROM "{}".desires
+               FROM {}
                WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3"#,
-            self.schema
+            self.cvr("desires")
         );
         let desires: Vec<DesireLoadRow> = sqlx::query_as(&desires_sql)
             .bind(&self.cvr_id)
@@ -1984,6 +2001,18 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TS `#cvr` (cvr-store.ts:259) renders `sql(`${schema}.${table}`)` the
+    /// postgres.js way: each identifier double-quoted, joined by a dot.
+    #[tokio::test]
+    async fn cvr_renders_the_postgres_js_qualified_identifier() {
+        assert_eq!(
+            cvr("roze_1/cvr", "rowsVersion"),
+            "\"roze_1/cvr\".\"rowsVersion\""
+        );
+        let store = test_store();
+        assert_eq!(store.cvr("rows"), "\"test/cvr\".\"rows\"");
+    }
 
     /// Port of TS `cvrErrorKind` (cvr-store.ts:1421-1435): pins the exact otel
     /// `error.kind` attribute string for every `CVRStoreError` variant. TS keys

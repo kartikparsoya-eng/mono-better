@@ -362,10 +362,10 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
                         break;
                     }
                 }
-                // Traverse to join's output (TS: queue.push(node.output))
-                if let Some(out) = j.borrow().get_output() {
-                    queue.push(out);
-                }
+                // Traverse to join's output (TS planner-graph.ts:436
+                // `queue.push(node.output)` — the getter asserts 'Output not
+                // set'; a join with no output is a malformed graph, not a leaf).
+                queue.push(j.borrow().output());
             }
             PlannerNode::FanOut(inner_fo) => {
                 queue.extend(inner_fo.borrow().outputs());
@@ -406,5 +406,61 @@ fn propagate_unlimit(graph: &mut PlannerGraph) {
         if j.borrow().join_type() == JoinType::Flipped {
             j.borrow_mut().propagate_unlimit();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::planner_connection::CostModelCost;
+    use crate::planner::planner_node::{Confidence, FanoutEst};
+
+    fn model() -> ConnectionCostModel {
+        Rc::new(|_table, _sort, _filters, _constraint| CostModelCost {
+            startup_cost: 1.0,
+            rows: 1.0,
+            fanout: Rc::new(|_cols: &[String]| FanoutEst {
+                fanout: 1.0,
+                confidence: Confidence::None,
+            }),
+        })
+    }
+
+    fn connection(name: &str) -> PlannerNode {
+        PlannerNode::Connection(Rc::new(RefCell::new(PlannerConnection::new(
+            name,
+            model(),
+            vec![],
+            None,
+            false,
+            None,
+            None,
+        ))))
+    }
+
+    /// TS `findFIAndJoins` pushes `node.output` (planner-graph.ts:436), whose
+    /// getter asserts 'Output not set' (planner-join.ts:134). Rust used to
+    /// `if let Some` past a join with no output, silently truncating the
+    /// FO→FI walk into a FofiInfo with no fan-in. Pre-fix this test failed
+    /// (no panic) — proven by temp-revert.
+    #[test]
+    #[should_panic(expected = "Output not set")]
+    fn find_fi_and_joins_asserts_a_join_without_output() {
+        let join = Rc::new(RefCell::new(PlannerJoin::new(
+            connection("parent"),
+            connection("child"),
+            PlannerConstraint::new(),
+            PlannerConstraint::new(),
+            true,
+            0,
+            JoinType::Semi,
+        )));
+        let fo = Rc::new(RefCell::new(PlannerFanOut::new(connection("in"))));
+        fo.borrow_mut().add_output(PlannerNode::Join(join.clone()));
+        let mut graph = PlannerGraph::new();
+        graph.joins.push(join);
+        graph.fan_outs.push(fo.clone());
+        let fo_ref = fo.borrow();
+        let _ = find_fi_and_joins(&graph, &fo_ref);
     }
 }

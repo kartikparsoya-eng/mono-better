@@ -1155,7 +1155,7 @@ fn apply_source_overlay_impl(
             let replace_in_place = stable_edit.and_then(|stable| {
                 let add = add_row.as_ref()?;
                 let remove = remove_row.as_ref()?;
-                (rows_equal_on(add, remove, &stable.primary_key)
+                (row_matches_pk(add, remove, &stable.primary_key)
                     && rows_storage_equal_on(add, remove, &stable.sort))
                 .then_some(stable.primary_key)
             });
@@ -1178,7 +1178,7 @@ fn apply_source_overlay_impl(
                         && !rs.get()
                         && let (Some(add), Some(remove), Some(primary_key)) =
                             (&add_row2, &remove_row2, &replace_in_place2)
-                        && rows_equal_on(&row, remove, primary_key)
+                        && row_matches_pk(&row, remove, primary_key)
                     {
                         out.push(add.clone());
                         ay.set(true);
@@ -1243,10 +1243,11 @@ struct StableEdit {
     sort: SortOrder,
 }
 
-fn rows_equal_on(left: &Row, right: &Row, columns: &[String]) -> bool {
-    columns
+/// Port of TS `rowMatchesPK` (memory-source.ts:976).
+fn row_matches_pk(a: &Row, b: &Row, primary_key: &[String]) -> bool {
+    primary_key
         .iter()
-        .all(|column| storage_values_equal(left.get(column), right.get(column)))
+        .all(|key| storage_values_equal(a.get(key), b.get(key)))
 }
 
 fn rows_storage_equal_on(left: &Row, right: &Row, sort: &SortOrder) -> bool {

@@ -188,6 +188,37 @@ CRATES = {
                                          "TS DatabaseStorage.createClientGroupStorage (database-storage.ts:157); cited in that file's doc"),
             "makeaddemptyrelationships": ("ivm/push_accumulated.rs add_empty_relationships",
                                           "TS returns a closure (make*); rust applies directly — factory fold, cited at push_accumulated.rs:131"),
+            # planner getters `get type()` (planner-join.ts:164, planner-fan-in.ts:39,
+            # planner-fan-out.ts:22). `type` is a rust keyword, so the getter is
+            # named per node kind; the enum values are the TS string literals.
+            "type": ("planner_fan_in.rs node_type",
+                     "`type` is a rust keyword: planner_fan_in.rs node_type, planner_fan_out.rs node_type, planner_join.rs join_type; same values"),
+            # memory-storage.ts:9 `comparator` = compareUTF8 on the entry key.
+            # UTF-8 byte order == code-point order == Rust `String: Ord`, so the
+            # BTreeMap<String, Value> key order IS the TS BTreeSet order.
+            "comparator": ("ivm/memory_storage.rs BTreeMap<String, Value>",
+                           "compareUTF8 key order == Rust String Ord; the comparator folds into the map"),
+            # flipped-join.ts:572 test seam that widens the record type to admit
+            # bigint (zqlite safeIntegers); rust `Value` has no separate bigint,
+            # so tests call canonical_key directly.
+            "canonicalkeyfortest": ("ivm/flipped_join.rs canonical_key",
+                                    "bigint-widening test wrapper; rust Value needs no widening"),
+            # memory-source.ts:795 narrows the {add, remove} overlay pair per
+            # multi-constraint (any-of within one, all-of across). Rust applies
+            # the same predicate to each overlay row inside
+            # apply_source_overlay_impl's filter, via constraint.rs.
+            "applymulticonstraintstooverlays": ("ivm/constraint.rs row_matches_multi_constraints",
+                                                "same any-of/all-of semantics; called from memory_source.rs apply_source_overlay_impl"),
+            # memory-source.ts:997/:1023 BTreeSet scan-start bounds with min/max
+            # sentinels. Rust MemorySource keeps a Vec sorted by make_comparator
+            # (add_row partition_point) and derives scan starts from
+            # compute_index_compare + the start filter, so there are no sentinel
+            # bounds to compare. MemorySource is the replay/dev-server source in
+            # rust; the syncer serves from TableSource.
+            "makeboundcomparator": ("ivm/memory_source.rs compute_index_compare",
+                                    "sorted-Vec source has no BTree bound sentinels; index order comes from compute_index_compare"),
+            "comparebounds": ("ivm/memory_source.rs compute_index_compare",
+                              "min/max sentinel compare; no sentinels in the sorted-Vec source"),
             # table-source.ts WRITE path. Rust's `TableSource::write_change` is a
             # documented NO-OP (sqlite/table_source.rs:1002-1008): zero.db is
             # written by the change-streamer, and rusqlite cannot open WAL2, so
