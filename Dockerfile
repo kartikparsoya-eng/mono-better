@@ -245,12 +245,16 @@ ENV NODE_OPTIONS="--import tsx --no-warnings --max-old-space-size=4096"
 ENV PATH="/app/mono/node_modules/.bin:${PATH}"
 
 # --- Safe, non-conflicting image defaults (a deployment may still override) ---
-# Cap glibc malloc arenas: the multi-threaded rust-syncer (sharded executors +
-# tokio) otherwise gets up to 8*cores arenas whose fragmentation retains freed
-# pipeline memory as ever-growing RSS (reads as a leak in the ART G6 gate and in
-# prod dashboards). Two arenas keep contention negligible at our thread counts
-# while bounding retention; pairs with the in-process malloc_trim task.
-ENV MALLOC_ARENA_MAX=2
+# glibc malloc arenas are deliberately NOT capped. `ENV MALLOC_ARENA_MAX=2` lived
+# here from 2026-08-22 (when rust-syncer still allocated through glibc and
+# fragmentation across 8*cores arenas read as an RSS leak in ART G6). Since
+# I-13 (2026-09-03, parity/INVENTIONS.md) Rust and SQLite allocate through
+# mimalloc, so glibc malloc only serves glibc's own internals (getaddrinfo,
+# thread TLS, dl) — and a 2-arena cap turned those into one process-wide lock:
+# 2026-09-07 ART A/B at 110 connections, cap 2 -> 64: connect p50 5.45 -> 4.65 s,
+# steady p95 1.62 -> 0.57 s. RSS return still comes from the in-process
+# malloc-trim task (mi_collect + malloc_trim). scripts/local-rust-ci.sh fails
+# on any cap below 8. The upstream TS image sets no cap either.
 # node libuv threadpool — sized for litestream spawns + fs work, not node's 4.
 ENV UV_THREADPOOL_SIZE=16
 ENV ZERO_IN_CONTAINER=1

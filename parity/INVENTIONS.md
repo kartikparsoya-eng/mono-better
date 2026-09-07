@@ -618,11 +618,12 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   wakeup paths those locks take, 21% to actual work — so the mechanism is the
   glibc arena locks (plus their futex traffic), not IVM cost. mimalloc keeps
   per-thread heaps with a lock-free fast path. SQLite is C and allocates
-  through its own malloc (glibc; compiled `SQLITE_DEFAULT_MEMSTATUS=0`, so no
-  SQLite-side global mutex) and showed up in the same profile, so it is
+  through its own malloc (glibc) and showed up in the same profile, so it is
   pointed at mimalloc too through `SQLITE_CONFIG_MALLOC`, which SQLite only
   accepts before its first `sqlite3_initialize` — hence the hook is the first
-  statement of `main`.
+  statement of `main`. (An earlier version of this entry claimed the build
+  was "compiled `SQLITE_DEFAULT_MEMSTATUS=0`, so no SQLite-side global
+  mutex" — it was NOT, see the 2026-09-07 correction below.)
 - **Contract:** (a) nothing a client observes changes — frames, row sets,
   ordering and error semantics are allocation-independent; (b) memory freed by
   query-TTL expiry / CG teardown is still returned to the OS on the `malloc-trim`
@@ -644,8 +645,42 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   11.9 s); per-pass `changeDesiredQueries` handle p50 20.6 → 10.4 ms, queue
   wait p50 88.7 → 29.5 ms; process CPU for the replay 155 s user + 61 s sys →
   53 s + 11 s. Pokes/dedup_puts unchanged (3275/9664).
+- **2026-09-07 correction + second finding (ART G22, rust knee 110 conns vs
+  TS 230):** rust-syncer/build.rs compiled the vendored SQLite WITHOUT
+  `SQLITE_DEFAULT_MEMSTATUS=0` (TS's `@rocicorp/zero-sqlite3` deps/defines.gypi
+  sets it), so every `sqlite3Malloc`/`sqlite3_free` took SQLite's global
+  `mem0.mutex` even with mimalloc behind it. Invisible in steady churn (a few
+  threads prepare at a time); under a 110-connection connect burst 110 CG
+  threads plan + hydrate at once and serialize on it: dwarf `perf` on the
+  burst = 74 % of process CPU in kernel futex spin (`__lll_lock_wait_private`
+  under `pthread_mutex_lock` 30 % inclusive, under `sqlite3Prepare` 56 % /
+  `sqlite3Malloc` 45 %, mostly the planner cost model's scanstatus probes —
+  the same uncached prepares TS makes). Fix = compile-define PARITY: build.rs,
+  the ivm/cvr test lib (scripts/local-rust-ci.sh, rust-ivm/scripts/
+  build-wal2-static-lib.sh) mirror defines.gypi 1:1 (memstatus off,
+  THREADSAFE=2, 16 MB page cache, DQS=0, OMIT_SHARED_CACHE, ...), enforced by
+  the CI step "vendored SQLite compile DEFINES == zero-sqlite3" and the tests
+  below. Second, smaller factor: the image's `ENV MALLOC_ARENA_MAX=2`
+  (Dockerfile, 2026-08-22, pre-I-13) throttled glibc's remaining users
+  (getaddrinfo, thread TLS, dl) to two arena locks — A/B at 110 conns, cap
+  2 -> 64: connect p50 5.45 -> 4.65 s, steady p95 1.62 -> 0.57 s; removed, and
+  the CI step "Dockerfile must not cap glibc malloc arenas" pins it. Excluded
+  by measurement on the way: the log writer (silencing logs changed nothing),
+  Traefik (direct 5.45 s vs proxied 5.8 s), driver, backend, CVR pool, CPU
+  quota, MAX_CLIENT_GROUPS.
+- **Contract (d), added 2026-09-07:** the SQLite rust links is built with the
+  same compile defines as the SQLite TS links (defines.gypi); a drift is a
+  divergence even when the source id matches.
+- **Tests (2026-09-07):** `sqlite_memory_statistics_are_off_like_zero_sqlite3`
+  (fails on the pre-fix build: `SQLITE_STATUS_MEMORY_USED` reports live bytes)
+  and `sqlite_compile_options_match_the_zero_sqlite3_build` (fails on the
+  pre-fix build: 17 options missing), both in
+  `rust-syncer/tests/global_allocator_test.rs`; CI: the define-parity step
+  (failed pre-fix: 23/30 defines missing from build.rs) and the Dockerfile
+  arena lint (failed pre-fix: `ENV MALLOC_ARENA_MAX=2`).
 - **Known gap:** initial-connect p95 is still 1.33× TS (616 vs 465 ms) — the
-  per-pass PG/HTTP round-trip gap (I-12/I-13 do not touch it).
+  per-pass PG/HTTP round-trip gap (I-12/I-13 do not touch it). The post-fix
+  capacity knee is not yet re-measured (queued on the box).
 
 ## I-14 — opt-in server-side liveness close of idle clients (`ZERO_WS_LIVENESS_TIMEOUT_MS`)
 - **Files:** `rust-syncer/src/ws_server.rs` (`DEFAULT_LIVENESS_TIMEOUT_MS`,

@@ -12,9 +12,12 @@ chk()  { if [ "$1" -ne 0 ]; then echo "FAIL ($2)"; fail=1; else echo "ok ($2)"; 
 
 step "build static WAL2 SQLite (exports SQLITE3_* for ivm/cvr)"
 WAL2="$ROOT/packages/rust-ivm/wal2-sqlite"
+# The ivm/cvr test lib carries the SAME compile defines as zero-sqlite3
+# deps/defines.gypi and rust-syncer/build.rs (checked below), so the tests run
+# the SQLite configuration the production binary runs.
 ( cd "$WAL2" && cc -O2 -fPIC -c sqlite3.c -o sqlite3.o \
-    -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_COLUMN_METADATA \
-    -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_DQS=0 && ar rcs libsqlite3.a sqlite3.o )
+    -DSQLITE_DEFAULT_CACHE_SIZE=-16000 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_DESERIALIZE -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_STAT4 -DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_SOUNDEX -DSQLITE_STAT4_SAMPLES=128 -DSQLITE_THREADSAFE=2 -DSQLITE_TRACE_SIZE_LIMIT=32 -DSQLITE_USE_URI=1 \
+    && ar rcs libsqlite3.a sqlite3.o )
 export SQLITE3_LIB_DIR="$WAL2" SQLITE3_INCLUDE_DIR="$WAL2" SQLITE3_STATIC=1
 
 step "parity — vendored SQLite == the SQLite the TS zero-cache runs"
@@ -39,6 +42,50 @@ if [ -n "$ZS" ] && [ -f "$ZS/sqlite3.h" ]; then
   fi
 else
   echo "SKIP: @rocicorp/zero-sqlite3 not installed (run pnpm install)"
+fi
+
+step "parity — vendored SQLite compile DEFINES == zero-sqlite3 deps/defines.gypi"
+# Same SQLite source is not enough: the TS build's compile flags set its runtime
+# behavior (SQLITE_DEFAULT_MEMSTATUS=0 = no global malloc mutex; THREADSAFE=2;
+# 16 MB page cache; DQS=0; ...). rust-syncer/build.rs must carry every define
+# defines.gypi carries, with the same value. 2026-09-07: MEMSTATUS was missing —
+# every sqlite3Malloc took SQLite's mem0 mutex, 110 CG threads serialized on it,
+# rust's capacity knee was 110 vs TS 230. Skips (passes) when node_modules is absent.
+ZG=$(ls "$ROOT"/node_modules/.pnpm/@rocicorp+zero-sqlite3@*/node_modules/@rocicorp/zero-sqlite3/deps/defines.gypi 2>/dev/null | tail -1)
+if [ -n "$ZG" ]; then
+  python3 - "$ZG" "$ROOT/packages/rust-syncer/build.rs" "$ROOT/scripts/local-rust-ci.sh" "$ROOT/packages/rust-ivm/scripts/build-wal2-static-lib.sh" <<'PY'
+import re, sys
+gypi, build, ci, wal2 = (open(a).read() for a in sys.argv[1:5])
+defs = re.findall(r"'(SQLITE_[A-Z0-9_]+)(?:=([^']+))?'", gypi)
+def dflags(text): return {m.group(1): m.group(2) for m in re.finditer(r'-D(SQLITE_[A-Z0-9_]+)(?:=(\S+))?', text)}
+places = {
+    "rust-syncer/build.rs": {m.group(1): m.group(2) for m in re.finditer(r'\.define\("(SQLITE_[A-Z0-9_]+)",\s*(?:"([^"]*)"|None)\)', build)},
+    "local-rust-ci.sh cc": dflags(ci[ci.index("cc -O2 -fPIC -c sqlite3.c"):ci.index("ar rcs libsqlite3.a")]),
+    "rust-ivm/scripts/build-wal2-static-lib.sh": dflags(wal2),
+}
+bad = []
+for label, have in places.items():
+    for name, val in defs:
+        if name not in have: bad.append(f"{label}: {name} MISSING"); continue
+        if (have[name] or "") != (val or ""): bad.append(f"{label}: {name}={have[name]!r} but defines.gypi says {val!r}")
+print(f"defines.gypi: {len(defs)} defines; " + ("mirrored in all 3 places" if not bad else f"{len(bad)} drift(s)"))
+for b in bad: print("  ", b)
+sys.exit(1 if bad else 0)
+PY
+  chk $? "sqlite compile-define parity"
+else
+  echo "SKIP: @rocicorp/zero-sqlite3 not installed (run pnpm install)"
+fi
+
+step "image — Dockerfile must not cap glibc malloc arenas (MALLOC_ARENA_MAX)"
+# With mimalloc serving Rust + SQLite (I-13), glibc malloc only serves glibc's
+# own internals (DNS, thread TLS, dl); a 2-arena cap turns those into a
+# process-wide lock. 2026-09-07 A/B at 110 conns: cap 2 -> 64 cut connect p50
+# 5.45 -> 4.65 s and steady p95 1.62 -> 0.57 s.
+if grep -nE '^ENV MALLOC_ARENA_MAX=([0-7])\b' "$ROOT/Dockerfile"; then
+  chk 1 "Dockerfile MALLOC_ARENA_MAX cap"
+else
+  chk 0 "Dockerfile MALLOC_ARENA_MAX cap"
 fi
 # TEST_CVR_PG_URI: set to run PG-gated tests; unset => they skip+pass.
 #

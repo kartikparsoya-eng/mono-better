@@ -659,6 +659,28 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
 - [ ] Sandbox: per-user transform limit is 300/60 s (`zeroRateLimiter.ts`);
       every "429 capacity cliff" so far was a single-identity artifact
       (`--users N` + pool flags now reach every gate).
+- [x] **G22 capacity A/B on 2a45181cc: rust knee 110 conns vs TS 230 —
+      ROOT-CAUSED + FIXED (see INVENTIONS.md I-13, 2026-09-07 correction).**
+      Steady churn is better on rust at every rung through 96c; the knee is
+      the CONNECT BURST: rust's vendored SQLite lacked
+      `SQLITE_DEFAULT_MEMSTATUS=0` (TS's zero-sqlite3 has it), so 110 CG
+      threads planning/hydrating at once serialized on SQLite's global
+      `mem0.mutex` (perf: 74 % kernel futex spin, 30 % under
+      pthread_mutex_lock inside sqlite3Prepare/sqlite3Malloc). Plus the image's
+      `MALLOC_ARENA_MAX=2`. Fix: build.rs / ivm test lib / wal2 script mirror
+      defines.gypi 1:1 (CI define-parity step + 2 fail-first tests); Dockerfile
+      arena cap removed (CI lint). Excluded on evidence: logging, Traefik,
+      driver, backend, CVR pool, CPU quota, CG cap.
+- [ ] Re-measure the capacity knee on the post-fix image (7c: fresh arms,
+      24g/32g, 256-identity pool) and the GKE sandbox pod (it inherited both
+      the memstatus build and `MALLOC_ARENA_MAX=2`, nproc=4).
+- [ ] Sandbox pod (2026-09-07, 2a45181): one query shape (likely
+      `getStagesByBoardIds`) hydrates 1.43M rows for 61 results — 36 s warm /
+      353 s cold per hydration, ~2.9 GB resident each; a query-shape problem,
+      not an engine divergence (planner flips identical). Also: rust ends a
+      single-client CG on `ClientNotFound` at load ("terminating after fatal
+      synchronization error") where TS keeps the group for other clients —
+      verify the multi-client case (view-syncer.ts:565 vs view_syncer.rs:1639).
 
 ### In flight (this session)
 - [x] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4` — superseded
