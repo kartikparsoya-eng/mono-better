@@ -139,13 +139,19 @@ Consequences for the collector/backend:
   counters will vanish and rate() windows will break;
 - treat an **absent** series in a scrape as "no change", not zero/reset.
 
-### Prometheus pull endpoints (rust-only, per-process `:HTTP_PORT`)
+### HTTP endpoints (rust-only, per-process `:HTTP_PORT`)
 
-<!-- packages/rust-syncer/src/http_server.rs, metrics.rs render_prometheus -->
+<!-- packages/rust-syncer/src/http_server.rs -->
+
+There is **no `/metrics` pull endpoint** (removed 204359376, 2026-09-07):
+metrics are OTLP-push only, like TS — point the collector at the
+`OTEL_EXPORTER_OTLP_ENDPOINT` and scrape the collector's Prometheus
+exporter (the ART G17 gate does). The rust series carry `host.name`,
+`process.worker=syncer` and `process.runtime.name=rust` resource labels
+(3623d1da3) so they merge with the TS series by name.
 
 | Endpoint | What |
 |---|---|
-| `GET :HTTP_PORT/metrics` | Prometheus text: `zero_sync_active_client_groups`, `zero_sync_{hydrations,advances,pipeline_resets,expired_queries,auth_changes,client_deletions,permission_reloads,auth_revalidations,auth_revalidation_failures}_total`, `zero_sync_{hydration,advance}_time_seconds` histograms. Unauthenticated. |
 | `GET :HTTP_PORT/census` | Plaintext live-object census across the 3 rust crates (leak hunting: watch `cg=` after disconnects). |
 | `GET :HTTP_PORT/readyz` | 200/503; probes CVR PG (`SELECT 1`, 2 s timeout) + replica-file existence. Use as the k8s readiness probe — the stdout ready handshake can lie about PG. |
 | `GET :HTTP_PORT/statz` | **Flat JSON, NOT the TS statz schema**: `{activeClientGroups, activeConnections, totalMessagesReceived, totalMessagesSent, uptimeMs, metrics{...}}`. Admin-gated (Basic auth vs `ZERO_ADMIN_PASSWORD`). ⚠️ `activeConnections`/`totalMessagesReceived`/`totalMessagesSent` are currently NOT wired (always `0`) — use the OTLP `websocket.open_connections` gauge for live connection count, not `/statz`. The TS `/statz` on the main port still exists and is unchanged. |

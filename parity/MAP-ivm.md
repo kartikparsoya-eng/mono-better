@@ -2,14 +2,14 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **593**, Rust **1010** · resolved pairs **395** (exact 353 + fuzzy 42) + aliases 73
-- 🟥 TS UNRESOLVED: **129** (**60** behavioral ⇒ investigate · 69 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **615**
+- symbols: TS **593**, Rust **1016** · resolved pairs **391** (exact 360 + fuzzy 31) + aliases 91
+- 🟥 TS UNRESOLVED: **116** (**49** behavioral ⇒ investigate · 67 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **625**
 
-> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `#allColumns` (sqlite/table-source.ts), `asQueryImpl` (query/query-impl.ts), `asQueryInternals` (query/query-internals.ts), `#bytes` (sqlite/db.ts), `canUseUpdate` (sqlite/table-source.ts), `#checkpoint` (sqlite/database-storage.ts), `cmpLit` (query/expression.ts), `constraintsToSQL` (sqlite/query-builder.ts), `createQuery` (query/query-registry.ts), `DeepMerge` (query/query-registry.ts), `defineQueries` (query/query-registry.ts), `defineQueriesWithType` (query/query-registry.ts), `defineQuery` (query/query-registry.ts), `defineQueryWithType` (query/query-registry.ts), `deserializePKToConstraint` (ivm/cap.ts), `eb` (query/expression.ts), `filterFalse` (query/expression.ts), `filtersToSQL` (sqlite/query-builder.ts), `filterTrue` (query/expression.ts), `filterUndefined` (query/expression.ts), `fromSQLiteType` (sqlite/table-source.ts), `fromSQLiteTypes` (sqlite/table-source.ts), `getJsType` (sqlite/query-builder.ts), `getQuery` (query/query-registry.ts), `#getRowStmt` (sqlite/table-source.ts), `#getStatementsFor` (sqlite/table-source.ts), `getUniqueIndexes` (sqlite/table-source.ts), `inTransaction` (sqlite/db.ts), `isOneHop` (query/query-impl.ts), `isParameterReference` (query/expression.ts), `isQuery` (query/query-registry.ts), `isQueryDefinition` (query/query-registry.ts), `isQueryRegistry` (query/query-registry.ts), `isTwoHop` (query/query-impl.ts), `logIfSlow` (sqlite/db.ts), `#mapFromSQLiteTypes` (sqlite/table-source.ts), `materializeImpl` (query/query-delegate-base.ts), `#maybeCheckpoint` (sqlite/database-storage.ts), `mb` (sqlite/db.ts), `mustGetQuery` (query/query-registry.ts), `newQuery` (query/query-delegate.ts), `newQueryImpl` (query/query-impl.ts), `nonPrimaryValues` (sqlite/table-source.ts), `normalizeParser` (query/named.ts), `normalizeTTL` (query/ttl.ts), `pragma` (sqlite/db.ts), `preloadImpl` (query/query-delegate-base.ts), `prepare` (sqlite/db.ts), `#requestToSQL` (sqlite/table-source.ts), `safeIntegers` (sqlite/db.ts), `sargableLeadingStartBound` (sqlite/query-builder.ts), `syncedQueryImpl` (query/named.ts), `throwQueryNotRunnable` (query/query-impl.ts), `titleCase` (query/validate-input.ts), `toSQLiteType` (sqlite/query-builder.ts), `toSQLiteTypeName` (sqlite/table-source.ts), `toSQLiteTypes` (sqlite/table-source.ts), `transaction` (sqlite/db.ts), `unsafeMode` (sqlite/db.ts), `withValidation` (query/named.ts)
+> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `asQueryImpl` (query/query-impl.ts), `asQueryInternals` (query/query-internals.ts), `#bytes` (sqlite/db.ts), `cmpLit` (query/expression.ts), `constraintsToSQL` (sqlite/query-builder.ts), `createQuery` (query/query-registry.ts), `DeepMerge` (query/query-registry.ts), `defineQueries` (query/query-registry.ts), `defineQueriesWithType` (query/query-registry.ts), `defineQuery` (query/query-registry.ts), `defineQueryWithType` (query/query-registry.ts), `eb` (query/expression.ts), `filterFalse` (query/expression.ts), `filtersToSQL` (sqlite/query-builder.ts), `filterTrue` (query/expression.ts), `filterUndefined` (query/expression.ts), `fromSQLiteType` (sqlite/table-source.ts), `fromSQLiteTypes` (sqlite/table-source.ts), `getJsType` (sqlite/query-builder.ts), `getQuery` (query/query-registry.ts), `inTransaction` (sqlite/db.ts), `isOneHop` (query/query-impl.ts), `isParameterReference` (query/expression.ts), `isQuery` (query/query-registry.ts), `isQueryDefinition` (query/query-registry.ts), `isQueryRegistry` (query/query-registry.ts), `isTwoHop` (query/query-impl.ts), `logIfSlow` (sqlite/db.ts), `materializeImpl` (query/query-delegate-base.ts), `mb` (sqlite/db.ts), `mustGetQuery` (query/query-registry.ts), `newQuery` (query/query-delegate.ts), `newQueryImpl` (query/query-impl.ts), `normalizeParser` (query/named.ts), `normalizeTTL` (query/ttl.ts), `pragma` (sqlite/db.ts), `preloadImpl` (query/query-delegate-base.ts), `prepare` (sqlite/db.ts), `safeIntegers` (sqlite/db.ts), `sargableLeadingStartBound` (sqlite/query-builder.ts), `syncedQueryImpl` (query/named.ts), `throwQueryNotRunnable` (query/query-impl.ts), `titleCase` (query/validate-input.ts), `toSQLiteType` (sqlite/query-builder.ts), `toSQLiteTypeName` (sqlite/table-source.ts), `toSQLiteTypes` (sqlite/table-source.ts), `transaction` (sqlite/db.ts), `unsafeMode` (sqlite/db.ts), `withValidation` (query/named.ts)
 
 ## 1 · File structure diff
 
-TS origin files: **81**  ·  Rust files: **94** (15 new)
+TS origin files: **81**  ·  Rust files: **96** (17 new)
 
 | TS file (LOC) | rel | Rust file(s) (shared syms) |
 |---|---|---|
@@ -18,15 +18,15 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `builder/like-test-cases.ts` (200) | **DROPPED** | — |
 | `builder/like.ts` (78) | **MERGED** | `builder/like.rs` (3) |
 | `ivm/array-view.ts` (188) | **MERGED** | `ivm/array_view.rs` (9), `ivm/view_apply_change.rs` (1) |
-| `ivm/cap.ts` (329) | **MERGED** | `ivm/cap.rs` (12) |
+| `ivm/cap.ts` (329) | **1:1** | `ivm/cap.rs` (13) |
 | `ivm/catch.ts` (138) | **1:1** | `ivm/catch.rs` (9), `replay.rs` (1) |
-| `ivm/change-index-enum.ts` (9) | **MERGED** | `ivm/change.rs` (1) |
+| `ivm/change-index-enum.ts` (9) | **MERGED** | `ivm/change.rs` (1), `planner/planner_fan_in.rs` (1) |
 | `ivm/change-index.ts` (5) | **DROPPED** | — |
 | `ivm/change-type-enum.ts` (9) | **MERGED** | `ivm/view_apply_change.rs` (1), `ivm/memory_source.rs` (1), `engine/mod.rs` (1) |
 | `ivm/change-type.ts` (5) | **MERGED** | `ivm/change.rs` (1) |
 | `ivm/change.ts` (75) | **MERGED** | `ivm/change.rs` (6), `ivm/take.rs` (2), `ivm/view_apply_change.rs` (1) |
 | `ivm/constraint.ts` (200) | **MERGED** | `ivm/constraint.rs` (9), `ivm/memory_source.rs` (1), `planner/planner_debug.rs` (1), `sqlite/sqlite_stat_fanout.rs` (1) |
-| `ivm/data.ts` (129) | **MERGED** | `ivm/data.rs` (7) |
+| `ivm/data.ts` (129) | **MERGED** | `ivm/data.rs` (7), `ivm/memory_storage.rs` (1) |
 | `ivm/default-format.ts` (1) | **DROPPED** | — |
 | `ivm/exists.ts` (265) | **1:1** | `ivm/exists.rs` (12) |
 | `ivm/fan-in.ts` (94) | **1:1** | `ivm/fan_in.rs` (9) |
@@ -38,8 +38,8 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `ivm/join-utils.ts` (252) | **1:1** | `ivm/join_utils.rs` (7) |
 | `ivm/join.ts` (303) | **1:1** | `ivm/join.rs` (9) |
 | `ivm/maybe-split-and-push-edit-change.ts` (27) | **MERGED** | `ivm/filter_push.rs` (1) |
-| `ivm/memory-source.ts` (1180) | **SPLIT** | `ivm/memory_source.rs` (11), `sqlite/table_source.rs` (10), `ivm/source.rs` (7), `ivm/data.rs` (1), `ivm/view.rs` (1), `ivm/constraint.rs` (1), `engine/mod.rs` (1) |
-| `ivm/memory-storage.ts` (50) | **1:1** | `ivm/memory_storage.rs` (6) |
+| `ivm/memory-source.ts` (1180) | **SPLIT** | `ivm/memory_source.rs` (13), `sqlite/table_source.rs` (10), `ivm/source.rs` (7), `ivm/constraint.rs` (1), `engine/mod.rs` (1) |
+| `ivm/memory-storage.ts` (50) | **MERGED** | `ivm/memory_storage.rs` (6) |
 | `ivm/operator.ts` (140) | **1:1** | `ivm/operator.rs` (16), `ivm/constraint.rs` (1) |
 | `ivm/push-accumulated.ts` (430) | **1:1** | `ivm/push_accumulated.rs` (3) |
 | `ivm/schema.ts` (25) | **1:1** | `ivm/schema.rs` (1) |
@@ -51,18 +51,18 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `ivm/source.ts` (101) | **MERGED** | `ivm/source.rs` (8), `ivm/memory_source.rs` (2), `engine/mod.rs` (1) |
 | `ivm/stopable-iterator.ts` (23) | **1:1** | `ivm/stopable_iterator.rs` (3) |
 | `ivm/stream.ts` (43) | **MERGED** | `ivm/stream.rs` (2), `streamer/mod.rs` (2) |
-| `ivm/take.ts` (757) | **MERGED** | `ivm/take.rs` (17), `ivm/cap.rs` (1) |
+| `ivm/take.ts` (757) | **MERGED** | `ivm/take.rs` (18) |
 | `ivm/union-fan-in.ts` (298) | **1:1** | `ivm/union_fan_in.rs` (10) |
 | `ivm/union-fan-out.ts` (57) | **1:1** | `ivm/union_fan_out.rs` (7) |
-| `ivm/view-apply-change.ts` (926) | **SPLIT** | `ivm/view_apply_change.rs` (18), `ivm/array_view.rs` (6), `ivm/view.rs` (1) |
+| `ivm/view-apply-change.ts` (926) | **SPLIT** | `ivm/view_apply_change.rs` (19), `ivm/array_view.rs` (6), `ivm/view.rs` (1) |
 | `ivm/view.ts` (31) | **MERGED** | `ivm/view.rs` (2) |
 | `planner/planner-builder.ts` (382) | **1:1** | `planner/planner_builder.rs` (13) |
-| `planner/planner-connection.ts` (345) | **1:1** | `planner/planner_connection.rs` (14), `planner/planner_node.rs` (1) |
+| `planner/planner-connection.ts` (345) | **1:1** | `planner/planner_connection.rs` (15), `planner/planner_node.rs` (1) |
 | `planner/planner-constraint.ts` (21) | **1:1** | `planner/planner_constraint.rs` (2) |
-| `planner/planner-fan-in.ts` (241) | **MERGED** | `planner/planner_fan_in.rs` (8) |
+| `planner/planner-fan-in.ts` (241) | **MERGED** | `planner/planner_fan_in.rs` (9) |
 | `planner/planner-fan-out.ts` (108) | **1:1** | `planner/planner_fan_out.rs` (9) |
 | `planner/planner-graph.ts` (471) | **1:1** | `planner/planner_graph.rs` (19) |
-| `planner/planner-join.ts` (473) | **1:1** | `planner/planner_join.rs` (12) |
+| `planner/planner-join.ts` (473) | **1:1** | `planner/planner_join.rs` (13) |
 | `planner/planner-node.ts` (70) | **MERGED** | `planner/planner_node.rs` (4), `planner/planner_fan_in.rs` (1), `planner/planner_debug.rs` (1) |
 | `planner/planner-source.ts` (36) | **1:1** | `planner/planner_source.rs` (2) |
 | `planner/planner-terminus.ts` (40) | **1:1** | `planner/planner_terminus.rs` (5), `planner/runtime.rs` (1) |
@@ -84,38 +84,38 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `query/ttl.ts` (97) | **1:1** | `query/ttl.rs` (5), `builder/debug_delegate.rs` (1) |
 | `query/typed-view.ts` (23) | **1:1** | `query/typed_view.rs` (6) |
 | `query/validate-input.ts` (62) | **1:1** | `query/validate_input.rs` (2) |
-| `sqlite/database-storage.ts` (187) | **1:1** | `sqlite/database_storage.rs` (10), `snapshotter/snapshotter.rs` (1) |
+| `sqlite/database-storage.ts` (187) | **1:1** | `sqlite/database_storage.rs` (12), `snapshotter/snapshotter.rs` (1) |
 | `sqlite/db.ts` (337) | **1:1** | `sqlite/db.rs` (10), `snapshotter/diff.rs` (1) |
 | `sqlite/explain-queries.ts` (21) | **1:1** | `sqlite/explain_queries.rs` (1) |
 | `sqlite/options.ts` (10) | **1:1** | `sqlite/options.rs` (1) |
-| `sqlite/query-builder.ts` (442) | **1:1** | `sqlite/query_builder.rs` (8), `query/query_impl.rs` (1) |
+| `sqlite/query-builder.ts` (442) | **MERGED** | `sqlite/query_builder.rs` (8), `query/query_impl.rs` (1) |
 | `sqlite/query-delegate.ts` (72) | **MERGED** | `sqlite/query_delegate.rs` (3) |
 | `sqlite/resolve-scalar-subqueries.ts` (268) | **1:1** | `sqlite/resolve_scalar_subqueries.rs` (10) |
 | `sqlite/sqlite-cost-model.ts` (216) | **1:1** | `sqlite/sqlite_cost_model.rs` (5) |
 | `sqlite/sqlite-stat-fanout.ts` (468) | **MERGED** | `sqlite/sqlite_stat_fanout.rs` (9) |
-| `sqlite/table-source.ts` (699) | **MERGED** | `sqlite/table_source.rs` (10), `engine/mod.rs` (2) |
+| `sqlite/table-source.ts` (699) | **MERGED** | `sqlite/table_source.rs` (17), `sqlite/query_builder.rs` (2), `engine/mod.rs` (1) |
 
-**New Rust files (no TS origin — added in the port):**  `advance_gate.rs` (529), `bin/replay.rs` (18), `bin/server.rs` (881), `builder/mod.rs` (23), `ivm/mod.rs` (64), `ivm/trace.rs` (69), `lib.rs` (45), `otel_metrics.rs` (84), `perf_trace.rs` (146), `planner/mod.rs` (35), `query/mod.rs` (44), `snapshotter/mod.rs` (34), `snapshotter/spec.rs` (52), `sqlite/interrupt.rs` (309), `sqlite/mod.rs` (35)
+**New Rust files (no TS origin — added in the port):**  `advance_gate.rs` (587), `bin/replay.rs` (18), `bin/server.rs` (881), `builder/mod.rs` (23), `ivm/mod.rs` (64), `ivm/trace.rs` (69), `lib.rs` (45), `otel_metrics.rs` (84), `perf_trace.rs` (146), `planner/mod.rs` (35), `query/mod.rs` (44), `snapshotter/mod.rs` (34), `snapshotter/spec.rs` (52), `sqlite/internal/mod.rs` (5), `sqlite/internal/statement_cache.rs` (97), `sqlite/interrupt.rs` (309), `sqlite/mod.rs` (37)
 
 **Merges (many TS → one Rust file):**
 - `builder/ast.rs` ⟵ `builder/filter.ts`, `ivm/skip.ts`
 - `builder/like.rs` ⟵ `builder/filter.ts`, `builder/like.ts`
 - `engine/mod.rs` ⟵ `ivm/change-type-enum.ts`, `ivm/memory-source.ts`, `ivm/source.ts`, `sqlite/table-source.ts`
 - `ivm/array_view.rs` ⟵ `ivm/array-view.ts`, `ivm/view-apply-change.ts`, `query/query-delegate-base.ts`
-- `ivm/cap.rs` ⟵ `ivm/cap.ts`, `ivm/take.ts`
 - `ivm/change.rs` ⟵ `ivm/change-index-enum.ts`, `ivm/change-type.ts`, `ivm/change.ts`
 - `ivm/constraint.rs` ⟵ `ivm/constraint.ts`, `ivm/memory-source.ts`, `ivm/operator.ts`
-- `ivm/data.rs` ⟵ `ivm/data.ts`, `ivm/memory-source.ts`, `ivm/source-change-index-enum.ts`
+- `ivm/data.rs` ⟵ `ivm/data.ts`, `ivm/source-change-index-enum.ts`
 - `ivm/filter_push.rs` ⟵ `ivm/filter-push.ts`, `ivm/maybe-split-and-push-edit-change.ts`
 - `ivm/flipped_join.rs` ⟵ `ivm/flipped-join.ts`, `query/query-impl.ts`
 - `ivm/memory_source.rs` ⟵ `ivm/change-type-enum.ts`, `ivm/constraint.ts`, `ivm/memory-source.ts`, `ivm/source.ts`
+- `ivm/memory_storage.rs` ⟵ `ivm/data.ts`, `ivm/memory-storage.ts`
 - `ivm/source.rs` ⟵ `ivm/memory-source.ts`, `ivm/source.ts`
 - `ivm/stream.rs` ⟵ `ivm/skip-yields.ts`, `ivm/stream.ts`
 - `ivm/take.rs` ⟵ `ivm/change.ts`, `ivm/take.ts`
-- `ivm/view.rs` ⟵ `ivm/memory-source.ts`, `ivm/view-apply-change.ts`, `ivm/view.ts`
+- `ivm/view.rs` ⟵ `ivm/view-apply-change.ts`, `ivm/view.ts`
 - `ivm/view_apply_change.rs` ⟵ `ivm/array-view.ts`, `ivm/change-type-enum.ts`, `ivm/change.ts`, `ivm/view-apply-change.ts`
 - `planner/planner_debug.rs` ⟵ `ivm/constraint.ts`, `ivm/snitch.ts`, `planner/planner-node.ts`
-- `planner/planner_fan_in.rs` ⟵ `planner/planner-fan-in.ts`, `planner/planner-node.ts`
+- `planner/planner_fan_in.rs` ⟵ `ivm/change-index-enum.ts`, `planner/planner-fan-in.ts`, `planner/planner-node.ts`
 - `planner/planner_node.rs` ⟵ `planner/planner-connection.ts`, `planner/planner-node.ts`
 - `query/query_delegate_base.rs` ⟵ `query/query-delegate-base.ts`, `query/query-delegate.ts`
 - `query/query_impl.rs` ⟵ `query/query-impl.ts`, `sqlite/query-builder.ts`
@@ -123,6 +123,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 - `query/query_registry.rs` ⟵ `query/named.ts`, `query/query-registry.ts`
 - `query/runnable_query_impl.rs` ⟵ `query/runnable-query-impl.ts`, `query/static-query.ts`
 - `replay.rs` ⟵ `builder/builder.ts`, `ivm/catch.ts`, `ivm/source-change-index.ts`
+- `sqlite/query_builder.rs` ⟵ `sqlite/query-builder.ts`, `sqlite/table-source.ts`
 - `sqlite/query_delegate.rs` ⟵ `query/query-delegate.ts`, `sqlite/query-delegate.ts`
 - `sqlite/sqlite_stat_fanout.rs` ⟵ `ivm/constraint.ts`, `sqlite/sqlite-stat-fanout.ts`
 - `sqlite/table_source.rs` ⟵ `ivm/memory-source.ts`, `ivm/snitch.ts`, `sqlite/table-source.ts`
@@ -132,7 +133,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 ### `advance_gate.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (35):** `ADVANCE_WALL_CLOCK_CEILING_MS`, `AdvanceGate`, `AdvanceReset`, `GateGuard`, `LATE_ADVANCEMENT_FINISH_PROGRESS`, `MAX_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES`, `MIN_ADVANCEMENT_TIME_LIMIT_MS`, `MIN_PROJECTED_ADVANCEMENT_CHANGES`, `MIN_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES`, `MIN_PROJECTED_ADVANCEMENT_SAMPLE_MS`, `PROJECTED_ADVANCEMENT_RESET_MULTIPLIER`, `PROJECTED_ADVANCEMENT_SAMPLE_FRACTION`, `advancement_reset_time_limit_ms`, `arm`, `budget_ms`, `clear_current_change`, `current_change_start_ms`, `drop`, `elapsed`, `elapsed_ms`, `exclude`, `exclude_current`, `is_armed`, `new`, `over_budget`, `projected_advancement_time_ms`, `raw_elapsed_ms`, `set_current_change_start`, `set_pos`, `should_finish_late_advancement`, `should_reset_projected_advancement`, `should_reset_slow_current_change`, `should_stop_fetch`, `tripped`, `tripped_reset`
+🟦 **Rust-only added here (33):** `ADVANCE_WALL_CLOCK_CEILING_MS`, `AdvanceGate`, `AdvanceReset`, `GateGuard`, `LATE_ADVANCEMENT_FINISH_PROGRESS`, `MAX_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES`, `MIN_ADVANCEMENT_TIME_LIMIT_MS`, `MIN_PROJECTED_ADVANCEMENT_CHANGES`, `MIN_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES`, `MIN_PROJECTED_ADVANCEMENT_SAMPLE_MS`, `PROJECTED_ADVANCEMENT_RESET_MULTIPLIER`, `PROJECTED_ADVANCEMENT_SAMPLE_FRACTION`, `advancement_reset_time_limit_ms`, `arm`, `budget_ms`, `clear_current_change`, `current_change_start_ms`, `drop`, `elapsed`, `elapsed_ms`, `is_armed`, `new`, `over_budget`, `projected_advancement_time_ms`, `raw_elapsed_ms`, `set_current_change_start`, `set_pos`, `should_finish_late_advancement`, `should_reset_projected_advancement`, `should_reset_slow_current_change`, `should_stop_fetch`, `tripped`, `tripped_reset`
 
 ### `bin/replay.rs`  ⟵  _(new)_
 
@@ -217,12 +218,11 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `nonPrimaryKeys` (sqlite/table-source.ts:685) | `set_client_primary_keys` (:676) | fuzzy 0.50 |
-| `REMOVE` (ivm/change-type-enum.ts:2) | `remove_query` (:809) | fuzzy 0.50 |
-| `SourceChangeEdit` (ivm/source.ts:15) | `push_source_change` (:1692) | fuzzy 0.50 |
-| `toSQLiteRow` (sqlite/table-source.ts:274) | `sqlite_value_to_row` (:1674) | fuzzy 0.67 |
+| `REMOVE` (ivm/change-type-enum.ts:2) | `remove_query` (:798) | fuzzy 0.50 |
+| `SourceChangeEdit` (ivm/source.ts:15) | `push_source_change` (:1693) | fuzzy 0.50 |
+| `toSQLiteRow` (sqlite/table-source.ts:274) | `sqlite_value_to_row` (:1675) | fuzzy 0.67 |
 
-🟦 **Rust-only added here (78):** `AdvanceContext`, `AdvanceStream`, `AdvanceToHeadResult`, `Built`, `COLLECTOR_CAP_FLOOR`, `CompanionBuilt`, `CompanionHandle`, `CompanionOutput`, `CompanionPipeline`, `Engine`, `EngineDelegate`, `HydrateClock`, `HydratePhase`, `HydrateStream`, `PipelineEntry`, `PipelineHandle`, `QueryResult`, `QuerySpec`, `ResetPipelinesSignal`, `ScalarResetError`, `ScalarResolveOut`, `UnusedPusher`, `__test_drop_primary_key`, `add_queries`, `add_queries_streaming`, `advance`, `advance_reset_error`, `advance_streaming`, `advance_to_head_stream`, `apply_client_primary_keys`, `cancel`, `cancellation_token`, `clear_and_cap`, `companion_value_change_records_reset_without_unwinding`, `current_query_id`, `ensure_cost_model`, `finish_advance`, `finish_hydrate`, `fmt`, `hydration_row_count`, `hydration_time_ms`, `inactive_source_skips_invalid_change`, `initialized`, `is_cancelled`, `is_done`, `js_scalar_string`, `next_inner`, `now_ms`, `num_changes`, `pipeline_handles`, `pipeline_lifetime_ms`, `pipeline_query_ids`, `plan_ast`, `planned_flips_for_test`, `process_change`, `register_source`, `resolve_scalar_subqueries`, `restore_sources`, `rollback_source_connections`, `row_set_signature`, `row_signature_unit`, `row_signature_unit_matches_ts_golden`, `scalar_values_equal`, `set_analyze_debug`, `set_cost_model_conn`, `set_cost_model_table_specs`, `set_hydration_time_ms`, `set_table_spec`, `set_unique_keys`, `should_abort`, `source_connection_checkpoint`, `sources`, `start_advance`, `start_hydrate`, `take_scalar_reset`, `total_hydration_time_ms`, `transformed_ast`, `version`
+🟦 **Rust-only added here (80):** `AdvanceContext`, `AdvanceStream`, `AdvanceToHeadResult`, `Built`, `COLLECTOR_CAP_FLOOR`, `CompanionBuilt`, `CompanionHandle`, `CompanionOutput`, `CompanionPipeline`, `Engine`, `EngineDelegate`, `HydrateClock`, `HydratePhase`, `HydrateStream`, `PipelineEntry`, `PipelineHandle`, `QueryResult`, `QuerySpec`, `ResetPipelinesSignal`, `ScalarResetError`, `ScalarResolveOut`, `UnusedPusher`, `__test_drop_primary_key`, `add_queries`, `add_queries_streaming`, `advance`, `advance_reset_error`, `advance_streaming`, `advance_to_head_stream`, `apply_client_primary_keys`, `cancel`, `cancellation_token`, `clear_and_cap`, `companion_value_change_records_reset_without_unwinding`, `current_query_id`, `ensure_cost_model`, `every_arm_reports_its_cost_budget_and_position`, `finish_advance`, `finish_hydrate`, `fmt`, `hydration_row_count`, `hydration_time_ms`, `inactive_source_skips_invalid_change`, `initialized`, `is_cancelled`, `is_done`, `js_scalar_string`, `msg`, `next_inner`, `now_ms`, `num_changes`, `pipeline_handles`, `pipeline_lifetime_ms`, `pipeline_query_ids`, `plan_ast`, `planned_flips_for_test`, `process_change`, `register_source`, `resolve_scalar_subqueries`, `restore_sources`, `rollback_source_connections`, `row_set_signature`, `row_signature_unit`, `row_signature_unit_matches_ts_golden`, `scalar_values_equal`, `set_analyze_debug`, `set_client_primary_keys`, `set_cost_model_conn`, `set_cost_model_table_specs`, `set_table_spec`, `set_unique_keys`, `should_abort`, `source_connection_checkpoint`, `sources`, `start_advance`, `start_hydrate`, `take_scalar_reset`, `total_hydration_time_ms`, `transformed_ast`, `version`
 
 ### `ivm/array_view.rs`  ⟵  `ivm/array-view.ts`, `ivm/view-apply-change.ts`, `query/query-delegate-base.ts`
 
@@ -237,27 +237,25 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `flush` (ivm/array-view.ts:173) | `flush` (:89) | exact |
 | `push` (ivm/array-view.ts:159) | `push` (:132) | exact |
 
-### `ivm/cap.rs`  ⟵  `ivm/cap.ts`, `ivm/take.ts`
+### `ivm/cap.rs`  ⟵  `ivm/cap.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `#initialFetch` (ivm/cap.ts:125) | `initial_fetch` (:164) | exact |
+| `#initialFetch` (ivm/cap.ts:125) | `initial_fetch` (:170) | exact |
 | `Cap` (ivm/cap.ts:52) | `Cap` (:88) | exact |
 | `del` (ivm/cap.ts:33) | `del` (:52) | exact |
-| `destroy` (ivm/cap.ts:295) | `destroy` (:257) | exact |
-| `fetch` (ivm/cap.ts:87) | `fetch` (:269) | exact |
+| `deserializePKToConstraint` (ivm/cap.ts:319) | `deserialize_pk_to_constraint` (:605) | exact |
+| `destroy` (ivm/cap.ts:295) | `destroy` (:263) | exact |
+| `fetch` (ivm/cap.ts:87) | `fetch` (:275) | exact |
 | `get` (ivm/cap.ts:31) | `get` (:44) | exact |
-| `getCapStateKey` (ivm/cap.ts:300) | `CapState` (:26) | fuzzy 0.67 |
-| `getSchema` (ivm/cap.ts:83) | `get_schema` (:253) | exact |
-| `getTakeStateKey` (ivm/take.ts:710) | `get_take_state_key` (:129) | exact |
-| `push` (ivm/cap.ts:177) | `push` (:316) | exact |
-| `serializePK` (ivm/cap.ts:315) | `serialize_pk` (:155) | exact |
+| `getCapStateKey` (ivm/cap.ts:300) | `get_cap_state_key` (:135) | exact |
+| `getSchema` (ivm/cap.ts:83) | `get_schema` (:259) | exact |
+| `push` (ivm/cap.ts:177) | `push` (:315) | exact |
+| `serializePK` (ivm/cap.ts:315) | `serialize_pk` (:161) | exact |
 | `set` (ivm/cap.ts:32) | `set` (:48) | exact |
-| `setOutput` (ivm/cap.ts:79) | `set_output` (:265) | exact |
+| `setOutput` (ivm/cap.ts:79) | `set_output` (:271) | exact |
 
-🟥 **TS symbols not resolved into this file (1):** `deserializePKToConstraint`
-
-🟦 **Rust-only added here (11):** `CapInitialFetchGuard`, `CapOutput`, `CapStorage`, `parse_json_array_elements`, `parse_value`, `plain_string_pk_is_byte_identical_and_roundtrips`, `quoted_pk_does_not_break_array_element_split`, `roundtrip`, `string_pk_with_quote_and_backslash_roundtrips`, `unescape_json_string`, `value_to_string`
+🟦 **Rust-only added here (13):** `CapInitialFetchGuard`, `CapOutput`, `CapState`, `CapStorage`, `deserialize_pk_to_constraint_inverts_serialize_pk_over_the_pk_value_domain`, `parse_json_array_elements`, `parse_value`, `plain_string_pk_is_byte_identical_and_roundtrips`, `quoted_pk_does_not_break_array_element_split`, `roundtrip`, `string_pk_with_quote_and_backslash_roundtrips`, `unescape_json_string`, `value_to_string`
 
 ### `ivm/catch.rs`  ⟵  `ivm/catch.ts`
 
@@ -290,7 +288,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `makeRemoveChange` (ivm/change.ts:65) | `make_remove_change` (:85) | exact |
 | `OLD_NODE` (ivm/change-index-enum.ts:3) | `old_node` (:72) | exact |
 
-🟥 **TS symbols not resolved into this file (2):** `EditChange`, `TYPE`
+🟥 **TS symbols not resolved into this file (1):** `EditChange`
 
 🟦 **Rust-only added here (1):** `node_mut`
 
@@ -308,24 +306,24 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `MultiConstraint` (ivm/operator.ts:61) | `MultiConstraint` (:13) | exact |
 | `primaryKeyConstraintFromFilters` (ivm/constraint.ts:114) | `primary_key_constraint_from_filters` (:128) | exact |
 | `pullSimpleAndComponents` (ivm/constraint.ts:91) | `pull_simple_and_components` (:99) | exact |
-| `rowMatchesPK` (ivm/memory-source.ts:976) | `row_matches_multi_constraints` (:61) | fuzzy 0.40 |
 
-### `ivm/data.rs`  ⟵  `ivm/data.ts`, `ivm/memory-source.ts`, `ivm/source-change-index-enum.ts`
+🟦 **Rust-only added here (1):** `row_matches_multi_constraints`
+
+### `ivm/data.rs`  ⟵  `ivm/data.ts`, `ivm/source-change-index-enum.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `Comparator` (ivm/data.ts:89) | `Comparator` (:308) | exact |
-| `compareValues` (ivm/data.ts:32) | `compare_values` (:131) | exact |
-| `drainStreams` (ivm/data.ts:120) | `drain_streams` (:401) | exact |
-| `makeBoundComparator` (ivm/memory-source.ts:997) | `make_partial_bound_comparator` (:338) | fuzzy 0.75 |
-| `makeComparator` (ivm/data.ts:91) | `make_comparator` (:312) | exact |
-| `Node` (ivm/data.ts:10) | `Node` (:364) | exact |
-| `ROW` (ivm/source-change-index-enum.ts:2) | `Row` (:291) | exact |
-| `valuesEqual` (ivm/data.ts:112) | `values_equal` (:219) | exact |
+| `Comparator` (ivm/data.ts:89) | `Comparator` (:369) | exact |
+| `compareValues` (ivm/data.ts:32) | `compare_values` (:135) | exact |
+| `drainStreams` (ivm/data.ts:120) | `drain_streams` (:462) | exact |
+| `makeComparator` (ivm/data.ts:91) | `make_comparator` (:373) | exact |
+| `Node` (ivm/data.ts:10) | `Node` (:425) | exact |
+| `ROW` (ivm/source-change-index-enum.ts:2) | `Row` (:352) | exact |
+| `valuesEqual` (ivm/data.ts:112) | `values_equal` (:223) | exact |
 
 🟥 **TS symbols not resolved into this file (2):** `NormalizedValue`, `OLD_ROW`
 
-🟦 **Rust-only added here (17):** `MAX_SAFE`, `SortOrder`, `Value`, `cloned_json_preserves_reference_identity`, `comparator_errors_match_javascript_messages`, `deserialize`, `eq`, `independently_parsed_json_is_not_equal_or_orderable`, `invalid_type`, `is_null`, `js_json_string`, `js_stringify_value`, `js_stringify_value_matches_json_stringify`, `js_typeof`, `js_value_string`, `serialize`, `set_relationship`
+🟦 **Rust-only added here (18):** `SortOrder`, `Value`, `cloned_json_preserves_reference_identity`, `comparator_errors_match_javascript_messages`, `deserialize`, `eq`, `independently_parsed_json_is_not_equal_or_orderable`, `invalid_type`, `is_null`, `js_json_string`, `js_stringify_value`, `js_stringify_value_matches_json_stringify`, `js_typeof`, `js_value_string`, `json_numbers_round_like_json_parse_instead_of_erroring`, `make_partial_bound_comparator`, `serialize`, `set_relationship`
 
 ### `ivm/exists.rs`  ⟵  `ivm/exists.ts`
 
@@ -425,7 +423,6 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `#fetchBatched` (ivm/flipped-join.ts:230) | `fetch_batched` (:151) | exact |
 | `#pushChildChange` (ivm/flipped-join.ts:409) | `push_child_change` (:324) | exact |
 | `canonicalKey` (ivm/flipped-join.ts:585) | `canonical_key` (:664) | exact |
-| `canonicalKeyForTest` (ivm/flipped-join.ts:572) | `canonical_key_row` (:659) | fuzzy 0.40 |
 | `canonicalValue` (ivm/flipped-join.ts:600) | `canonical_value` (:679) | exact |
 | `destroy` (ivm/flipped-join.ts:148) | `destroy` (:508) | exact |
 | `fetch` (ivm/flipped-join.ts:161) | `fetch` (:521) | exact |
@@ -436,7 +433,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `setMultiConstraintChunkSizeForTest` (ivm/flipped-join.ts:65) | `set_multi_constraint_chunk_size_for_test` (:46) | exact |
 | `setOutput` (ivm/flipped-join.ts:153) | `set_output` (:517) | exact |
 
-🟦 **Rust-only added here (10):** `ChildOutput`, `FlippedJoinArgs`, `FlippedJoinFetch`, `InprogressGuard`, `MULTI_CONSTRAINT_CHUNK_SIZE`, `MULTI_CONSTRAINT_CHUNK_SIZE_TEST`, `ParentOutput`, `batch_parts`, `push_parent_change`, `splice_inprogress_remove`
+🟦 **Rust-only added here (11):** `ChildOutput`, `FlippedJoinArgs`, `FlippedJoinFetch`, `InprogressGuard`, `MULTI_CONSTRAINT_CHUNK_SIZE`, `MULTI_CONSTRAINT_CHUNK_SIZE_TEST`, `ParentOutput`, `batch_parts`, `canonical_key_row`, `push_parent_change`, `splice_inprogress_remove`
 
 ### `ivm/join.rs`  ⟵  `ivm/join.ts`
 
@@ -472,25 +469,25 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 |---|---|---|
 | `#fetch` (ivm/memory-source.ts:257) | `fetch` (:603) | exact |
 | `#getSchema` (ivm/memory-source.ts:149) | `get_schema` (:582) | exact |
-| `applyMultiConstraintsToOverlays` (ivm/memory-source.ts:795) | `apply_source_overlays` (:981) | fuzzy 0.40 |
 | `connect` (ivm/memory-source.ts:162) | `connect` (:221) | exact |
 | `Connection` (ivm/memory-source.ts:75) | `Connection` (:27) | exact |
-| `EDIT` (ivm/change-type-enum.ts:3) | `StableEdit` (:1239) | fuzzy 0.50 |
-| `generateWithStart` (ivm/memory-source.ts:676) | `generate_with_start` (:1046) | exact |
+| `EDIT` (ivm/change-type-enum.ts:3) | `StableEdit` (:1241) | fuzzy 0.50 |
+| `generateWithStart` (ivm/memory-source.ts:676) | `generate_with_start` (:1048) | exact |
 | `genPush` (ivm/memory-source.ts:470) | `gen_push` (:288) | exact |
 | `has` (ivm/constraint.ts:173) | `has` (:184) | exact |
 | `MemorySource` (ivm/memory-source.ts:98) | `MemorySource` (:51) | exact |
-| `mergeSortedStreams` (ivm/memory-source.ts:1074) | `merge_sorted_streams` (:1401) | exact |
+| `mergeSortedStreams` (ivm/memory-source.ts:1074) | `merge_sorted_streams` (:1404) | exact |
 | `Overlay` (ivm/memory-source.ts:59) | `OverlayGuard` (:40) | fuzzy 0.50 |
 | `push` (ivm/memory-source.ts:462) | `push` (:280) | exact |
+| `rowMatchesPK` (ivm/memory-source.ts:976) | `row_matches_pk` (:1247) | exact |
 | `SourceChangeAdd` (ivm/source.ts:9) | `source_change_to_change` (:467) | fuzzy 0.67 |
 | `SourceInput` (ivm/source.ts:99) | `SourceInput` (:563) | exact |
 
 🟥 **TS symbols not resolved into this file (1):** `Overlays`
 
-🟦 **Rust-only added here (36):** `CollectOutput`, `CollectStreamConfig`, `ConnPool`, `EmptyInput`, `HeapEntry`, `HistoricalOverlayContext`, `KWayMerge`, `NodeCompare`, `SharedData`, `SharedOverlay`, `SourcePusher`, `add_row`, `all_rows`, `apply_overlay_and_stream`, `apply_source_overlay`, `apply_source_overlay_impl`, `clear_advance_state`, `column_names`, `compute_index_compare`, `configure_streaming`, `connection_count`, `has_active_connections`, `has_db`, `historical_edit_with_unchanged_json_sort_key_replaces_in_place`, `partial_cmp`, `pk_key`, `primary_key`, `push_internal`, `rows_equal_on`, `rows_storage_equal_on`, `set_db_path`, `set_primary_key`, `set_snapshot_db`, `storage_values_equal`, `table_name`, `truncate_connections`
+🟦 **Rust-only added here (36):** `CollectOutput`, `CollectStreamConfig`, `ConnPool`, `EmptyInput`, `HeapEntry`, `HistoricalOverlayContext`, `KWayMerge`, `NodeCompare`, `SharedData`, `SharedOverlay`, `SourcePusher`, `add_row`, `all_rows`, `apply_overlay_and_stream`, `apply_source_overlay`, `apply_source_overlay_impl`, `apply_source_overlays`, `clear_advance_state`, `column_names`, `compute_index_compare`, `configure_streaming`, `connection_count`, `has_active_connections`, `has_db`, `historical_edit_with_unchanged_json_sort_key_replaces_in_place`, `partial_cmp`, `pk_key`, `primary_key`, `push_internal`, `rows_storage_equal_on`, `set_db_path`, `set_primary_key`, `set_snapshot_db`, `storage_values_equal`, `table_name`, `truncate_connections`
 
-### `ivm/memory_storage.rs`  ⟵  `ivm/memory-storage.ts`
+### `ivm/memory_storage.rs`  ⟵  `ivm/data.ts`, `ivm/memory-storage.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -529,9 +526,10 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `makeAddEmptyRelationships` (ivm/push-accumulated.ts:369) | `add_empty_relationships` (:132) | fuzzy 0.75 |
 | `mergeRelationships` (ivm/push-accumulated.ts:265) | `merge_relationships` (:23) | exact |
 | `pushAccumulatedChanges` (ivm/push-accumulated.ts:87) | `push_accumulated_changes` (:177) | exact |
+
+🟦 **Rust-only added here (1):** `add_empty_relationships`
 
 ### `ivm/schema.rs`  ⟵  `ivm/schema.ts`
 
@@ -615,27 +613,28 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `#getStateAndConstraint` (ivm/take.ts:218) | `get_state_and_constraint` (:261) | exact |
-| `#initialFetch` (ivm/take.ts:158) | `initial_fetch` (:312) | exact |
-| `#pushEditChange` (ivm/take.ts:432) | `push_edit_change` (:686) | exact |
-| `#pushWithRowHiddenFromFetch` (ivm/take.ts:677) | `push_with_row_hidden_from_fetch` (:902) | exact |
-| `#setTakeState` (ivm/take.ts:686) | `set_take_state` (:282) | exact |
-| `AddChange` (ivm/change.ts:17) | `push_add_change` (:469) | fuzzy 0.67 |
-| `constraintMatchesPartitionKey` (ivm/take.ts:727) | `constraint_matches_partition_key` (:1069) | exact |
+| `#getStateAndConstraint` (ivm/take.ts:218) | `get_state_and_constraint` (:270) | exact |
+| `#initialFetch` (ivm/take.ts:158) | `initial_fetch` (:321) | exact |
+| `#pushEditChange` (ivm/take.ts:432) | `push_edit_change` (:695) | exact |
+| `#pushWithRowHiddenFromFetch` (ivm/take.ts:677) | `push_with_row_hidden_from_fetch` (:911) | exact |
+| `#setTakeState` (ivm/take.ts:686) | `set_take_state` (:291) | exact |
+| `AddChange` (ivm/change.ts:17) | `push_add_change` (:478) | fuzzy 0.67 |
+| `constraintMatchesPartitionKey` (ivm/take.ts:727) | `constraint_matches_partition_key` (:1078) | exact |
 | `del` (ivm/take.ts:39) | `del` (:79) | exact |
-| `destroy` (ivm/take.ts:705) | `destroy` (:921) | exact |
-| `fetch` (ivm/take.ts:93) | `fetch` (:933) | exact |
+| `destroy` (ivm/take.ts:705) | `destroy` (:930) | exact |
+| `fetch` (ivm/take.ts:93) | `fetch` (:942) | exact |
 | `get` (ivm/take.ts:35) | `get` (:63) | exact |
-| `getSchema` (ivm/take.ts:89) | `get_schema` (:917) | exact |
-| `makePartitionKeyComparator` (ivm/take.ts:745) | `make_partition_key_comparator` (:1051) | exact |
+| `getSchema` (ivm/take.ts:89) | `get_schema` (:926) | exact |
+| `getTakeStateKey` (ivm/take.ts:710) | `get_take_state_key` (:246) | exact |
+| `makePartitionKeyComparator` (ivm/take.ts:745) | `make_partition_key_comparator` (:1060) | exact |
 | `PartitionKey` (ivm/take.ts:42) | `PartitionKey` (:99) | exact |
-| `push` (ivm/take.ts:247) | `push` (:1036) | exact |
-| `RemoveChange` (ivm/change.ts:22) | `push_remove_change` (:581) | fuzzy 0.67 |
+| `push` (ivm/take.ts:247) | `push` (:1045) | exact |
+| `RemoveChange` (ivm/change.ts:22) | `push_remove_change` (:590) | fuzzy 0.67 |
 | `set` (ivm/take.ts:37) | `set` (:74) | exact |
-| `setOutput` (ivm/take.ts:85) | `set_output` (:929) | exact |
+| `setOutput` (ivm/take.ts:85) | `set_output` (:938) | exact |
 | `Take` (ivm/take.ts:55) | `Take` (:160) | exact |
 
-🟦 **Rust-only added here (15):** `HiddenRowGuard`, `InitialFetchGuard`, `MAX_BOUND_KEY`, `NoopOutput`, `TakeOutput`, `TakeState`, `TakeStorage`, `compare_rows`, `edit_on_empty_partition_panics_bound_should_be_set`, `mk_row`, `optional_constraint_matches_partition_key`, `push_change`, `storage_round_trip_row`, `take_state_key_for_constraint`, `take_state_key_for_row`
+🟦 **Rust-only added here (13):** `HiddenRowGuard`, `InitialFetchGuard`, `MAX_BOUND_KEY`, `NoopOutput`, `TakeOutput`, `TakeState`, `TakeStorage`, `compare_rows`, `edit_on_empty_partition_panics_bound_should_be_set`, `mk_row`, `optional_constraint_matches_partition_key`, `push_change`, `storage_round_trip_row`
 
 ### `ivm/trace.rs`  ⟵  _(new)_
 
@@ -673,47 +672,47 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 🟦 **Rust-only added here (1):** `UfoOutput`
 
-### `ivm/view.rs`  ⟵  `ivm/memory-source.ts`, `ivm/view-apply-change.ts`, `ivm/view.ts`
+### `ivm/view.rs`  ⟵  `ivm/view-apply-change.ts`, `ivm/view.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `compareBounds` (ivm/memory-source.ts:1023) | `compare` (:74) | fuzzy 0.50 |
 | `Entry` (ivm/view.ts:11) | `Entry` (:51) | exact |
 | `View` (ivm/view.ts:9) | `View` (:42) | exact |
 
 🟥 **TS symbols not resolved into this file (3):** `AnyViewFactory`, `EntryList`, `ViewFactory`
 
-🟦 **Rust-only added here (2):** `Format`, `default_format`
+🟦 **Rust-only added here (3):** `Format`, `compare`, `default_format`
 
 ### `ivm/view_apply_change.rs`  ⟵  `ivm/array-view.ts`, `ivm/change-type-enum.ts`, `ivm/change.ts`, `ivm/view-apply-change.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `add` (ivm/view-apply-change.ts:694) | `add` (:413) | exact |
 | `applyChange` (ivm/view-apply-change.ts:185) | `apply_change` (:122) | exact |
 | `applyChangeInternal` (ivm/view-apply-change.ts:213) | `apply_change_internal` (:169) | exact |
 | `applyChanges` (ivm/view-apply-change.ts:555) | `apply_changes` (:144) | exact |
-| `applyEdit` (ivm/view-apply-change.ts:579) | `apply_edit` (:673) | exact |
-| `binarySearch` (ivm/view-apply-change.ts:767) | `binary_search` (:808) | exact |
-| `changeToViewChange` (ivm/array-view.ts:15) | `change_to_view_change` (:928) | exact |
-| `CHILD` (ivm/change-type-enum.ts:4) | `apply_child` (:503) | fuzzy 0.50 |
+| `applyEdit` (ivm/view-apply-change.ts:579) | `apply_edit` (:674) | exact |
+| `binarySearch` (ivm/view-apply-change.ts:767) | `binary_search` (:809) | exact |
+| `changeToViewChange` (ivm/array-view.ts:15) | `change_to_view_change` (:929) | exact |
+| `CHILD` (ivm/change-type-enum.ts:4) | `apply_child` (:504) | fuzzy 0.50 |
 | `ChildChange` (ivm/change.ts:29) | `ChildViewChange` (:107) | fuzzy 0.67 |
-| `decRefCount` (ivm/view-apply-change.ts:866) | `dec_ref_count` (:866) | exact |
+| `decRefCount` (ivm/view-apply-change.ts:866) | `dec_ref_count` (:867) | exact |
 | `ExpandedNode` (ivm/view-apply-change.ts:45) | `ExpandedNode` (:23) | exact |
-| `getChildEntryList` (ivm/view-apply-change.ts:821) | `get_child_entry_list` (:851) | exact |
-| `getOptionalSingularEntry` (ivm/view-apply-change.ts:808) | `get_optional_singular_entry` (:840) | exact |
-| `getSingularEntry` (ivm/view-apply-change.ts:797) | `get_singular_entry` (:832) | exact |
-| `incRefCount` (ivm/view-apply-change.ts:859) | `inc_ref_count` (:859) | exact |
-| `initializeRelationshipsForNewEntryIfAny` (ivm/view-apply-change.ts:625) | `initialize_relationships_for_new_entry_if_any` (:696) | exact |
-| `makeID` (ivm/view-apply-change.ts:851) | `make_id` (:782) | exact |
-| `makeNewMetaEntry` (ivm/view-apply-change.ts:831) | `make_new_meta_entry` (:773) | exact |
-| `removeAndUpdateRefCount` (ivm/view-apply-change.ts:744) | `remove_and_update_ref_count` (:476) | exact |
+| `getChildEntryList` (ivm/view-apply-change.ts:821) | `get_child_entry_list` (:852) | exact |
+| `getOptionalSingularEntry` (ivm/view-apply-change.ts:808) | `get_optional_singular_entry` (:841) | exact |
+| `getSingularEntry` (ivm/view-apply-change.ts:797) | `get_singular_entry` (:833) | exact |
+| `incRefCount` (ivm/view-apply-change.ts:859) | `inc_ref_count` (:860) | exact |
+| `initializeRelationshipsForNewEntryIfAny` (ivm/view-apply-change.ts:625) | `initialize_relationships_for_new_entry_if_any` (:697) | exact |
+| `makeID` (ivm/view-apply-change.ts:851) | `make_id` (:783) | exact |
+| `makeNewMetaEntry` (ivm/view-apply-change.ts:831) | `make_new_meta_entry` (:774) | exact |
+| `removeAndUpdateRefCount` (ivm/view-apply-change.ts:744) | `remove_and_update_ref_count` (:477) | exact |
 | `RowOnlyNode` (ivm/view-apply-change.ts:68) | `RowOnlyNode` (:101) | exact |
 | `ViewChange` (ivm/view-apply-change.ts:62) | `ViewChange` (:81) | exact |
 | `ViewNode` (ivm/view-apply-change.ts:55) | `ViewNode` (:31) | exact |
 
-🟥 **TS symbols not resolved into this file (6):** `ADD`, `AddViewChange`, `RefCountMap`, `RemoveViewChange`, `idSymbol`, `refCountSymbol`
+🟥 **TS symbols not resolved into this file (5):** `AddViewChange`, `RefCountMap`, `RemoveViewChange`, `idSymbol`, `refCountSymbol`
 
-🟦 **Rust-only added here (18):** `AddResult`, `Mutate`, `add_to_list`, `apply_add_plural`, `apply_add_singular`, `apply_change_hidden`, `apply_edit_plural`, `apply_edit_singular`, `apply_remove_plural`, `apply_remove_singular`, `children`, `empty_root_entry`, `entries_equal`, `relationship_names`, `set_relation`, `value_to_json_string`, `view_equal`, `views_equal`
+🟦 **Rust-only added here (17):** `AddResult`, `Mutate`, `apply_add_plural`, `apply_add_singular`, `apply_change_hidden`, `apply_edit_plural`, `apply_edit_singular`, `apply_remove_plural`, `apply_remove_singular`, `children`, `empty_root_entry`, `entries_equal`, `relationship_names`, `set_relation`, `value_to_json_string`, `view_equal`, `views_equal`
 
 ### `live_count.rs`  ⟵  `builder/builder.ts`
 
@@ -755,20 +754,21 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `captureConstraints` (planner/planner-connection.ts:281) | `capture_constraints` (:241) | exact |
-| `closestJoinOrSource` (planner/planner-connection.ts:148) | `closest_join_or_source` (:100) | exact |
+| `captureConstraints` (planner/planner-connection.ts:281) | `capture_constraints` (:249) | exact |
+| `closestJoinOrSource` (planner/planner-connection.ts:148) | `closest_join_or_source` (:108) | exact |
 | `ConnectionCostModel` (planner/planner-connection.ts:340) | `ConnectionCostModel` (:18) | exact |
 | `CostModelCost` (planner/planner-connection.ts:335) | `CostModelCost` (:12) | exact |
-| `estimateCost` (planner/planner-connection.ts:187) | `estimate_cost` (:133) | exact |
-| `getConstraintCostsForDebug` (planner/planner-connection.ts:320) | `get_constraint_costs_for_debug` (:213) | exact |
-| `getConstraintsForDebug` (planner/planner-connection.ts:301) | `get_constraints_for_debug` (:200) | exact |
+| `estimateCost` (planner/planner-connection.ts:187) | `estimate_cost` (:141) | exact |
+| `getConstraintCostsForDebug` (planner/planner-connection.ts:320) | `get_constraint_costs_for_debug` (:221) | exact |
+| `getConstraintsForDebug` (planner/planner-connection.ts:301) | `get_constraints_for_debug` (:208) | exact |
+| `output` (planner/planner-connection.ts:143) | `output` (:101) | exact |
 | `PlannerConnection` (planner/planner-connection.ts:59) | `PlannerConnection` (:27) | exact |
-| `propagateConstraints` (planner/planner-connection.ts:166) | `propagate_constraints` (:104) | exact |
-| `propagateUnlimitFromFlippedJoin` (planner/planner-connection.ts:266) | `propagate_unlimit_from_flipped_join` (:231) | exact |
-| `reset` (planner/planner-connection.ts:270) | `reset` (:235) | exact |
-| `restoreConstraints` (planner/planner-connection.ts:289) | `restore_constraints` (:245) | exact |
+| `propagateConstraints` (planner/planner-connection.ts:166) | `propagate_constraints` (:112) | exact |
+| `propagateUnlimitFromFlippedJoin` (planner/planner-connection.ts:266) | `propagate_unlimit_from_flipped_join` (:239) | exact |
+| `reset` (planner/planner-connection.ts:270) | `reset` (:243) | exact |
+| `restoreConstraints` (planner/planner-connection.ts:289) | `restore_constraints` (:253) | exact |
 | `setOutput` (planner/planner-connection.ts:139) | `set_output` (:96) | exact |
-| `unlimit` (planner/planner-connection.ts:249) | `unlimit` (:224) | exact |
+| `unlimit` (planner/planner-connection.ts:249) | `unlimit` (:232) | exact |
 
 ### `planner/planner_constraint.rs`  ⟵  `planner/planner-constraint.ts`
 
@@ -787,18 +787,19 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 🟦 **Rust-only added here (13):** `AccumulatorDebugger`, `InstalledPlanDebugger`, `PlanDebugger`, `SharedPlanDebugger`, `current_plan_debugger`, `install_plan_debugger`, `ivm_value_to_json`, `join_type_str`, `node_kind_str`, `plan_debug_log`, `serialize_event`, `serialize_plan_debug_events`, `with_plan_debugger`
 
-### `planner/planner_fan_in.rs`  ⟵  `planner/planner-fan-in.ts`, `planner/planner-node.ts`
+### `planner/planner_fan_in.rs`  ⟵  `ivm/change-index-enum.ts`, `planner/planner-fan-in.ts`, `planner/planner-node.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `closestJoinOrSource` (planner/planner-fan-in.ts:43) | `closest_join_or_source` (:30) | exact |
-| `convertToUFI` (planner/planner-fan-in.ts:60) | `convert_to_ufi` (:42) | exact |
-| `estimateCost` (planner/planner-fan-in.ts:81) | `estimate_cost` (:52) | exact |
+| `convertToUFI` (planner/planner-fan-in.ts:60) | `convert_to_ufi` (:50) | exact |
+| `estimateCost` (planner/planner-fan-in.ts:81) | `estimate_cost` (:60) | exact |
 | `NodeType` (planner/planner-node.ts:66) | `node_type` (:26) | exact |
+| `output` (planner/planner-fan-in.ts:51) | `output` (:39) | exact |
 | `PlannerFanIn` (planner/planner-fan-in.ts:28) | `PlannerFanIn` (:8) | exact |
-| `propagateConstraints` (planner/planner-fan-in.ts:195) | `propagate_constraints` (:129) | exact |
-| `propagateUnlimitFromFlippedJoin` (planner/planner-fan-in.ts:68) | `propagate_unlimit_from_flipped_join` (:46) | exact |
-| `reset` (planner/planner-fan-in.ts:56) | `reset` (:38) | exact |
+| `propagateConstraints` (planner/planner-fan-in.ts:195) | `propagate_constraints` (:137) | exact |
+| `propagateUnlimitFromFlippedJoin` (planner/planner-fan-in.ts:68) | `propagate_unlimit_from_flipped_join` (:54) | exact |
+| `reset` (planner/planner-fan-in.ts:56) | `reset` (:46) | exact |
 | `setOutput` (planner/planner-fan-in.ts:47) | `set_output` (:34) | exact |
 
 ### `planner/planner_fan_out.rs`  ⟵  `planner/planner-fan-out.ts`
@@ -843,19 +844,18 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `closestJoinOrSource` (planner/planner-join.ts:139) | `closest_join_or_source` (:80) | exact |
 | `estimateCost` (planner/planner-join.ts:266) | `estimate_cost` (:150) | exact |
 | `flip` (planner/planner-join.ts:154) | `flip` (:84) | exact |
-| `getName` (planner/planner-join.ts:427) | `get_name` (:240) | exact |
+| `getName` (planner/planner-join.ts:427) | `get_name` (:244) | exact |
 | `isFlippable` (planner/planner-join.ts:167) | `is_flippable` (:93) | exact |
+| `output` (planner/planner-join.ts:134) | `output` (:233) | exact |
 | `PlannerJoin` (planner/planner-join.ts:96) | `PlannerJoin` (:37) | exact |
 | `propagateConstraints` (planner/planner-join.ts:202) | `propagate_constraints` (:105) | exact |
 | `propagateUnlimit` (planner/planner-join.ts:186) | `propagate_unlimit` (:97) | exact |
 | `propagateUnlimitFromFlippedJoin` (planner/planner-join.ts:198) | `propagate_unlimit_from_flipped_join` (:101) | exact |
-| `reset` (planner/planner-join.ts:262) | `reset` (:236) | exact |
+| `reset` (planner/planner-join.ts:262) | `reset` (:240) | exact |
 | `setOutput` (planner/planner-join.ts:130) | `set_output` (:76) | exact |
 | `translateConstraintsForFlippedJoin` (planner/planner-join.ts:27) | `translate_constraints_for_flipped_join` (:8) | exact |
 
 🟥 **TS symbols not resolved into this file (1):** `UnflippableJoinError`
-
-🟦 **Rust-only added here (1):** `get_output`
 
 ### `planner/planner_node.rs`  ⟵  `planner/planner-connection.ts`, `planner/planner-node.ts`
 
@@ -1136,14 +1136,11 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `#set` (sqlite/database-storage.ts:119) | `set` (:98) | exact |
 | `ClientGroupStorage` (sqlite/database-storage.ts:8) | `ClientGroupStorage` (:26) | exact |
 | `CREATE_STORAGE_TABLE` (sqlite/database-storage.ts:27) | `CREATE_STORAGE_TABLE` (:15) | exact |
-| `createClientGroupStorage` (sqlite/database-storage.ts:164) | `create_database_storage` (:148) | fuzzy 0.40 |
 | `createStorage` (sqlite/database-storage.ts:10) | `create_storage` (:43) | exact |
 | `DatabaseStorage` (sqlite/database-storage.ts:42) | `DatabaseStorage` (:69) | exact |
 | `destroy` (sqlite/database-storage.ts:13) | `destroy` (:58) | exact |
 
-🟥 **TS symbols not resolved into this file (2):** `#checkpoint`, `#maybeCheckpoint`
-
-🟦 **Rust-only added here (1):** `parse_json_value`
+🟦 **Rust-only added here (2):** `create_database_storage`, `parse_json_value`
 
 ### `sqlite/db.rs`  ⟵  `sqlite/db.ts`
 
@@ -1170,6 +1167,11 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 |---|---|---|
 | `explainQueries` (sqlite/explain-queries.ts:4) | `explain_queries` (:17) | exact |
 
+### `sqlite/internal/statement_cache.rs`  ⟵  _(new)_
+
+
+🟦 **Rust-only added here (4):** `StatementCache`, `max_size`, `prepares`, `use_stmt`
+
 ### `sqlite/interrupt.rs`  ⟵  _(new)_
 
 
@@ -1181,7 +1183,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 |---|---|---|
 | `ZQLiteZeroOptions` (sqlite/options.ts:7) | `ZQLiteZeroOptions` (:13) | exact |
 
-### `sqlite/query_builder.rs`  ⟵  `sqlite/query-builder.ts`
+### `sqlite/query_builder.rs`  ⟵  `sqlite/query-builder.ts`, `sqlite/table-source.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -1244,8 +1246,8 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 |---|---|---|
 | `#decodeSampleIsNull` (sqlite/sqlite-stat-fanout.ts:450) | `decode_sample_is_null` (:332) | exact |
 | `#findIndexForColumns` (sqlite/sqlite-stat-fanout.ts:363) | `find_index_for_columns` (:264) | exact |
-| `#getFanoutFromStat1` (sqlite/sqlite-stat-fanout.ts:300) | `fanout_from_stat1` (:230) | fuzzy 0.75 |
-| `#getFanoutFromStat4` (sqlite/sqlite-stat-fanout.ts:225) | `fanout_from_stat4` (:151) | fuzzy 0.75 |
+| `#getFanoutFromStat1` (sqlite/sqlite-stat-fanout.ts:300) | `get_fanout_from_stat1` (:230) | exact |
+| `#getFanoutFromStat4` (sqlite/sqlite-stat-fanout.ts:225) | `get_fanout_from_stat4` (:151) | exact |
 | `#isPrefixMatch` (sqlite/sqlite-stat-fanout.ts:415) | `is_prefix_match` (:316) | exact |
 | `clearCache` (sqlite/sqlite-stat-fanout.ts:210) | `clear_cache` (:146) | exact |
 | `FanoutResult` (sqlite/sqlite-stat-fanout.ts:6) | `FanoutResult` (:24) | exact |
@@ -1258,21 +1260,22 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `#fetch` (sqlite/table-source.ts:283) | `fetch` (:981) | exact |
-| `#getSchema` (sqlite/table-source.ts:211) | `get_schema` (:1072) | exact |
-| `#writeChange` (sqlite/table-source.ts:429) | `write_change` (:960) | exact |
-| `connect` (sqlite/table-source.ts:224) | `connect` (:734) | exact |
-| `FetchCountMessage` (ivm/snitch.ts:189) | `fetch_count` (:1496) | fuzzy 0.67 |
+| `#fetch` (sqlite/table-source.ts:283) | `fetch` (:1023) | exact |
+| `#getRowStmt` (sqlite/table-source.ts:495) | `get_row_stmt` (:686) | exact |
+| `#getSchema` (sqlite/table-source.ts:211) | `get_schema` (:1114) | exact |
+| `#writeChange` (sqlite/table-source.ts:429) | `write_change` (:1002) | exact |
+| `connect` (sqlite/table-source.ts:224) | `connect` (:776) | exact |
+| `FetchCountMessage` (ivm/snitch.ts:189) | `fetch_count` (:1538) | fuzzy 0.67 |
 | `generateWithYields` (sqlite/table-source.ts:692) | `generate_with_yields` (:364) | exact |
-| `genPush` (sqlite/table-source.ts:411) | `gen_push` (:1339) | exact |
-| `getRow` (sqlite/table-source.ts:519) | `get_row` (:671) | exact |
-| `push` (sqlite/table-source.ts:403) | `push` (:801) | exact |
-| `setDB` (sqlite/table-source.ts:132) | `set_db` (:727) | exact |
+| `genPush` (sqlite/table-source.ts:411) | `gen_push` (:1381) | exact |
+| `getRow` (sqlite/table-source.ts:519) | `get_row` (:712) | exact |
+| `push` (sqlite/table-source.ts:403) | `push` (:843) | exact |
+| `setDB` (sqlite/table-source.ts:132) | `set_db` (:763) | exact |
 | `TableSource` (sqlite/table-source.ts:75) | `TableSource` (:572) | exact |
 
-🟥 **TS symbols not resolved into this file (13):** `#allColumns`, `#getRowStmt`, `#getStatementsFor`, `#mapFromSQLiteTypes`, `#requestToSQL`, `UnsupportedValueError`, `canUseUpdate`, `fromSQLiteType`, `fromSQLiteTypes`, `getUniqueIndexes`, `nonPrimaryValues`, `toSQLiteTypeName`, `toSQLiteTypes`
+🟥 **TS symbols not resolved into this file (5):** `UnsupportedValueError`, `fromSQLiteType`, `fromSQLiteTypes`, `toSQLiteTypeName`, `toSQLiteTypes`
 
-🟦 **Rust-only added here (40):** `LazyRows`, `LazyRowsIter`, `NullInputBase`, `RowErr`, `SharedSnapshotDb`, `applied_change_obeys_ts_sql_null_start_semantics`, `applied_changes_for_request`, `boolean_matches_ts_double_bang`, `check_exists`, `check_exists_failure_propagates_not_false`, `classify_row_error`, `conn_with_rows`, `conn_with_value`, `conv`, `existing_input_uses_replacement_snapshot_connection`, `fetch_reads_all_columns_and_values`, `fetch_resumes_all_rows_after_guard_drops`, `fetch_returns_all_rows_when_gate_under_floor`, `fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`, `integer_over_2_53_panics_like_ts`, `invalid_json_panics_like_ts`, `json_sqlite_text_to_ivm`, `number_string_passthrough`, `past_gate`, `push_body`, `read_error_panics_not_swallowed_to_null`, `sql_param_literal`, `sql_start_matches`, `sqlite_value_to_ivm`, `stream_query`, `stream_query_bind_failure_propagates_not_empty`, `stream_query_busy_propagates_not_empty`, `stream_query_prepare_failure_propagates_not_empty`, `substitute_params`, `table_source_get_row_reads_current_snapshot_with_types`, `try_new`, `valid_json_tagged`, `validate_change`, `with_column_order`
+🟦 **Rust-only added here (42):** `LazyRows`, `LazyRowsIter`, `NullInputBase`, `RowErr`, `SharedSnapshotDb`, `applied_change_obeys_ts_sql_null_start_semantics`, `applied_changes_for_request`, `boolean_matches_ts_double_bang`, `check_exists`, `check_exists_failure_propagates_not_false`, `classify_row_error`, `conn_with_rows`, `conn_with_value`, `conv`, `existing_input_uses_replacement_snapshot_connection`, `fetch_reads_all_columns_and_values`, `fetch_resumes_all_rows_after_guard_drops`, `fetch_returns_all_rows_when_gate_under_floor`, `fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`, `get_row_prepares`, `get_row_prepares_its_statement_once_not_per_row`, `integer_over_2_53_panics_like_ts`, `invalid_json_panics_like_ts`, `json_sqlite_text_to_ivm`, `number_string_passthrough`, `past_gate`, `push_body`, `read_error_panics_not_swallowed_to_null`, `sql_param_literal`, `sql_start_matches`, `sqlite_value_to_ivm`, `stream_query`, `stream_query_bind_failure_propagates_not_empty`, `stream_query_busy_propagates_not_empty`, `stream_query_prepare_failure_propagates_not_empty`, `substitute_params`, `table_source_get_row_reads_current_snapshot_with_types`, `try_new`, `valid_json_tagged`, `validate_change`, `with_column_order`
 
 ### `streamer/mod.rs`  ⟵  `ivm/stream.ts`
 
@@ -1330,7 +1333,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `getLikePredicate` | builder/like.ts:4 | `get_like_predicate` builder/like.rs:15 | ✅ exact |
 | `getLikeOp` | builder/like.ts:17 | `get_like_op` builder/like.rs:31 | ✅ exact |
 | `patternToRegExp` | builder/like.ts:37 | builder/like.rs get_like_predicate | 📌 predicate closure, not regex |
-| `changeToViewChange` | ivm/array-view.ts:15 | `change_to_view_change` ivm/view_apply_change.rs:928 | ✅ exact |
+| `changeToViewChange` | ivm/array-view.ts:15 | `change_to_view_change` ivm/view_apply_change.rs:929 | ✅ exact |
 | `ArrayView` | ivm/array-view.ts:50 | `ArrayView` ivm/array_view.rs:22 | ✅ exact |
 | `data` | ivm/array-view.ts:111 | `data` ivm/array_view.rs:75 | ✅ exact |
 | `addListener` | ivm/array-view.ts:115 | `add_listener` ivm/array_view.rs:80 | ✅ exact |
@@ -1345,14 +1348,14 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `set` | ivm/cap.ts:32 | `set` ivm/cap.rs:48 | ✅ exact |
 | `del` | ivm/cap.ts:33 | `del` ivm/cap.rs:52 | ✅ exact |
 | `Cap` | ivm/cap.ts:52 | `Cap` ivm/cap.rs:88 | ✅ exact |
-| `setOutput` | ivm/cap.ts:79 | `set_output` ivm/cap.rs:265 | ✅ exact |
-| `getSchema` | ivm/cap.ts:83 | `get_schema` ivm/cap.rs:253 | ✅ exact |
-| `fetch` | ivm/cap.ts:87 | `fetch` ivm/cap.rs:269 | ✅ exact |
-| `#initialFetch` | ivm/cap.ts:125 | `initial_fetch` ivm/cap.rs:164 | ✅ exact |
-| `#pushEditChange` | ivm/take.ts:432 | `push_edit_change` ivm/take.rs:686 | ✅ exact |
-| `getCapStateKey` | ivm/cap.ts:300 | `CapState` ivm/cap.rs:26 | 🔁 rename 0.67 |
-| `serializePK` | ivm/cap.ts:315 | `serialize_pk` ivm/cap.rs:155 | ✅ exact |
-| `deserializePKToConstraint` | ivm/cap.ts:319 | — | 🟥 UNRESOLVED |
+| `setOutput` | ivm/cap.ts:79 | `set_output` ivm/cap.rs:271 | ✅ exact |
+| `getSchema` | ivm/cap.ts:83 | `get_schema` ivm/cap.rs:259 | ✅ exact |
+| `fetch` | ivm/cap.ts:87 | `fetch` ivm/cap.rs:275 | ✅ exact |
+| `#initialFetch` | ivm/cap.ts:125 | `initial_fetch` ivm/cap.rs:170 | ✅ exact |
+| `#pushEditChange` | ivm/take.ts:432 | `push_edit_change` ivm/take.rs:695 | ✅ exact |
+| `getCapStateKey` | ivm/cap.ts:300 | `get_cap_state_key` ivm/cap.rs:135 | ✅ exact |
+| `serializePK` | ivm/cap.ts:315 | `serialize_pk` ivm/cap.rs:161 | ✅ exact |
+| `deserializePKToConstraint` | ivm/cap.ts:319 | `deserialize_pk_to_constraint` ivm/cap.rs:605 | ✅ exact |
 | `CaughtNode` | ivm/catch.ts:11 | `CaughtNode` ivm/catch.rs:15 | ✅ exact |
 | `CaughtAddChange` | ivm/catch.ts:18 | `caught_change_to_json` replay.rs:353 | 🔁 rename 0.50 |
 | `CaughtRemoveChange` | ivm/catch.ts:23 | — | 🟥 UNRESOLVED |
@@ -1363,19 +1366,19 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `reset` | ivm/catch.ts:84 | `reset` ivm/catch.rs:72 | ✅ exact |
 | `expandChange` | ivm/catch.ts:93 | `expand_change` ivm/catch.rs:119 | ✅ exact |
 | `expandNode` | ivm/catch.ts:125 | `expand_node` ivm/catch.rs:142 | ✅ exact |
-| `TYPE` | ivm/change-index-enum.ts:1 | — | 🟥 UNRESOLVED |
-| `Node` | ivm/data.ts:10 | `Node` ivm/data.rs:364 | ✅ exact |
+| `TYPE` | ivm/change-index-enum.ts:1 | planner_fan_in.rs node_type | 📌 `type` is a rust keyword: planner_fan_in.rs node_type, planner_fan_out.rs node_type, planner_join.rs join_type; same values |
+| `Node` | ivm/data.ts:10 | `Node` ivm/data.rs:425 | ✅ exact |
 | `OLD_NODE` | ivm/change-index-enum.ts:3 | `old_node` ivm/change.rs:72 | ✅ exact |
 | `ChildData` | ivm/change.ts:7 | `ChildData` ivm/change.rs:21 | ✅ exact |
 | `ChangeIndex` | ivm/change-index.ts:5 | — | 🟥 UNRESOLVED |
-| `ADD` | ivm/change-type-enum.ts:1 | — | 🟥 UNRESOLVED |
-| `REMOVE` | ivm/change-type-enum.ts:2 | `remove_query` engine/mod.rs:809 | 🔁 rename 0.50 |
-| `EDIT` | ivm/change-type-enum.ts:3 | `StableEdit` ivm/memory_source.rs:1239 | 🔁 rename 0.50 |
-| `CHILD` | ivm/change-type-enum.ts:4 | `apply_child` ivm/view_apply_change.rs:503 | 🔁 rename 0.50 |
+| `add` | ivm/view-apply-change.ts:694 | `add` ivm/view_apply_change.rs:413 | ✅ exact |
+| `REMOVE` | ivm/change-type-enum.ts:2 | `remove_query` engine/mod.rs:798 | 🔁 rename 0.50 |
+| `EDIT` | ivm/change-type-enum.ts:3 | `StableEdit` ivm/memory_source.rs:1241 | 🔁 rename 0.50 |
+| `CHILD` | ivm/change-type-enum.ts:4 | `apply_child` ivm/view_apply_change.rs:504 | 🔁 rename 0.50 |
 | `ChangeType` | ivm/change-type.ts:5 | `ChangeType` ivm/change.rs:12 | ✅ exact |
 | `Change` | ivm/change.ts:12 | `Change` ivm/change.rs:33 | ✅ exact |
-| `AddChange` | ivm/change.ts:17 | `push_add_change` ivm/take.rs:469 | 🔁 rename 0.67 |
-| `RemoveChange` | ivm/change.ts:22 | `push_remove_change` ivm/take.rs:581 | 🔁 rename 0.67 |
+| `AddChange` | ivm/change.ts:17 | `push_add_change` ivm/take.rs:478 | 🔁 rename 0.67 |
+| `RemoveChange` | ivm/change.ts:22 | `push_remove_change` ivm/take.rs:590 | 🔁 rename 0.67 |
 | `ChildChange` | ivm/change.ts:29 | `ChildViewChange` ivm/view_apply_change.rs:107 | 🔁 rename 0.67 |
 | `EditChange` | ivm/change.ts:57 | — | 🟥 UNRESOLVED |
 | `makeAddChange` | ivm/change.ts:61 | `make_add_change` ivm/change.rs:81 | ✅ exact |
@@ -1394,13 +1397,13 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `#indexOf` | ivm/constraint.ts:169 | sqlite/sqlite_stat_fanout.rs find_index_for_columns | 📌 index lookup by columns |
 | `has` | ivm/constraint.ts:173 | `has` ivm/memory_source.rs:184 | ✅ exact |
 | `constraintEquals` | ivm/constraint.ts:185 | `constraint_equals` ivm/constraint.rs:157 | ✅ exact |
-| `compareValues` | ivm/data.ts:32 | `compare_values` ivm/data.rs:131 | ✅ exact |
+| `compareValues` | ivm/data.ts:32 | `compare_values` ivm/data.rs:135 | ✅ exact |
 | `NormalizedValue` | ivm/data.ts:78 | — | 🟥 UNRESOLVED |
 | `normalizeUndefined` | ivm/data.ts:85 | ivm/data.rs | 📌 inlined (undefined->null) |
-| `Comparator` | ivm/data.ts:89 | `Comparator` ivm/data.rs:308 | ✅ exact |
-| `makeComparator` | ivm/data.ts:91 | `make_comparator` ivm/data.rs:312 | ✅ exact |
-| `valuesEqual` | ivm/data.ts:112 | `values_equal` ivm/data.rs:219 | ✅ exact |
-| `drainStreams` | ivm/data.ts:120 | `drain_streams` ivm/data.rs:401 | ✅ exact |
+| `Comparator` | ivm/data.ts:89 | `Comparator` ivm/data.rs:369 | ✅ exact |
+| `makeComparator` | ivm/data.ts:91 | `make_comparator` ivm/data.rs:373 | ✅ exact |
+| `valuesEqual` | ivm/data.ts:112 | `values_equal` ivm/data.rs:223 | ✅ exact |
+| `drainStreams` | ivm/data.ts:120 | `drain_streams` ivm/data.rs:462 | ✅ exact |
 | `Exists` | ivm/exists.ts:21 | `Exists` ivm/exists.rs:38 | ✅ exact |
 | `setFilterOutput` | ivm/exists.ts:67 | `set_filter_output` ivm/exists.rs:181 | ✅ exact |
 | `beginFilter` | ivm/exists.ts:71 | `begin_filter` ivm/exists.rs:187 | ✅ exact |
@@ -1431,7 +1434,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `#pushChild` | ivm/join.ts:195 | `push_child` ivm/join.rs:238 | ✅ exact |
 | `#pushChildChange` | ivm/flipped-join.ts:409 | `push_child_change` ivm/flipped_join.rs:324 | ✅ exact |
 | `#pushParent` | ivm/join.ts:129 | `push_parent` ivm/join.rs:185 | ✅ exact |
-| `canonicalKeyForTest` | ivm/flipped-join.ts:572 | `canonical_key_row` ivm/flipped_join.rs:659 | 🔁 rename 0.40 |
+| `canonicalKeyForTest` | ivm/flipped-join.ts:572 | ivm/flipped_join.rs canonical_key | 📌 bigint-widening test wrapper; rust Value needs no widening |
 | `canonicalKey` | ivm/flipped-join.ts:585 | `canonical_key` ivm/flipped_join.rs:664 | ✅ exact |
 | `canonicalValue` | ivm/flipped-join.ts:600 | `canonical_value` ivm/flipped_join.rs:679 | ✅ exact |
 | `generateWithOverlayNoYield` | ivm/join-utils.ts:11 | `generate_with_overlay_no_yield` ivm/join_utils.rs:408 | ✅ exact |
@@ -1457,27 +1460,27 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `getIndexKeys` | ivm/memory-source.ts:253 | sqlite/table_source.rs | 📌 -> SQLite index |
 | `#fetchMulti` | ivm/memory-source.ts:403 | fetch_batched (batched multi-constraint fetch) | 📌 renamed |
 | `genPush` | ivm/memory-source.ts:470 | `gen_push` ivm/memory_source.rs:288 | ✅ exact |
-| `#writeChange` | sqlite/table-source.ts:429 | `write_change` sqlite/table_source.rs:960 | ✅ exact |
+| `#writeChange` | sqlite/table-source.ts:429 | `write_change` sqlite/table_source.rs:1002 | ✅ exact |
 | `generateWithConstraint` | ivm/memory-source.ts:528 | INLINED ivm/source.rs fetch constraint filter | 📌 generator → iterator |
 | `generateWithFilter` | ivm/memory-source.ts:540 | INLINED ivm/source.rs fetch filter arm | 📌 generator → iterator |
 | `genPushAndWriteWithSplitEdit` | ivm/memory-source.ts:548 | INLINED sqlite/table_source.rs write_change | 📌 split-edit arm of write_change |
 | `genPushAndWrite` | ivm/memory-source.ts:604 | INLINED sqlite/table_source.rs write_change | 📌 push+write generator → direct calls |
 | `setOverlay` | ivm/memory-source.ts:673 | sqlite/table_source.rs | 📌 -> SQLite |
-| `generateWithStart` | ivm/memory-source.ts:676 | `generate_with_start` ivm/memory_source.rs:1046 | ✅ exact |
+| `generateWithStart` | ivm/memory-source.ts:676 | `generate_with_start` ivm/memory_source.rs:1048 | ✅ exact |
 | `computeOverlays` | ivm/memory-source.ts:745 | sqlite/table_source.rs | 📌 -> SQLite (overlays via SQLite tx) |
-| `applyMultiConstraintsToOverlays` | ivm/memory-source.ts:795 | `apply_source_overlays` ivm/memory_source.rs:981 | 🔁 rename 0.40 |
+| `applyMultiConstraintsToOverlays` | ivm/memory-source.ts:795 | ivm/constraint.rs row_matches_multi_constraints | 📌 same any-of/all-of semantics; called from memory_source.rs apply_source_overlay_impl |
 | `overlaysForMultiConstraint` | ivm/memory-source.ts:810 | sqlite/table_source.rs | 📌 -> SQLite |
 | `overlaysForStartAt` | ivm/memory-source.ts:829 | sqlite/table_source.rs | 📌 -> SQLite |
 | `overlaysForConstraint` | ivm/memory-source.ts:844 | sqlite/table_source.rs | 📌 -> SQLite |
 | `overlaysForFilterPredicate` | ivm/memory-source.ts:859 | sqlite/table_source.rs | 📌 -> SQLite |
 | `generateWithOverlayInner` | ivm/memory-source.ts:872 | INLINED ivm/source.rs apply_source_overlays | 📌 generator → iterator |
 | `generateWithOverlayInnerUnordered` | ivm/memory-source.ts:952 | INLINED ivm/source.rs apply_source_overlays | 📌 unordered overlay arm |
-| `rowMatchesPK` | ivm/memory-source.ts:976 | `row_matches_multi_constraints` ivm/constraint.rs:61 | 🔁 rename 0.40 |
-| `makeBoundComparator` | ivm/memory-source.ts:997 | `make_partial_bound_comparator` ivm/data.rs:338 | 🔁 rename 0.75 |
-| `compareBounds` | ivm/memory-source.ts:1023 | `compare` ivm/view.rs:74 | 🔁 rename 0.50 |
+| `rowMatchesPK` | ivm/memory-source.ts:976 | `row_matches_pk` ivm/memory_source.rs:1247 | ✅ exact |
+| `makeBoundComparator` | ivm/memory-source.ts:997 | ivm/memory_source.rs compute_index_compare | 📌 sorted-Vec source has no BTree bound sentinels; index order comes from compute_index_compare |
+| `compareBounds` | ivm/memory-source.ts:1023 | ivm/memory_source.rs compute_index_compare | 📌 min/max sentinel compare; no sentinels in the sorted-Vec source |
 | `generateRows` | ivm/memory-source.ts:1040 | INLINED ivm/source.rs fetch scan walk | 📌 generator → iterator |
 | `stringify` | ivm/memory-source.ts:1050 | N/A | 📌 TS memory-source key stringify; Rust uses SQLite keys (D-16) |
-| `mergeSortedStreams` | ivm/memory-source.ts:1074 | `merge_sorted_streams` ivm/memory_source.rs:1401 | ✅ exact |
+| `mergeSortedStreams` | ivm/memory-source.ts:1074 | `merge_sorted_streams` ivm/memory_source.rs:1404 | ✅ exact |
 | `MemoryStorage` | ivm/memory-storage.ts:17 | `MemoryStorage` ivm/memory_storage.rs:13 | ✅ exact |
 | `scan` | ivm/memory-storage.ts:36 | `scan` ivm/memory_storage.rs:44 | ✅ exact |
 | `cloneData` | ivm/memory-storage.ts:47 | ivm/memory_storage.rs | 📌 inlined clone |
@@ -1493,7 +1496,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `pushAccumulatedChanges` | ivm/push-accumulated.ts:87 | `push_accumulated_changes` ivm/push_accumulated.rs:177 | ✅ exact |
 | `mergeRelationships` | ivm/push-accumulated.ts:265 | `merge_relationships` ivm/push_accumulated.rs:23 | ✅ exact |
 | `unreachable` | ivm/push-accumulated.ts:366 | Rust unreachable!() macro | 📌 idiom (D-16) |
-| `makeAddEmptyRelationships` | ivm/push-accumulated.ts:369 | `add_empty_relationships` ivm/push_accumulated.rs:132 | 🔁 rename 0.75 |
+| `makeAddEmptyRelationships` | ivm/push-accumulated.ts:369 | ivm/push_accumulated.rs add_empty_relationships | 📌 TS returns a closure (make*); rust applies directly — factory fold, cited at push_accumulated.rs:131 |
 | `mergeEmpty` | ivm/push-accumulated.ts:421 | ivm/push_accumulated logic | 📌 inlined |
 | `SourceSchema` | ivm/schema.ts:9 | `SourceSchema` ivm/schema.rs:24 | ✅ exact |
 | `next` | ivm/stopable-iterator.ts:13 | `next` ivm/stopable_iterator.rs:35 | ✅ exact |
@@ -1508,7 +1511,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `toChangeRecord` | ivm/snitch.ts:94 | `to_change_record` ivm/snitch.rs:189 | ✅ exact |
 | `FilterSnitch` | ivm/snitch.ts:121 | — | 🟥 UNRESOLVED |
 | `SnitchMessage` | ivm/snitch.ts:183 | `SnitchMessage` ivm/snitch.rs:33 | ✅ exact |
-| `FetchCountMessage` | ivm/snitch.ts:189 | `fetch_count` sqlite/table_source.rs:1496 | 🔁 rename 0.67 |
+| `FetchCountMessage` | ivm/snitch.ts:189 | `fetch_count` sqlite/table_source.rs:1538 | 🔁 rename 0.67 |
 | `FetchMessage` | ivm/snitch.ts:190 | — | 🟥 UNRESOLVED |
 | `PushMessage` | ivm/snitch.ts:191 | — | 🟥 UNRESOLVED |
 | `FilterMessage` | ivm/snitch.ts:192 | — | 🟥 UNRESOLVED |
@@ -1518,12 +1521,12 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `ChildChangeRecord` | ivm/snitch.ts:212 | — | 🟥 UNRESOLVED |
 | `EditChangeRecord` | ivm/snitch.ts:218 | — | 🟥 UNRESOLVED |
 | `LogType` | ivm/snitch.ts:224 | `LogType` ivm/snitch.rs:16 | ✅ exact |
-| `ROW` | ivm/source-change-index-enum.ts:2 | `Row` ivm/data.rs:291 | ✅ exact |
+| `ROW` | ivm/source-change-index-enum.ts:2 | `Row` ivm/data.rs:352 | ✅ exact |
 | `OLD_ROW` | ivm/source-change-index-enum.ts:3 | — | 🟥 UNRESOLVED |
 | `SourceChangeIndex` | ivm/source-change-index.ts:5 | `push_to_source_change` replay.rs:298 | 🔁 rename 0.50 |
 | `SourceChangeAdd` | ivm/source.ts:9 | `source_change_to_change` ivm/memory_source.rs:467 | 🔁 rename 0.67 |
 | `SourceChangeRemove` | ivm/source.ts:10 | — | 🟥 UNRESOLVED |
-| `SourceChangeEdit` | ivm/source.ts:15 | `push_source_change` engine/mod.rs:1692 | 🔁 rename 0.50 |
+| `SourceChangeEdit` | ivm/source.ts:15 | `push_source_change` engine/mod.rs:1693 | 🔁 rename 0.50 |
 | `SourceChange` | ivm/source.ts:17 | `SourceChange` ivm/source.rs:21 | ✅ exact |
 | `makeSourceChangeAdd` | ivm/source.ts:22 | `make_source_change_add` ivm/source.rs:46 | ✅ exact |
 | `makeSourceChangeRemove` | ivm/source.ts:26 | `make_source_change_remove` ivm/source.rs:51 | ✅ exact |
@@ -1538,12 +1541,12 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `consume` | ivm/stream.ts:30 | streamer/mod.rs | 📌 -> Rust Iterator consume |
 | `drainGenerator` | ivm/stream.ts:35 | N/A | 📌 TS generator drain -> Rust Iterator drop/for_each (D-16) |
 | `PartitionKey` | ivm/take.ts:42 | `PartitionKey` ivm/take.rs:99 | ✅ exact |
-| `#getStateAndConstraint` | ivm/take.ts:218 | `get_state_and_constraint` ivm/take.rs:261 | ✅ exact |
-| `#pushWithRowHiddenFromFetch` | ivm/take.ts:677 | `push_with_row_hidden_from_fetch` ivm/take.rs:902 | ✅ exact |
-| `#setTakeState` | ivm/take.ts:686 | `set_take_state` ivm/take.rs:282 | ✅ exact |
-| `getTakeStateKey` | ivm/take.ts:710 | `get_take_state_key` ivm/cap.rs:129 | ✅ exact |
-| `constraintMatchesPartitionKey` | ivm/take.ts:727 | `constraint_matches_partition_key` ivm/take.rs:1069 | ✅ exact |
-| `makePartitionKeyComparator` | ivm/take.ts:745 | `make_partition_key_comparator` ivm/take.rs:1051 | ✅ exact |
+| `#getStateAndConstraint` | ivm/take.ts:218 | `get_state_and_constraint` ivm/take.rs:270 | ✅ exact |
+| `#pushWithRowHiddenFromFetch` | ivm/take.ts:677 | `push_with_row_hidden_from_fetch` ivm/take.rs:911 | ✅ exact |
+| `#setTakeState` | ivm/take.ts:686 | `set_take_state` ivm/take.rs:291 | ✅ exact |
+| `getTakeStateKey` | ivm/take.ts:710 | `get_take_state_key` ivm/take.rs:246 | ✅ exact |
+| `constraintMatchesPartitionKey` | ivm/take.ts:727 | `constraint_matches_partition_key` ivm/take.rs:1078 | ✅ exact |
+| `makePartitionKeyComparator` | ivm/take.ts:745 | `make_partition_key_comparator` ivm/take.rs:1060 | ✅ exact |
 | `UnionFanIn` | ivm/union-fan-in.ts:25 | `UnionFanIn` ivm/union_fan_in.rs:30 | ✅ exact |
 | `#pushInternalChange` | ivm/union-fan-in.ts:145 | `push_internal_change` ivm/union_fan_in.rs:158 | ✅ exact |
 | `fanOutStartedPushing` | ivm/union-fan-in.ts:185 | `fan_out_started_pushing` ivm/union_fan_in.rs:109 | ✅ exact |
@@ -1566,22 +1569,22 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `applyChange` | ivm/view-apply-change.ts:185 | `apply_change` ivm/view_apply_change.rs:122 | ✅ exact |
 | `applyChangeInternal` | ivm/view-apply-change.ts:213 | `apply_change_internal` ivm/view_apply_change.rs:169 | ✅ exact |
 | `applyChanges` | ivm/view-apply-change.ts:555 | `apply_changes` ivm/view_apply_change.rs:144 | ✅ exact |
-| `applyEdit` | ivm/view-apply-change.ts:579 | `apply_edit` ivm/view_apply_change.rs:673 | ✅ exact |
-| `initializeRelationshipsForNewEntryIfAny` | ivm/view-apply-change.ts:625 | `initialize_relationships_for_new_entry_if_any` ivm/view_apply_change.rs:696 | ✅ exact |
+| `applyEdit` | ivm/view-apply-change.ts:579 | `apply_edit` ivm/view_apply_change.rs:674 | ✅ exact |
+| `initializeRelationshipsForNewEntryIfAny` | ivm/view-apply-change.ts:625 | `initialize_relationships_for_new_entry_if_any` ivm/view_apply_change.rs:697 | ✅ exact |
 | `insertAt` | ivm/view-apply-change.ts:719 | array_view.rs Vec::insert | 📌 inlined |
 | `removeAt` | ivm/view-apply-change.ts:732 | array_view.rs Vec::remove | 📌 inlined |
-| `removeAndUpdateRefCount` | ivm/view-apply-change.ts:744 | `remove_and_update_ref_count` ivm/view_apply_change.rs:476 | ✅ exact |
-| `binarySearch` | ivm/view-apply-change.ts:767 | `binary_search` ivm/view_apply_change.rs:808 | ✅ exact |
+| `removeAndUpdateRefCount` | ivm/view-apply-change.ts:744 | `remove_and_update_ref_count` ivm/view_apply_change.rs:477 | ✅ exact |
+| `binarySearch` | ivm/view-apply-change.ts:767 | `binary_search` ivm/view_apply_change.rs:809 | ✅ exact |
 | `assertMetaEntry` | ivm/view-apply-change.ts:790 | N/A | 📌 TS type-guard; Rust Entry struct (D-16) |
 | `assertNumber` | ivm/view-apply-change.ts:793 | N/A | 📌 TS type-guard; Rust ref_count:usize (D-16) |
-| `getSingularEntry` | ivm/view-apply-change.ts:797 | `get_singular_entry` ivm/view_apply_change.rs:832 | ✅ exact |
-| `getOptionalSingularEntry` | ivm/view-apply-change.ts:808 | `get_optional_singular_entry` ivm/view_apply_change.rs:840 | ✅ exact |
-| `getChildEntryList` | ivm/view-apply-change.ts:821 | `get_child_entry_list` ivm/view_apply_change.rs:851 | ✅ exact |
+| `getSingularEntry` | ivm/view-apply-change.ts:797 | `get_singular_entry` ivm/view_apply_change.rs:833 | ✅ exact |
+| `getOptionalSingularEntry` | ivm/view-apply-change.ts:808 | `get_optional_singular_entry` ivm/view_apply_change.rs:841 | ✅ exact |
+| `getChildEntryList` | ivm/view-apply-change.ts:821 | `get_child_entry_list` ivm/view_apply_change.rs:852 | ✅ exact |
 | `assertArray` | ivm/view-apply-change.ts:826 | N/A | 📌 TS type-guard; Rust View enum (D-16) |
-| `makeNewMetaEntry` | ivm/view-apply-change.ts:831 | `make_new_meta_entry` ivm/view_apply_change.rs:773 | ✅ exact |
-| `makeID` | ivm/view-apply-change.ts:851 | `make_id` ivm/view_apply_change.rs:782 | ✅ exact |
-| `incRefCount` | ivm/view-apply-change.ts:859 | `inc_ref_count` ivm/view_apply_change.rs:859 | ✅ exact |
-| `decRefCount` | ivm/view-apply-change.ts:866 | `dec_ref_count` ivm/view_apply_change.rs:866 | ✅ exact |
+| `makeNewMetaEntry` | ivm/view-apply-change.ts:831 | `make_new_meta_entry` ivm/view_apply_change.rs:774 | ✅ exact |
+| `makeID` | ivm/view-apply-change.ts:851 | `make_id` ivm/view_apply_change.rs:783 | ✅ exact |
+| `incRefCount` | ivm/view-apply-change.ts:859 | `inc_ref_count` ivm/view_apply_change.rs:860 | ✅ exact |
+| `decRefCount` | ivm/view-apply-change.ts:866 | `dec_ref_count` ivm/view_apply_change.rs:867 | ✅ exact |
 | `setRefCount` | ivm/view-apply-change.ts:873 | ivm/array_view.rs | 📌 inlined ref-count adjust |
 | `arrayWith` | ivm/view-apply-change.ts:888 | ivm/array_view.rs | 📌 inlined: Vec clone + index assign (D-16) |
 | `setProperty` | ivm/view-apply-change.ts:901 | array_view.rs field assign | 📌 inlined |
@@ -1604,24 +1607,24 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `applyToCondition` | planner/planner-builder.ts:322 | `apply_to_condition` planner/planner_builder.rs:320 | ✅ exact |
 | `applyPlansToAST` | planner/planner-builder.ts:357 | `apply_plans_to_ast` planner/planner_builder.rs:290 | ✅ exact |
 | `PlannerConnection` | planner/planner-connection.ts:59 | `PlannerConnection` planner/planner_connection.rs:27 | ✅ exact |
-| `closestJoinOrSource` | planner/planner-connection.ts:148 | `closest_join_or_source` planner/planner_connection.rs:100 | ✅ exact |
-| `propagateConstraints` | planner/planner-connection.ts:166 | `propagate_constraints` planner/planner_connection.rs:104 | ✅ exact |
-| `estimateCost` | planner/planner-connection.ts:187 | `estimate_cost` planner/planner_connection.rs:133 | ✅ exact |
-| `unlimit` | planner/planner-connection.ts:249 | `unlimit` planner/planner_connection.rs:224 | ✅ exact |
-| `propagateUnlimitFromFlippedJoin` | planner/planner-connection.ts:266 | `propagate_unlimit_from_flipped_join` planner/planner_connection.rs:231 | ✅ exact |
-| `captureConstraints` | planner/planner-connection.ts:281 | `capture_constraints` planner/planner_connection.rs:241 | ✅ exact |
-| `restoreConstraints` | planner/planner-connection.ts:289 | `restore_constraints` planner/planner_connection.rs:245 | ✅ exact |
-| `getConstraintsForDebug` | planner/planner-connection.ts:301 | `get_constraints_for_debug` planner/planner_connection.rs:200 | ✅ exact |
+| `closestJoinOrSource` | planner/planner-connection.ts:148 | `closest_join_or_source` planner/planner_connection.rs:108 | ✅ exact |
+| `propagateConstraints` | planner/planner-connection.ts:166 | `propagate_constraints` planner/planner_connection.rs:112 | ✅ exact |
+| `estimateCost` | planner/planner-connection.ts:187 | `estimate_cost` planner/planner_connection.rs:141 | ✅ exact |
+| `unlimit` | planner/planner-connection.ts:249 | `unlimit` planner/planner_connection.rs:232 | ✅ exact |
+| `propagateUnlimitFromFlippedJoin` | planner/planner-connection.ts:266 | `propagate_unlimit_from_flipped_join` planner/planner_connection.rs:239 | ✅ exact |
+| `captureConstraints` | planner/planner-connection.ts:281 | `capture_constraints` planner/planner_connection.rs:249 | ✅ exact |
+| `restoreConstraints` | planner/planner-connection.ts:289 | `restore_constraints` planner/planner_connection.rs:253 | ✅ exact |
+| `getConstraintsForDebug` | planner/planner-connection.ts:301 | `get_constraints_for_debug` planner/planner_connection.rs:208 | ✅ exact |
 | `getFiltersForDebug` | planner/planner-connection.ts:310 | N/A | 📌 debug introspection; not ported (D-14) |
 | `getSortForDebug` | planner/planner-connection.ts:315 | N/A | 📌 debug introspection; not ported (D-14) |
-| `getConstraintCostsForDebug` | planner/planner-connection.ts:320 | `get_constraint_costs_for_debug` planner/planner_connection.rs:213 | ✅ exact |
+| `getConstraintCostsForDebug` | planner/planner-connection.ts:320 | `get_constraint_costs_for_debug` planner/planner_connection.rs:221 | ✅ exact |
 | `FanoutCostModel` | planner/planner-connection.ts:333 | `FanoutCostModel` planner/planner_node.rs:16 | ✅ exact |
 | `CostModelCost` | planner/planner-connection.ts:335 | `CostModelCost` planner/planner_connection.rs:12 | ✅ exact |
 | `ConnectionCostModel` | planner/planner-connection.ts:340 | `ConnectionCostModel` planner/planner_connection.rs:18 | ✅ exact |
 | `PlannerConstraint` | planner/planner-constraint.ts:8 | `PlannerConstraint` planner/planner_constraint.rs:16 | ✅ exact |
 | `mergeConstraints` | planner/planner-constraint.ts:14 | `merge_constraints` planner/planner_constraint.rs:19 | ✅ exact |
 | `PlannerFanIn` | planner/planner-fan-in.ts:28 | `PlannerFanIn` planner/planner_fan_in.rs:8 | ✅ exact |
-| `convertToUFI` | planner/planner-fan-in.ts:60 | `convert_to_ufi` planner/planner_fan_in.rs:42 | ✅ exact |
+| `convertToUFI` | planner/planner-fan-in.ts:60 | `convert_to_ufi` planner/planner_fan_in.rs:50 | ✅ exact |
 | `PlannerFanOut` | planner/planner-fan-out.ts:11 | `PlannerFanOut` planner/planner_fan_out.rs:8 | ✅ exact |
 | `addOutput` | planner/planner-fan-out.ts:26 | `add_output` planner/planner_fan_out.rs:30 | ✅ exact |
 | `outputs` | planner/planner-fan-out.ts:30 | `outputs` planner/planner_fan_out.rs:37 | ✅ exact |
@@ -1650,7 +1653,7 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `flip` | planner/planner-join.ts:154 | `flip` planner/planner_join.rs:84 | ✅ exact |
 | `isFlippable` | planner/planner-join.ts:167 | `is_flippable` planner/planner_join.rs:93 | ✅ exact |
 | `propagateUnlimit` | planner/planner-join.ts:186 | `propagate_unlimit` planner/planner_join.rs:97 | ✅ exact |
-| `getName` | planner/planner-join.ts:427 | `get_name` planner/planner_join.rs:240 | ✅ exact |
+| `getName` | planner/planner-join.ts:427 | `get_name` planner/planner_join.rs:244 | ✅ exact |
 | `getDebugInfo` | planner/planner-join.ts:436 | N/A | 📌 debug introspection; not ported (D-14) |
 | `UnflippableJoinError` | planner/planner-join.ts:449 | — | 🟥 UNRESOLVED |
 | `getNodeName` | planner/planner-join.ts:460 | N/A | 📌 debug introspection; not ported (D-14) |
@@ -1800,9 +1803,9 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `DatabaseStorage` | sqlite/database-storage.ts:42 | `DatabaseStorage` sqlite/database_storage.rs:69 | ✅ exact |
 | `create` | sqlite/database-storage.ts:43 | `create` snapshotter/snapshotter.rs:500 | ✅ exact |
 | `close` | sqlite/db.ts:146 | `close` sqlite/db.rs:154 | ✅ exact |
-| `#maybeCheckpoint` | sqlite/database-storage.ts:135 | — | 🟥 UNRESOLVED |
-| `#checkpoint` | sqlite/database-storage.ts:141 | — | 🟥 UNRESOLVED |
-| `createClientGroupStorage` | sqlite/database-storage.ts:164 | `create_database_storage` sqlite/database_storage.rs:148 | 🔁 rename 0.40 |
+| `#maybeCheckpoint` | sqlite/database-storage.ts:135 | sqlite/database_storage.rs PRAGMA journal_mode=OFF/synchronous=OFF | 📌 TS's every-N-writes commit trigger; no transaction to batch in rust |
+| `#checkpoint` | sqlite/database-storage.ts:141 | sqlite/database_storage.rs PRAGMA journal_mode=OFF/synchronous=OFF | 📌 TS commits a batched transaction; rust disables journalling instead |
+| `createClientGroupStorage` | sqlite/database-storage.ts:164 | sqlite/database_storage.rs create_storage | 📌 TS DatabaseStorage.createClientGroupStorage (database-storage.ts:157); cited in that file's doc |
 | `mb` | sqlite/db.ts:18 | — | 🟥 UNRESOLVED |
 | `Database` | sqlite/db.ts:22 | `Database` sqlite/db.rs:32 | ✅ exact |
 | `prepare` | sqlite/db.ts:56 | — | 🟥 UNRESOLVED |
@@ -1855,27 +1858,27 @@ TS origin files: **81**  ·  Rust files: **94** (15 new)
 | `SQLiteStatFanout` | sqlite/sqlite-stat-fanout.ts:89 | `SQLiteStatFanout` sqlite/sqlite_stat_fanout.rs:52 | ✅ exact |
 | `getFanout` | sqlite/sqlite-stat-fanout.ts:172 | `get_fanout` sqlite/sqlite_stat_fanout.rs:115 | ✅ exact |
 | `clearCache` | sqlite/sqlite-stat-fanout.ts:210 | `clear_cache` sqlite/sqlite_stat_fanout.rs:146 | ✅ exact |
-| `#getFanoutFromStat4` | sqlite/sqlite-stat-fanout.ts:225 | `fanout_from_stat4` sqlite/sqlite_stat_fanout.rs:151 | 🔁 rename 0.75 |
-| `#getFanoutFromStat1` | sqlite/sqlite-stat-fanout.ts:300 | `fanout_from_stat1` sqlite/sqlite_stat_fanout.rs:230 | 🔁 rename 0.75 |
+| `#getFanoutFromStat4` | sqlite/sqlite-stat-fanout.ts:225 | `get_fanout_from_stat4` sqlite/sqlite_stat_fanout.rs:151 | ✅ exact |
+| `#getFanoutFromStat1` | sqlite/sqlite-stat-fanout.ts:300 | `get_fanout_from_stat1` sqlite/sqlite_stat_fanout.rs:230 | ✅ exact |
 | `#findIndexForColumns` | sqlite/sqlite-stat-fanout.ts:363 | `find_index_for_columns` sqlite/sqlite_stat_fanout.rs:264 | ✅ exact |
 | `#isPrefixMatch` | sqlite/sqlite-stat-fanout.ts:415 | `is_prefix_match` sqlite/sqlite_stat_fanout.rs:316 | ✅ exact |
 | `#decodeSampleIsNull` | sqlite/sqlite-stat-fanout.ts:450 | `decode_sample_is_null` sqlite/sqlite_stat_fanout.rs:332 | ✅ exact |
 | `TableSource` | sqlite/table-source.ts:75 | `TableSource` sqlite/table_source.rs:572 | ✅ exact |
-| `setDB` | sqlite/table-source.ts:132 | `set_db` sqlite/table_source.rs:727 | ✅ exact |
-| `#getStatementsFor` | sqlite/table-source.ts:136 | — | 🟥 UNRESOLVED |
-| `#allColumns` | sqlite/table-source.ts:204 | — | 🟥 UNRESOLVED |
-| `toSQLiteRow` | sqlite/table-source.ts:274 | `sqlite_value_to_row` engine/mod.rs:1674 | 🔁 rename 0.67 |
-| `#mapFromSQLiteTypes` | sqlite/table-source.ts:377 | — | 🟥 UNRESOLVED |
-| `#getRowStmt` | sqlite/table-source.ts:495 | — | 🟥 UNRESOLVED |
-| `getRow` | sqlite/table-source.ts:519 | `get_row` sqlite/table_source.rs:671 | ✅ exact |
-| `#requestToSQL` | sqlite/table-source.ts:534 | — | 🟥 UNRESOLVED |
-| `getUniqueIndexes` | sqlite/table-source.ts:552 | — | 🟥 UNRESOLVED |
+| `setDB` | sqlite/table-source.ts:132 | `set_db` sqlite/table_source.rs:763 | ✅ exact |
+| `#getStatementsFor` | sqlite/table-source.ts:136 | sqlite/table_source.rs write_change (no-op) | 📌 prepared insert/update/delete cache (table-source.ts:136); rust prepares reads only |
+| `#allColumns` | sqlite/table-source.ts:204 | sqlite/query_builder.rs build_select_query | 📌 TS #allColumns is the SELECT column list, produced inside build_select_query |
+| `toSQLiteRow` | sqlite/table-source.ts:274 | `sqlite_value_to_row` engine/mod.rs:1675 | 🔁 rename 0.67 |
+| `#mapFromSQLiteTypes` | sqlite/table-source.ts:377 | sqlite/table_source.rs sqlite_value_to_ivm | 📌 SQLite cell -> IVM Value conversion (see also json_sqlite_text_to_ivm) |
+| `#getRowStmt` | sqlite/table-source.ts:495 | `get_row_stmt` sqlite/table_source.rs:686 | ✅ exact |
+| `getRow` | sqlite/table-source.ts:519 | `get_row` sqlite/table_source.rs:712 | ✅ exact |
+| `#requestToSQL` | sqlite/table-source.ts:534 | sqlite/query_builder.rs build_select_query | 📌 TS #requestToSQL builds the fetch SELECT inline; rust factors it into query_builder |
+| `getUniqueIndexes` | sqlite/table-source.ts:552 | sqlite/table_source.rs try_new | 📌 TS uses it once, to ASSERT the PK is a unique index (table-source.ts:115); not a runtime path |
 | `toSQLiteTypes` | sqlite/table-source.ts:579 | — | 🟥 UNRESOLVED |
 | `toSQLiteTypeName` | sqlite/table-source.ts:587 | — | 🟥 UNRESOLVED |
 | `fromSQLiteTypes` | sqlite/table-source.ts:602 | — | 🟥 UNRESOLVED |
 | `fromSQLiteType` | sqlite/table-source.ts:621 | — | 🟥 UNRESOLVED |
 | `UnsupportedValueError` | sqlite/table-source.ts:659 | — | 🟥 UNRESOLVED |
-| `canUseUpdate` | sqlite/table-source.ts:661 | — | 🟥 UNRESOLVED |
-| `nonPrimaryValues` | sqlite/table-source.ts:675 | — | 🟥 UNRESOLVED |
-| `nonPrimaryKeys` | sqlite/table-source.ts:685 | `set_client_primary_keys` engine/mod.rs:676 | 🔁 rename 0.50 |
+| `canUseUpdate` | sqlite/table-source.ts:661 | sqlite/table_source.rs write_change (no-op) | 📌 TS picks UPDATE over DELETE+INSERT when the PK is unchanged; rust never writes |
+| `nonPrimaryValues` | sqlite/table-source.ts:675 | sqlite/table_source.rs write_change (no-op) | 📌 non-PK values, used only to bind TS's UPDATE params |
+| `nonPrimaryKeys` | sqlite/table-source.ts:685 | sqlite/table_source.rs write_change (no-op) | 📌 non-PK column list, used only to bind TS's UPDATE params |
 | `generateWithYields` | sqlite/table-source.ts:692 | `generate_with_yields` sqlite/table_source.rs:364 | ✅ exact |

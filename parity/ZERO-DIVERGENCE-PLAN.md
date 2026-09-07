@@ -399,9 +399,9 @@ diff-oracle full catalog + mutations) and joins them through the L1 ledger.
   is the non-vacuous proof for wiring fixes (the pre-fix capture is the
   failing state).
 
-## Part 4 — L9: structural 1:1 refactor of the orchestration layer (planned 2026-08-28)
+## Part 4 — L9: structural 1:1 refactor of the orchestration layer (planned 2026-08-28 — stages 0-5 DONE, see Stage 4 for the last item closed 2026-09-07)
 
-**Goal.** The rust-syncer ORCHESTRATION layer (today: `router.rs` 6.7k lines +
+**Goal.** The rust-syncer ORCHESTRATION layer (at planning time: `router.rs` 6.7k lines +
 `sync_engine.rs` + `push_relay.rs` + parts of `ws_server.rs`/`main.rs`) mirrors
 the TS tree file-for-file, function-for-function, and — the part L3 exists
 for — **call-site-for-call-site**: every ported function is invoked from the
@@ -504,7 +504,10 @@ touched except where their callers move.
   failing-first test (that surfacing is a feature, not a hazard). `#clients`
   registry moves here from SyncEngine. `sync_engine.rs` reduced to a
   deprecated re-export shim, deleted at stage end.
-- **Stage 4 — enforcement. IN PROGRESS 2026-08-28**: shim sweep DONE
+- **Stage 4 — enforcement. DONE** (last item, the post-L9 release gate, closed
+  2026-09-07: full ART chain on 3623d1da3 — G8 0 mismatches / 806,419 rows, G25
+  parity 0 violations, negative/chaos/wedge/protocol PASS — after the 2026-09-06
+  sweep on 16597ad7c; pushed. Ratchet now `max_misfiled=31`.) Original log: shim sweep DONE
   (router.rs + sync_engine.rs deleted, all paths repointed); ledger re-bind
   DONE — fixed the extractor's test-module brace double-count that swallowed
   every symbol after a mid-file `mod tests` (TS `Syncer` now binds rust
@@ -512,7 +515,7 @@ touched except where their callers move.
   1:1 tree (workers/syncer.rs::create_connection accept-task `connected`,
   view_syncer.rs forbidden); L1 structural ratchet (`parity_ledger.py syncer
   --enforce-structure`, max_misfiled=24 baseline) wired into local-rust-ci.
-  Remaining: full ART release gate on the post-L9 image, push. Original:
+  Remaining (closed 2026-09-07, above): full ART release gate on the post-L9 image, push. Original:
   L1 ledger re-run (orchestration symbols must
   bind to their TS twins; misfiled → ~0); L3 Tier-2 extended to pin the new
   sanctioned contexts (init on accept task, pong on writer task, handler on
@@ -624,6 +627,39 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
 + `python3 parity/call_topology.py` + `python3 parity/parity_ledger.py syncer
 --enforce-structure` + `bash scripts/local-rust-ci.sh` == PASS.
 
+### 2026-09-07 — fn_parity closed, metric single-owner, ART chain on 3623d1da3
+- [x] fn_parity 0 REVIEW in all three crates: `#cvr` ported (27 SQL sites),
+      `add` / `row_matches_pk` renamed 1:1, planner `output()` asserts like TS
+      (traversal no longer skips a join without output), 6 folds registered.
+- [x] rust-syncer double-counted `cvr.load_attempts` / `load_duration` /
+      `flush_attempts` (second instrument set); removed, pinned by
+      `tests/metric_ownership_test.rs`.
+- [x] Hand-rolled `/metrics` registry removed (204359376); OTLP-only like TS;
+      `active_client_groups`, `max_protocol_version`, `server.startup_duration`,
+      `server.uptime` added; resource labels `host.name` / `process.worker` /
+      `process.runtime.name` (3623d1da3). Collector diff: 17 shared syncer
+      metrics, same kinds/units; TS-only `lock_wait_time` (no `#lock`, I-12);
+      rust-only `cvr_pool_*`, `websocket_queued_*` (inventions).
+- [x] ART chain (xyne-art 40f494b..2b0026f harness fixes): G8 0 mismatches on
+      all pairs incl. 806,419 rows; G25 parity 14/0 violations; negative 8/8;
+      chaos, wedge, protocol, port-probes PASS; soak 20 min no leak signal.
+      Not verdicts: G15/G18/G20/G22 (rerun queued as 6e/7c/8b), G24 (harness
+      cannot bootstrap a 71 GB replica), G5/G5b (no blessed baseline), G14, D4.
+- [ ] **Open, engine-side:** memory — `scopedCollectionsWithItems` alone
+      hydrates 795,163 rows into one CG and costs ~25 GB (rust) / ~32 GB (TS);
+      both engines OOM at 24g/32g in that pair's resume phase. Resume/catch-up
+      on a CG that size is UNVERIFIED. I-16 advance-budget divergence still
+      open. Stage-6 `:02` terminal-cookie (config-poke) asymmetry unexplained.
+- [ ] **Open, coverage:** writes = 2 read-tracking mutation types (69% of prod
+      write volume; no create/edit/delete through the push relay under the
+      oracle; `--write-parity` never run); G29 85-151 prod shapes never
+      hydrated; frameseq / lifecycle / starvation / cascade / oversample /
+      refresh lanes idle; L2 rust-cvr 85% with 31 pure fns (rowKey/schema
+      builders, classifiers) lacking a TS-golden fixture.
+- [ ] Sandbox: per-user transform limit is 300/60 s (`zeroRateLimiter.ts`);
+      every "429 capacity cliff" so far was a single-identity artifact
+      (`--users N` + pool flags now reach every gate).
+
 ### In flight (this session)
 - [x] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4` — superseded
       by the later gates (7b6746587 G32-G42, 6f2ce89fe sweep, 1e919acdb frame
@@ -720,7 +756,7 @@ Closed 2026-09-04 (each with a test proven failing-first):
       (proven failing-first).
 
 ### Larger, optional (decide before starting)
-- [ ] **Syncer misfiled tail**: drive the 25-entry L1 ratchet list down
+- [ ] **Syncer misfiled tail**: drive the 31-entry L1 ratchet list down (31 on 2026-09-07, `max_misfiled=31`)
       (`parity_ledger.py syncer --enforce-structure` prints it) — mostly
       fuzzy-matcher noise + documented folds; only worth it with a matcher
       improvement (per-file tie-break) or symbol moves with real value.
@@ -814,7 +850,15 @@ the same reason).
 | `#removeExpiredQueries` / `deleteClients` route through `#syncQueryPipelineSet` | — (rust `remove_expired_queries` / `apply_client_deletions` do not sync) | — | **CLOSED 2026-09-03** — `remove_expired_queries` and `delete_clients` now run `sync_query_pipeline_set(Missing)` (TS view-syncer.ts:644 / 1160-1167; background ctx for expiry, the caller's for deleteClients); pinned by `delete_clients_resyncs_the_pipeline_set_like_update_cvr_config` + `remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines` |
 | Cooperative IVM yielding (`yieldThresholdMs`, TS default **10 ms**; **2.5 ms** while a priority op runs, syncer.ts:210-213) | — (`pipelines.hydrate` / `pipelines.advance` take a **sync** `FnMut(&RowChange)` and run to completion inline on the executor thread; no await point exists anywhere in the row path) | — | **CLOSED 2026-09-03** — D1 hydrate/advance time-slicing (`yield_threshold_ms` selector in `pipeline_driver.rs`, commits 6f5696775 / c715cc636 / 831f7b8bd); the row below described the pre-D1 state |
 
-### The yield gap (identified 2026-09-02, code-confirmed — not yet closed)
+### The yield gap (identified 2026-09-02 — CLOSED 2026-09-03 by I-12)
+
+**Status 2026-09-07:** closed. Hydration slicing landed in 6f5696775, advance
+slicing in c715cc636, and the timer's execution-time (not wall) clock in
+16597ad7c; registered as I-12 in INVENTIONS.md with `TimeSliceTimer` /
+`yield_process` in view_syncer.rs (port of TS `TimeSliceTimer`,
+view-syncer.ts:2943-3010). The analysis below is the PRE-FIX description,
+kept for the reasoning; the second paragraph ("Rust. There is no yield at
+all") no longer describes the code.
 
 **TS.** Long IVM work is chopped into ~10 ms slices. `TableSource.fetch` interleaves a
 literal `'yield'` sentinel into its `Stream<Node>` whenever

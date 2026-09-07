@@ -1,14 +1,16 @@
-//! Process-wide metrics — a Rust analog of the OTel instruments the TS
-//! view-syncer maintains (`#hydrations`, `#pipelineResets`, hydration/advance
-//! timings, pokes, …). The CG threads (which own the `!Send` `SyncEngine`)
-//! record into these atomically; the HTTP handlers read snapshots on the tokio
-//! thread — `/statz` returns JSON, `/metrics` returns Prometheus text.
+//! Process-wide metrics — the OTel instruments the TS view-syncer maintains
+//! (`#hydrations`, `#pipelineResets`, hydration/advance timings, pokes, …),
+//! ported name-for-name on the `zero` meter. The CG threads (which own the
+//! `!Send` `SyncEngine`) record into them; a few atomic counters back the
+//! `/statz` JSON snapshot read on the tokio thread.
 //!
-//! TS pushes OTLP to a collector; here we EXPOSE a Prometheus `/metrics` scrape
-//! endpoint instead (pull vs push) — the ART telemetry gate scrapes
-//! `zero_sync_*_seconds_bucket`/`_count` histograms, which this emits with the
-//! same `zero_sync_*` names. Rendering is hand-rolled (no OTel SDK dependency)
-//! and fully unit-testable.
+//! Export is OTLP push only, exactly like TS (`server/otel_start.rs`, gated
+//! on the same env as `packages/otel/src/enabled.ts`). The hand-rolled
+//! Prometheus `/metrics` registry this file used to render was removed in
+//! 204359376 (2026-09-07): TS has no pull endpoint, and the ART G17 gate
+//! scrapes the collector. Instruments owned by another TS class live in that
+//! class's port (CVRStore's in rust-cvr/src/otel_metrics.rs — see
+//! tests/metric_ownership_test.rs).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};

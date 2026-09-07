@@ -2,16 +2,22 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **552** · ✅ COVERED **508** · 🟥 GAP (pure, untested) **11** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **508/519 = 98%**
+- Rust fns total **561** · ✅ COVERED **509** · 🟥 GAP (pure, untested) **18** · ⚙️ IO (integration diff) **23** · ◻️ infra/metrics **8** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **509/527 = 97%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
-## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 11
+## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 18
 
 | fn | file | signature |
 |---|---|---|
-| `deserialize` | protocol/error.rs | `fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {` |
+| `deserialize` | protocol.rs | `fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {` |
+| `optional_no_null` | protocol.rs | `pub fn optional_no_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>` |
+| `serialize` | protocol.rs | `fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {` |
+| `expecting` | protocol/version.rs | `fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {` |
+| `visit_none` | protocol/version.rs | `fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {` |
+| `visit_str` | protocol/version.rs | `fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {` |
+| `visit_unit` | protocol/version.rs | `fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {` |
 | `init_metrics` | server/otel_start.rs | `pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {` |
 | `metrics_enabled` | server/otel_start.rs | `fn metrics_enabled() -> bool {` |
 | `add_centroid_list` | tdigest.rs | `pub fn add_centroid_list(&mut self, centroid_list: Vec<Centroid>) {` |
@@ -19,9 +25,10 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `centroids` | tdigest.rs | `pub fn centroids(&mut self) -> Vec<Centroid> {` |
 | `from_json` | tdigest.rs | `pub fn from_json(data: &[f64]) -> Result<Self, String> {` |
 | `merge` | tdigest.rs | `pub fn merge(&mut self, t2: &mut TDigest) {` |
-| `metrics_prometheus` | workers/syncer.rs | `pub fn metrics_prometheus(&self) -> String {` |
+| `active_client_groups` | workers/syncer.rs | `pub fn active_client_groups(&self) -> usize {` |
 | `metrics_snapshot` | workers/syncer.rs | `pub fn metrics_snapshot(&self) -> serde_json::Value {` |
 | `send_notification` | workers/syncer.rs | `pub fn send_notification(&self, cg_id: &str, notification: serde_json::Value) -> bool {` |
+| `total_client_groups` | workers/syncer.rs | `pub fn total_client_groups(&self) -> u64 {` |
 
 ## ◻️ NON-DIFFERENTIABLE — documented n/a (no un-pinned body) — 3
 
@@ -31,7 +38,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 508
+## ✅ COVERED — body pinned to TS fixture — 509
 
 | fn | file | signature |
 |---|---|---|
@@ -157,24 +164,22 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `snapshot` | live_count.rs | `pub fn snapshot() -> String {` |
 | `active_clients` | observability/metrics.rs | `fn active_clients() -> &'static UpDownCounter<i64> {` |
 | `add` | observability/metrics.rs | `pub fn add(field: &AtomicU64, n: u64) {` |
-| `cvr_attempt_otel` | observability/metrics.rs | `fn cvr_attempt_otel() -> &'static CvrAttemptOtel {` |
 | `cvr_flush_failures` | observability/metrics.rs | `fn cvr_flush_failures() -> &'static Counter<u64> {` |
 | `failed_client_groups` | observability/metrics.rs | `fn failed_client_groups() -> &'static Counter<u64> {` |
 | `fmt` | observability/metrics.rs | `fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {` |
+| `mutation_otel` | observability/metrics.rs | `fn mutation_otel() -> &'static MutationOtel {` |
 | `now_ms` | observability/metrics.rs | `fn now_ms() -> i64 {` |
-| `observe_millis` | observability/metrics.rs | `pub fn observe_millis(&self, ms: f64) {` |
-| `observe_secs` | observability/metrics.rs | `pub fn observe_secs(&self, v: f64) {` |
 | `proto_attr` | observability/metrics.rs | `fn proto_attr(protocol_version: u32) -> KeyValue {` |
 | `query_transform_otel` | observability/metrics.rs | `fn query_transform_otel() -> &'static QueryTransformOtel {` |
 | `record_active_client_delta` | observability/metrics.rs | `pub fn record_active_client_delta(delta: i64, protocol_version: u32) {` |
 | `record_advance` | observability/metrics.rs | `pub fn record_advance(&self, elapsed_ms: f64) {` |
-| `record_cvr_flush_attempt` | observability/metrics.rs | `pub fn record_cvr_flush_attempt(success: bool) {` |
+| `record_client_protocol_version` | observability/metrics.rs | `pub fn record_client_protocol_version(protocol_version: u32) {` |
 | `record_cvr_flush_failure` | observability/metrics.rs | `pub fn record_cvr_flush_failure() {` |
-| `record_cvr_load_attempt` | observability/metrics.rs | `pub fn record_cvr_load_attempt(success: bool, elapsed_ms: f64) {` |
 | `record_e2e_serving_lag` | observability/metrics.rs | `pub fn record_e2e_serving_lag(lag_ms: f64) {` |
 | `record_e2e_serving_lag_clamp` | observability/metrics.rs | `pub fn record_e2e_serving_lag_clamp() {` |
 | `record_fail_group` | observability/metrics.rs | `pub fn record_fail_group(reason: &'static str) {` |
 | `record_hydration` | observability/metrics.rs | `pub fn record_hydration(&self, elapsed_ms: f64) {` |
+| `record_push` | observability/metrics.rs | `pub fn record_push(client_group_id: &str, mutation_count: u64) {` |
 | `record_query_transformation` | observability/metrics.rs | `pub fn record_query_transformation(success: bool) {` |
 | `record_query_transformation_hash_change` | observability/metrics.rs | `pub fn record_query_transformation_hash_change() {` |
 | `record_query_transformation_no_op` | observability/metrics.rs | `pub fn record_query_transformation_no_op() {` |
@@ -189,8 +194,6 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `record_ws_queued_bytes_delta` | observability/metrics.rs | `pub fn record_ws_queued_bytes_delta(delta: i64) {` |
 | `record_ws_queued_delta` | observability/metrics.rs | `pub fn record_ws_queued_delta(delta: i64) {` |
 | `record_ws_shed` | observability/metrics.rs | `pub fn record_ws_shed(reason: &'static str) {` |
-| `render` | observability/metrics.rs | `fn render(&self, name: &str, help: &str, out: &mut String) {` |
-| `render_prometheus` | observability/metrics.rs | `pub fn render_prometheus(&self, active_client_groups: u64) -> String {` |
 | `serving_lag_otel` | observability/metrics.rs | `fn serving_lag_otel() -> &'static ServingLagOtel {` |
 | `view_syncer_hydration_otel` | observability/metrics.rs | `fn view_syncer_hydration_otel() -> &'static OtelHistogram<f64> {` |
 | `ws_connection_failures` | observability/metrics.rs | `fn ws_connection_failures() -> &'static Counter<u64> {` |
@@ -200,6 +203,8 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `ws_queued_bytes_gauge` | observability/metrics.rs | `fn ws_queued_bytes_gauge() -> &'static opentelemetry::metrics::ObservableGauge<i64> {` |
 | `ws_queued_frames_gauge` | observability/metrics.rs | `fn ws_queued_frames_gauge() -> &'static opentelemetry::metrics::ObservableGauge<i64> {` |
 | `ws_sheds` | observability/metrics.rs | `fn ws_sheds() -> &'static Counter<u64> {` |
+| `as_f64` | protocol.rs | `pub fn as_f64(self) -> f64 {` |
+| `from` | protocol.rs | `fn from(v: f64) -> Self {` |
 | `connected_message` | protocol/connect.rs | `pub fn connected_message(wsid: &str, app_id: &str, shard_num: u32) -> Value {` |
 | `decode_sec_protocols` | protocol/connect.rs | `pub fn decode_sec_protocols(header: &str) -> Result<SecProtocols, DecodeError> {` |
 | `downstream_message` | protocol/down.rs | `pub fn downstream_message(msg_type: &str, body: &impl Serialize) -> Value {` |
@@ -215,8 +220,11 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `unauthorized` | protocol/error.rs | `pub fn unauthorized(message: impl Into<String>) -> Self {` |
 | `version_not_supported` | protocol/error.rs | `pub fn version_not_supported(message: impl Into<String>) -> Self {` |
 | `pong_message` | protocol/pong.rs | `pub fn pong_message() -> Value {` |
+| `hex4` | protocol/up.rs | `fn hex4(b: &[u8], at: usize) -> Option<u32> {` |
+| `parse_frame_json` | protocol/up.rs | `pub fn parse_frame_json(text: &str) -> Result<Vec<Value>, serde_json::Error> {` |
 | `parse_upstream` | protocol/up.rs | `pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {` |
 | `parse_upstream_array` | protocol/up.rs | `pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error> {` |
+| `replace_unpaired_surrogate_escapes` | protocol/up.rs | `fn replace_unpaired_surrogate_escapes(text: &str) -> Option<String> {` |
 | `add_metric` | server/inspector_delegate.rs | `pub fn add_metric(&mut self, metric: Metric, value: f64, query_id: &str) {` |
 | `add_query` | server/inspector_delegate.rs | `pub fn add_query(&mut self, query_id: &str, ast: Value) {` |
 | `get_ast_for_query` | server/inspector_delegate.rs | `pub fn get_ast_for_query(&self, query_id: &str) -> Option<&Value> {` |
@@ -317,7 +325,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `destroy` | services/view_syncer/pipeline_driver.rs | `pub fn destroy(&mut self) {` |
 | `destroy_pipeline` | services/view_syncer/pipeline_driver.rs | `fn destroy_pipeline(&mut self, query_id: &str, stop_reason: &'static str) {` |
 | `elapsed_lap` | services/view_syncer/pipeline_driver.rs | `fn elapsed_lap(&self) -> f64;` |
-| `finish` | services/view_syncer/pipeline_driver.rs | `pub fn finish(mut self) {` |
+| `finish` | services/view_syncer/pipeline_driver.rs | `pub fn finish(mut self) -> Result<(), String> {` |
 | `finish_advance` | services/view_syncer/pipeline_driver.rs | `fn finish_advance(&mut self, stream: AdvanceStream) -> Result<AdvanceOutcome, String> {` |
 | `finish_hydrate` | services/view_syncer/pipeline_driver.rs | `fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[(String, String)]) {` |
 | `get_row` | services/view_syncer/pipeline_driver.rs | `pub fn get_row(&self, table: &str, pk: &[(String, Value)]) -> Option<Row> {` |
@@ -420,13 +428,14 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `on_new_connection` | services/view_syncer/view_syncer.rs | `async fn on_new_connection(` |
 | `on_notification` | services/view_syncer/view_syncer.rs | `async fn on_notification(&mut self, notification: serde_json::Value) {` |
 | `parse_desired_queries_patch` | services/view_syncer/view_syncer.rs | `fn parse_desired_queries_patch(` |
+| `process_clock_ms` | services/view_syncer/view_syncer.rs | `fn process_clock_ms() -> f64 {` |
 | `protocol_version_for_ws` | services/view_syncer/view_syncer.rs | `pub fn protocol_version_for_ws(&self, ws_id: &str) -> u32 {` |
 | `publish_serving_lag` | services/view_syncer/view_syncer.rs | `fn publish_serving_lag(&mut self) {` |
 | `query_context_for` | services/view_syncer/view_syncer.rs | `fn query_context_for(&self, client_id: &str, ws_id: &str) -> Option<CustomQueryContext> {` |
 | `query_count` | services/view_syncer/view_syncer.rs | `fn query_count(&mut self) -> usize {` |
 | `record_transform_error` | services/view_syncer/view_syncer.rs | `fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<serde_js…` |
 | `replica_path` | services/view_syncer/view_syncer.rs | `pub fn replica_path(&self) -> Option<&str> {` |
-| `reset_pipelines_and_rehydrate` | services/view_syncer/view_syncer.rs | `async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {` |
+| `reset_pipelines_and_rehydrate` | services/view_syncer/view_syncer.rs | `async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, message: &str) {` |
 | `row_count` | services/view_syncer/view_syncer.rs | `fn row_count(&self) -> usize {` |
 | `run_auth_maintenance` | services/view_syncer/view_syncer.rs | `async fn run_auth_maintenance(&mut self) {` |
 | `run_background_retransform` | services/view_syncer/view_syncer.rs | `async fn run_background_retransform(&mut self) {` |
@@ -497,7 +506,6 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `is_transient_socket_message` | workers/connection.rs | `fn is_transient_socket_message(msg_lower: &str) -> bool {` |
 | `send_error` | workers/connection.rs | `pub fn send_error(&self, error: ErrorBody) {` |
 | `ws_id` | workers/connection.rs | `pub fn ws_id(&self) -> &str {` |
-| `active_client_groups` | workers/syncer.rs | `pub fn active_client_groups(&self) -> usize {` |
 | `bound_replica_ready_states` | workers/syncer.rs | `pub fn bound_replica_ready_states(replica_ready_states: &mut Vec<ReplicaReadyState>) {` |
 | `broadcast_notification` | workers/syncer.rs | `pub fn broadcast_notification(&self, notification: serde_json::Value) -> usize {` |
 | `cg_count` | workers/syncer.rs | `pub fn cg_count(&self) -> usize {` |
@@ -544,14 +552,13 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `send_command` | ws_sink.rs | `fn send_command(&self, command: WsCommand) -> Result<(), String> {` |
 | `with_limits` | ws_sink.rs | `pub fn with_limits(tx: mpsc::UnboundedSender<WsCommand>, limits: Arc<SinkLimits>) -> Se…` |
 
-## ⚙️ IO — async/DB/actor/transport, use the integration diff — 24
+## ⚙️ IO — async/DB/actor/transport, use the integration diff — 23
 
 | fn | file | signature |
 |---|---|---|
 | `bind_http_listener` | http_server.rs | `pub async fn bind_http_listener(addr: SocketAddr) -> tokio::net::TcpListener {` |
 | `check_notify_request` | http_server.rs | `fn check_notify_request(` |
 | `heapz_handler` | http_server.rs | `async fn heapz_handler(` |
-| `metrics_handler` | http_server.rs | `async fn metrics_handler(State(state): State<Arc<HttpServerState>>) -> impl IntoResponse {` |
 | `notify_broadcast_handler` | http_server.rs | `async fn notify_broadcast_handler(` |
 | `notify_handler` | http_server.rs | `async fn notify_handler(` |
 | `readyz_handler` | http_server.rs | `async fn readyz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json…` |

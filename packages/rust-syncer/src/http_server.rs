@@ -1,11 +1,13 @@
-//! HTTP server — axum-based endpoints for /statz, /metrics, /heapz, /notify/:cg_id.
+//! HTTP server — axum-based endpoints for /statz, /heapz, /notify/:cg_id.
 //!
 //! The HTTP server runs on the tokio runtime. It serves:
 //! - `GET /statz` — server statistics (active CGs, connections, memory)
-//! - `GET /metrics` — Prometheus text-format metrics (scraped by the ART G17
-//!   telemetry gate; `zero_sync_*` counters + latency histograms)
 //! - `GET /heapz` — heap snapshot placeholder (V8 compatibility)
 //! - `POST /notify/:cg_id` — change-streamer notification endpoint
+//!
+//! Metrics are NOT served here: like TS, they are OTLP-pushed only
+//! (`server/otel_start.rs`; the hand-rolled `/metrics` registry was removed in
+//! 204359376, 2026-09-07 — the ART G17 gate scrapes the collector).
 //!
 //! Notifications are forwarded to the appropriate CG thread via a channel.
 

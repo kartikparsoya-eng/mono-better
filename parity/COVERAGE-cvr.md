@@ -2,29 +2,64 @@
 
 _COVERED = reachable (transitive closure over the crate call graph) from a differential harness: parity_check.rs + the flush/inspect/catchup PG differentials + the sequence fuzzer (seq_replay.rs), which drive the real API against real-TS goldens with 150+ fuzzed programs + property tests. Reachability ≠ every-branch-exercised, but it is a tight proxy._
 
-- Rust fns total **186** · ✅ COVERED **162** · 🟥 GAP (pure, untested) **0** · ⚙️ IO (integration diff) **13** · ◻️ infra/metrics **4** · ◻️ documented n/a **7**
-- Body-differential coverage of the **unit-testable pure surface**: **162/162 = 100%**
+- Rust fns total **232** · ✅ COVERED **182** · 🟥 GAP (pure, untested) **31** · ⚙️ IO (integration diff) **9** · ◻️ infra/metrics **4** · ◻️ documented n/a **6**
+- Body-differential coverage of the **unit-testable pure surface**: **182/213 = 85%**
 
-## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 0
+> ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `app_schema` (shards.rs), `test_clear_desired_queries` (cvr.rs), `test_delete_client` (cvr.rs), `test_delete_client_not_found` (cvr.rs), `test_delete_desired_queries` (cvr.rs), `test_delete_unreferenced_rows` (cvr.rs), `test_ensure_client_creates_client_and_internal_queries` (cvr.rs), `test_ensure_client_idempotent` (cvr.rs), `test_flush_records_signature_drift_only_when_changed` (cvr.rs), `test_flush_with_signature_provider` (cvr.rs), `test_put_desired_queries_new` (cvr.rs), `test_put_desired_queries_no_change` (cvr.rs), `test_received_new_row` (cvr.rs), `test_received_no_bump_changed_row_returns_err_not_panic` (cvr.rs), `test_received_null_then_reref_drops_stale_existing_refs` (cvr.rs), `test_received_unref_row` (cvr.rs), `test_set_client_schema_mismatch` (cvr.rs), `test_set_client_schema_new` (cvr.rs), `test_set_client_schema_same` (cvr.rs), `test_track_queries_executed` (cvr.rs), `test_track_queries_removed` (cvr.rs), `test_unref_empty_row_version_bumps_patch_version` (cvr.rs), `test_updated_version_tracks_live_cvr_version` (cvr.rs)
 
-_none_
+## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 31
 
-## ◻️ NON-DIFFERENTIABLE — documented n/a (no un-pinned body) — 7
+| fn | file | signature |
+|---|---|---|
+| `make_query_driven_updater` | cvr.rs | `fn make_query_driven_updater(cvr: CVR, state_version: &str) -> CVRQueryDrivenUpdater {` |
+| `make_shard` | cvr.rs | `fn make_shard() -> ShardID {` |
+| `make_test_cvr` | cvr.rs | `fn make_test_cvr() -> CVR {` |
+| `test_clear_desired_queries` | cvr.rs | `fn test_clear_desired_queries() {` |
+| `test_delete_client` | cvr.rs | `fn test_delete_client() {` |
+| `test_delete_client_not_found` | cvr.rs | `fn test_delete_client_not_found() {` |
+| `test_delete_desired_queries` | cvr.rs | `fn test_delete_desired_queries() {` |
+| `test_delete_unreferenced_rows` | cvr.rs | `fn test_delete_unreferenced_rows() {` |
+| `test_ensure_client_creates_client_and_internal_queries` | cvr.rs | `fn test_ensure_client_creates_client_and_internal_queries() {` |
+| `test_ensure_client_idempotent` | cvr.rs | `fn test_ensure_client_idempotent() {` |
+| `test_flush_records_signature_drift_only_when_changed` | cvr.rs | `fn test_flush_records_signature_drift_only_when_changed() {` |
+| `test_flush_with_signature_provider` | cvr.rs | `fn test_flush_with_signature_provider() {` |
+| `test_inactivate_missing_client_state_does_not_fabricate_entry` | cvr.rs | `fn test_inactivate_missing_client_state_does_not_fabricate_entry() {` |
+| `test_put_desired_queries_new` | cvr.rs | `fn test_put_desired_queries_new() {` |
+| `test_put_desired_queries_no_change` | cvr.rs | `fn test_put_desired_queries_no_change() {` |
+| `test_query_updater_bumps_version_on_new_state_version` | cvr.rs | `fn test_query_updater_bumps_version_on_new_state_version() {` |
+| `test_query_updater_does_not_bump_on_same_state_version` | cvr.rs | `fn test_query_updater_does_not_bump_on_same_state_version() {` |
+| `test_received_new_row` | cvr.rs | `fn test_received_new_row() {` |
+| `test_received_no_bump_changed_row_returns_err_not_panic` | cvr.rs | `fn test_received_no_bump_changed_row_returns_err_not_panic() {` |
+| `test_received_null_then_reref_drops_stale_existing_refs` | cvr.rs | `fn test_received_null_then_reref_drops_stale_existing_refs() {` |
+| `test_received_unref_row` | cvr.rs | `fn test_received_unref_row() {` |
+| `test_set_client_schema_mismatch` | cvr.rs | `fn test_set_client_schema_mismatch() {` |
+| `test_set_client_schema_new` | cvr.rs | `fn test_set_client_schema_new() {` |
+| `test_set_client_schema_same` | cvr.rs | `fn test_set_client_schema_same() {` |
+| `test_set_profile_id` | cvr.rs | `fn test_set_profile_id() {` |
+| `test_track_queries_executed` | cvr.rs | `fn test_track_queries_executed() {` |
+| `test_track_queries_removed` | cvr.rs | `fn test_track_queries_removed() {` |
+| `test_unref_empty_row_version_bumps_patch_version` | cvr.rs | `fn test_unref_empty_row_version_bumps_patch_version() {` |
+| `test_updated_version_tracks_live_cvr_version` | cvr.rs | `fn test_updated_version_tracks_live_cvr_version() {` |
+| `next_cvr_flush_id` | cvr_store.rs | `pub fn next_cvr_flush_id() -> u64 {` |
+| `app_schema` | shards.rs | `pub fn app_schema(shard: &ShardID) -> String {` |
+
+## ◻️ NON-DIFFERENTIABLE — documented n/a (no un-pinned body) — 6
 
 | fn | file | why not a body-differential |
 |---|---|---|
 | `catchup_reader` | cvr_store.rs | thin handle ctor (clones pool/schema/cvr_id); the reader's DB work is covered by the catchup PG differential |
 | `close` | client_handler.rs | lifecycle side-effect (`eprintln!` + `downstream.cancel()`) — no differentiable output |
-| `force_updates` | cvr_store.rs | set-insert of the already-pinned `row_id_string(id)`; no un-pinned logic of its own |
 | `has_pending_writes` | cvr_store.rs | trivial getter — `!self.pending.is_empty()` |
 | `row_count` | cvr_store.rs | trivial getter — returns `self.row_count` |
 | `send_query_transform_failed_error` | client_handler.rs | documented TS↔Rust protocol divergence (TS `fail(ProtocolError)` channel vs Rust `['error', …]`); byte-parity is NOT the contract |
 | `updated_version` | cvr.rs | trivial getter — returns `self.base.cvr.version` |
 
-## ✅ COVERED — body pinned to TS fixture — 162
+## ✅ COVERED — body pinned to TS fixture — 182
 
 | fn | file | signature |
 |---|---|---|
+| `cursor_page_size` | change_processor.rs | `pub fn cursor_page_size(&self) -> usize {` |
+| `cursor_page_size_from` | change_processor.rs | `fn cursor_page_size_from(env_val: Option<&str>) -> usize {` |
 | `new` | change_processor.rs | `pub fn new(updater: &'a mut CVRQueryDrivenUpdater, pokers: &'a MultiPoker) -> Self {` |
 | `with_page_size` | change_processor.rs | `pub fn with_page_size(` |
 | `acquire_chain` | client_handler.rs | `fn acquire_chain(&self, state: &mut PokeState) {` |
@@ -53,7 +88,7 @@ _none_
 | `update_lmids` | client_handler.rs | `fn update_lmids(&self, state: &mut PokeState, patch: &RowPatch) -> Result<(), String> {` |
 | `upstream_schema` | client_handler.rs | `fn upstream_schema(shard: &ShardID) -> String {` |
 | `version` | client_handler.rs | `pub fn version(&self) -> NullableCVRVersion {` |
-| `assert_new_version` | cvr.rs | `fn assert_new_version(&self) -> CVRVersion {` |
+| `assert_new_version` | cvr.rs | `fn assert_new_version(&self) -> Result<CVRVersion, String> {` |
 | `assert_not_internal` | cvr.rs | `pub fn assert_not_internal(query: &QueryRecord) {` |
 | `clear_desired_queries` | cvr.rs | `pub fn clear_desired_queries(&mut self, client_id: &str) -> Vec<PatchToVersion> {` |
 | `delete_client` | cvr.rs | `pub fn delete_client(&mut self, client_id: &str, ttl_clock: TTLClock) -> Vec<PatchToVer…` |
@@ -80,13 +115,21 @@ _none_
 | `track_removed` | cvr.rs | `fn track_removed(&mut self, query_id: &str) -> Vec<Patch> {` |
 | `apply_store_ops` | cvr_store.rs | `pub fn apply_store_ops(&mut self, ops: Vec<StoreOp>) {` |
 | `as_query` | cvr_store.rs | `pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {` |
+| `catchup_row_patches` | cvr_store.rs | `pub async fn catchup_row_patches(` |
+| `cvr` | cvr_store.rs | `fn cvr(schema: &str, table: &str) -> String {` |
+| `cvr_error_kind` | cvr_store.rs | `fn cvr_error_kind(e: &CVRStoreError) -> &'static str {` |
 | `del_row_record` | cvr_store.rs | `pub fn del_row_record(&mut self, id: &RowID) {` |
+| `flush_internal` | cvr_store.rs | `async fn flush_internal(` |
+| `flushed` | cvr_store.rs | `pub async fn flushed(&self) -> Result<(), String> {` |
+| `force_updates` | cvr_store.rs | `pub fn force_updates(&mut self, ids: &[RowID]) {` |
 | `from` | cvr_store.rs | `fn from(d: InspectQueryRowDb) -> Self {` |
+| `get_row_records` | cvr_store.rs | `pub async fn get_row_records(&self) -> Result<Arc<HashMap<String, RowRecord>>, CVRStore…` |
 | `insert_client` | cvr_store.rs | `pub fn insert_client(&mut self, client: &ClientRecord) {` |
 | `inspect_queries` | cvr_store.rs | `pub async fn inspect_queries(` |
 | `is_empty` | cvr_store.rs | `fn is_empty(&self) -> bool {` |
 | `load` | cvr_store.rs | `pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreErro…` |
 | `load_once` | cvr_store.rs | `async fn load_once(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreErr…` |
+| `load_with_retries` | cvr_store.rs | `async fn load_with_retries(` |
 | `mark_query_as_deleted` | cvr_store.rs | `pub fn mark_query_as_deleted(&mut self, version: &CVRVersion, query_patch: &QueryPatch) {` |
 | `put_desired_query` | cvr_store.rs | `pub fn put_desired_query(` |
 | `put_instance` | cvr_store.rs | `pub fn put_instance(&mut self, cvr: &CVR) {` |
@@ -101,10 +144,13 @@ _none_
 | `drop_backtrace` | live_count.rs | `pub fn drop_backtrace(context: &str) {` |
 | `snapshot` | live_count.rs | `pub fn snapshot() -> String {` |
 | `instruments` | otel_metrics.rs | `fn instruments() -> &'static Instruments {` |
-| `record_cvr_flush` | otel_metrics.rs | `pub fn record_cvr_flush(elapsed_ms: f64, rows: u64, flush_type: &'static str) {` |
+| `record_async_flush_stats` | otel_metrics.rs | `pub fn record_async_flush_stats(rows: u64, elapsed_ms: f64) {` |
+| `record_flush_attempt` | otel_metrics.rs | `pub fn record_flush_attempt(` |
+| `record_load` | otel_metrics.rs | `pub fn record_load(elapsed_ms: f64, result: &'static str, error_kind: Option<&str>) {` |
 | `record_poke` | otel_metrics.rs | `pub fn record_poke(elapsed_ms: f64) {` |
 | `record_poked_row` | otel_metrics.rs | `pub fn record_poked_row() {` |
-| `record_row_set_signature_drift` | otel_metrics.rs | `pub fn record_row_set_signature_drift() {` |
+| `record_query` | otel_metrics.rs | `pub fn record_query(query_type: &str) {` |
+| `record_sync_flush_stats` | otel_metrics.rs | `pub fn record_sync_flush_stats(rows: u64, rows_deferred: u64, elapsed_ms: f64) {` |
 | `base_cvr` | parity_check.rs | `fn base_cvr() -> CVR {` |
 | `build_client_state` | parity_check.rs | `fn build_client_state(cs: &serde_json::Map<String, Value>) -> BTreeMap<String, ClientSt…` |
 | `build_cvr_from_spec` | parity_check.rs | `fn build_cvr_from_spec(queries: &Value) -> CVR {` |
@@ -136,12 +182,15 @@ _none_
 | `row_id_hash` | row_key.rs | `pub fn row_id_hash(id: &RowID) -> String {` |
 | `row_id_string` | row_key.rs | `pub fn row_id_string(id: &RowID) -> String {` |
 | `row_id_string_cached` | row_key.rs | `pub fn row_id_string_cached(id: &RowID) -> String {` |
-| `catchup_row_patches` | row_record_cache.rs | `pub async fn catchup_row_patches(` |
+| `apply` | row_record_cache.rs | `pub async fn apply(` |
 | `catchup_task` | row_record_cache.rs | `async fn catchup_task(context: CatchupTaskContext) {` |
 | `catchup_task_inner` | row_record_cache.rs | `async fn catchup_task_inner(context: &CatchupTaskContext) -> Result<(), String> {` |
 | `clear` | row_record_cache.rs | `pub async fn clear(&self) {` |
 | `empty` | row_record_cache.rs | `fn empty() -> Self {` |
-| `flushed` | row_record_cache.rs | `pub async fn flushed(&self) -> Result<(), String> {` |
+| `execute_row_updates` | row_record_cache.rs | `pub fn execute_row_updates(` |
+| `flush_loop` | row_record_cache.rs | `async fn flush_loop(context: FlushLoopContext) {` |
+| `flush_one_iteration` | row_record_cache.rs | `async fn flush_one_iteration(` |
+| `has_pending_updates` | row_record_cache.rs | `pub async fn has_pending_updates(&self) -> bool {` |
 | `next_page` | row_record_cache.rs | `pub async fn next_page(&mut self) -> Result<Option<Vec<RowsRow>>, String> {` |
 | `format_signature` | row_set_signature.rs | `pub fn format_signature(sig: u64) -> String {` |
 | `parse_signature` | row_set_signature.rs | `pub fn parse_signature(hex: Option<&str>) -> Result<u64, std::num::ParseIntError> {` |
@@ -165,7 +214,7 @@ _none_
 | `query_record_to_query_row` | schema/types.rs | `pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRow {` |
 | `to_base36_u64` | schema/types.rs | `fn to_base36_u64(mut n: u64) -> String {` |
 | `validate_state_version` | schema/types.rs | `fn validate_state_version(ver: &str) -> Result<(), VersionError> {` |
-| `version_from_lexi` | schema/types.rs | `pub fn version_from_lexi(lexi_version: &str) -> Result<u128, &'static str> {` |
+| `version_from_lexi` | schema/types.rs | `pub fn version_from_lexi(lexi_version: &str) -> Result<u128, String> {` |
 | `version_from_string` | schema/types.rs | `pub fn version_from_string(s: &str) -> CVRVersion {` |
 | `version_string` | schema/types.rs | `pub fn version_string(v: &CVRVersion) -> String {` |
 | `version_to_cookie` | schema/types.rs | `pub fn version_to_cookie(v: &CVRVersion) -> String {` |
@@ -179,7 +228,11 @@ _none_
 | `push_patches` | seq_replay.rs | `fn push_patches(acc: &mut Vec<String>, patches: Vec<PatchToVersion>) {` |
 | `reset_schema` | seq_replay.rs | `pub async fn reset_schema(pool: &PgPool) {` |
 | `run` | seq_replay.rs | `pub async fn run(pool: &PgPool, prog: &Program) -> Value {` |
+| `allowed_app_id_characters` | shards.rs | `pub fn allowed_app_id_characters(app_id: &str) -> bool {` |
+| `check` | shards.rs | `pub fn check(shard: &ShardID) -> Result<(), String> {` |
 | `cvr_schema` | shards.rs | `pub fn cvr_schema(shard: &ShardID) -> String {` |
+| `string_compare` | shared/string_compare.rs | `pub fn string_compare(a: &str, b: &str) -> Ordering {` |
+| `utf16_lead` | shared/string_compare.rs | `fn utf16_lead(c: char) -> u32 {` |
 | `enabled` | tracer.rs | `pub fn enabled() -> bool {` |
 | `note` | tracer.rs | `pub fn note(op: &str, msg: &str) {` |
 | `recv` | tracer.rs | `pub fn recv(op: &str, msg: &str) {` |
@@ -188,20 +241,16 @@ _none_
 | `parse_ttl` | ttl.rs | `pub fn parse_ttl(ttl: TTL) -> i64 {` |
 | `parse_ttl_string` | ttl.rs | `pub fn parse_ttl_string(s: &str) -> TTL {` |
 
-## ⚙️ IO — async/DB/actor/transport, use the integration diff — 13
+## ⚙️ IO — async/DB/actor/transport, use the integration diff — 9
 
 | fn | file | signature |
 |---|---|---|
 | `main` | bin/cvr_seq_replay.rs | `async fn main() {` |
-| `finish` | change_processor.rs | `pub fn finish(&mut self, existing_rows: &RowRecordMap) {` |
-| `finish_received` | change_processor.rs | `pub fn finish_received(&mut self, existing_rows: &RowRecordMap) {` |
-| `flush_batch` | change_processor.rs | `fn flush_batch(&mut self, existing_rows: &RowRecordMap) {` |
+| `finish` | change_processor.rs | `pub fn finish(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {` |
+| `finish_received` | change_processor.rs | `pub fn finish_received(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {` |
+| `flush_batch` | change_processor.rs | `fn flush_batch(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {` |
 | `on_row_change` | change_processor.rs | `pub fn on_row_change(` |
 | `total_processed` | change_processor.rs | `pub fn total_processed(&self) -> usize {` |
 | `catchup_config_patches` | cvr_store.rs | `pub async fn catchup_config_patches(` |
-| `apply` | row_record_cache.rs | `pub async fn apply(` |
-| `execute_row_updates` | row_record_cache.rs | `pub fn execute_row_updates(` |
-| `flush_loop` | row_record_cache.rs | `async fn flush_loop(context: FlushLoopContext) {` |
-| `flush_one_iteration` | row_record_cache.rs | `async fn flush_one_iteration(` |
-| `get_row_records` | row_record_cache.rs | `pub async fn get_row_records(&self) -> Arc<HashMap<String, RowRecord>> {` |
-| `has_pending_updates` | row_record_cache.rs | `pub async fn has_pending_updates(&self) -> bool {` |
+| `get_ttl_clock` | cvr_store.rs | `pub async fn get_ttl_clock(&self) -> Result<Option<TTLClock>, CVRStoreError> {` |
+| `update_ttl_clock` | cvr_store.rs | `pub async fn update_ttl_clock(` |
