@@ -115,31 +115,59 @@ if [ -z "$TEST_CVR_PG_URI" ]; then
   echo ""
 fi
 
-for c in rust-ivm rust-cvr; do
-  step "$c — fmt / clippy --all-targets -D warnings / test"
-  ( cd "packages/$c"
-    cargo +$TC fmt --check ); chk $? "$c fmt"
-  ( cd "packages/$c"
-    cargo +$TC clippy --locked --all-targets -- -D warnings ); chk $? "$c clippy"
-  if [ "$c" = rust-ivm ]; then TESTFLAGS="--tests"; else TESTFLAGS=""; fi
-  ( cd "packages/$c"
-    cargo +$TC test --locked $TESTFLAGS -- --test-threads=1 ); chk $? "$c test"
+# The three crates run CONCURRENTLY. Same commands, same order WITHIN a crate —
+# only the scheduling changes, so this still mirrors rust-syncer.yml exactly.
+# They are separate cargo packages with separate target dirs, so there is no
+# lock contention and no shared cache to invalidate; the phases were previously
+# serial on a 14-core box whose load sat at ~4 because a test binary links
+# single-threaded (rust-ivm alone builds 104 of them). Each crate writes its own
+# log; the logs are replayed IN ORDER after the join so the output reads the
+# same as the serial version. Set CI_SERIAL=1 to fall back to one at a time.
+CILOG="${TMPDIR:-/tmp}/local-rust-ci.$$"
+mkdir -p "$CILOG"
+
+crate_phase() {   # $1 = crate; writes $CILOG/$1.log and $CILOG/$1.rc
+  local c="$1" rc=0 t
+  {
+    echo; echo "== $c — fmt / clippy --all-targets -D warnings / test =="
+    if [ "$c" = rust-syncer ]; then
+      unset SQLITE3_STATIC SQLITE3_LIB_DIR SQLITE3_INCLUDE_DIR PKG_CONFIG_LIBDIR
+    fi
+    cd "$ROOT/packages/$c" || return 1
+    cargo +$TC fmt --check; t=$?; [ $t -eq 0 ] && echo "ok ($c fmt)" || { echo "FAIL ($c fmt)"; rc=1; }
+    if [ "$c" = rust-syncer ]; then
+      cargo +$TC clippy --locked --no-default-features --all-targets -- -D warnings
+    else
+      cargo +$TC clippy --locked --all-targets -- -D warnings
+    fi
+    t=$?; [ $t -eq 0 ] && echo "ok ($c clippy)" || { echo "FAIL ($c clippy)"; rc=1; }
+    case "$c" in
+      rust-ivm)    cargo +$TC test --locked --tests -- --test-threads=1 ;;
+      rust-cvr)    cargo +$TC test --locked -- --test-threads=1 ;;
+      rust-syncer) cargo +$TC test --locked --no-default-features -- --test-threads=1 ;;
+    esac
+    t=$?; [ $t -eq 0 ] && echo "ok ($c test)" || { echo "FAIL ($c test)"; rc=1; }
+    if [ "$c" = rust-ivm ]; then
+      echo; echo "== rust-ivm — teardown integrity soak =="
+      cargo +$TC test --locked --test teardown_gate_test -- --test-threads=1
+      t=$?; [ $t -eq 0 ] && echo "ok (ivm teardown soak)" || { echo "FAIL (ivm teardown soak)"; rc=1; }
+    fi
+  } > "$CILOG/$c.log" 2>&1
+  echo "$rc" > "$CILOG/$c.rc"
+}
+
+if [ "${CI_SERIAL:-0}" = 1 ]; then
+  for c in rust-ivm rust-cvr rust-syncer; do crate_phase "$c"; done
+else
+  step "rust-ivm / rust-cvr / rust-syncer — running concurrently (logs replayed in order)"
+  for c in rust-ivm rust-cvr rust-syncer; do crate_phase "$c" & done
+  wait
+fi
+for c in rust-ivm rust-cvr rust-syncer; do
+  cat "$CILOG/$c.log"
+  [ "$(cat "$CILOG/$c.rc" 2>/dev/null || echo 1)" -eq 0 ] || fail=1
 done
-
-step "rust-syncer — fmt / clippy --no-default-features / test (UNSET SQLITE3_*)"
-( cd packages/rust-syncer
-  unset SQLITE3_STATIC SQLITE3_LIB_DIR SQLITE3_INCLUDE_DIR PKG_CONFIG_LIBDIR
-  cargo +$TC fmt --check ); chk $? "syncer fmt"
-( cd packages/rust-syncer
-  unset SQLITE3_STATIC SQLITE3_LIB_DIR SQLITE3_INCLUDE_DIR PKG_CONFIG_LIBDIR
-  cargo +$TC clippy --locked --no-default-features --all-targets -- -D warnings ); chk $? "syncer clippy"
-( cd packages/rust-syncer
-  unset SQLITE3_STATIC SQLITE3_LIB_DIR SQLITE3_INCLUDE_DIR PKG_CONFIG_LIBDIR
-  cargo +$TC test --locked --no-default-features -- --test-threads=1 ); chk $? "syncer test"
-
-step "rust-ivm — teardown integrity soak"
-( cd packages/rust-ivm
-  cargo +$TC test --locked --test teardown_gate_test -- --test-threads=1 ); chk $? "ivm teardown soak"
+rm -rf "$CILOG"
 
 step "parity — L3 call-topology guard (ordering-sensitive emissions in sanctioned context)"
 python3 "$ROOT/parity/call_topology.py"; chk $? "L3 call-topology"
