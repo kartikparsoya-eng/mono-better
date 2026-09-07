@@ -272,7 +272,16 @@ pub fn register_serving_lag_gauges(
         let r_max = registry.clone();
         let serving_lag = m
             .i64_observable_gauge("zero.sync.serving_lag")
-            .with_unit("ms")
+            // TS declares `unit: 'millisecond'` (workers/syncer.ts:433). The
+            // unit is part of the instrument, and the Prometheus exporter
+            // appends it to the series name — `ms` normalises to
+            // `..._milliseconds`, `millisecond` stays `..._millisecond`. With
+            // `ms` here the two engines published DIFFERENT series names for
+            // the same gauge, so a dashboard or alert built on the TS name went
+            // blank against rust. Caught by diffing what the two arms actually
+            // export, not by reading the sources: both declare
+            // `zero.sync.serving_lag`, and only the rendered name differs.
+            .with_unit("millisecond")
             .with_description(
                 "Maximum time active ViewSyncer client groups have had unserved replica changes.",
             )
@@ -283,7 +292,8 @@ pub fn register_serving_lag_gauges(
         let r_stats = registry.clone();
         let serving_lag_stats = m
             .i64_observable_gauge("zero.sync.serving_lag_stats")
-            .with_unit("ms")
+            // TS `unit: 'millisecond'` (workers/syncer.ts) — see the note above.
+            .with_unit("millisecond")
             .with_description(
                 "Distribution of time active ViewSyncer client groups have had unserved replica \
                  changes.",
@@ -441,6 +451,31 @@ static MAX_PROTOCOL_VERSION: AtomicU64 = AtomicU64::new(0);
 /// in the dispatcher's connect handler.
 pub fn record_client_protocol_version(protocol_version: u32) {
     MAX_PROTOCOL_VERSION.fetch_max(protocol_version as u64, Ordering::Relaxed);
+}
+
+/// `zero.server.startup_duration` — TS `startupDuration()`
+/// (services/life-cycle.ts:74-84), recorded once via `recordStartupDurationMs`
+/// with `{component: 'dispatcher'}` when zero-cache reaches its ready signal.
+/// Rust has no `life_cycle.rs` twin, so it folds into the startup path (main.rs)
+/// keeping the TS metric name 1:1.
+///
+/// TS's sibling `server.worker_startup_duration` has NO rust twin: it times a
+/// child WORKER process reaching ready, and rust is a single process whose
+/// shards are threads, so there is no worker start to time.
+pub fn record_startup_duration_ms(duration_ms: f64) {
+    static STARTUP: OnceLock<OtelHistogram<f64>> = OnceLock::new();
+    STARTUP
+        .get_or_init(|| {
+            global::meter("zero")
+                .f64_histogram("zero.server.startup_duration")
+                .with_unit("s")
+                .with_description("Duration from starting zero-cache to its ready signal.")
+                .build()
+        })
+        .record(
+            duration_ms / 1000.0,
+            &[KeyValue::new("component", "dispatcher")],
+        );
 }
 
 /// Register the two process-scoped dispatcher gauges. Called once from the

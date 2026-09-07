@@ -74,6 +74,10 @@ async fn shutdown_signal() -> ShutdownSignal {
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 fn main() {
+    // TS times startup from process entry to the ready signal
+    // (`recordStartupDurationMs`, services/life-cycle.ts:82). Anchor it here,
+    // the first statement of rust's `main`.
+    let process_start = std::time::Instant::now();
     // INVENTIONS.md I-13: SQLite must allocate through mimalloc too, and the
     // hook is only accepted before the first sqlite3_initialize — so it is the
     // first statement of the process (before any Connection::open below).
@@ -311,6 +315,10 @@ fn main() {
     // are registered here, where serving begins (TS starts its uptime clock in
     // `run()`, when requests begin being served).
     rust_syncer::metrics::register_process_gauges();
+    // Ready signal reached — TS records the same span here.
+    rust_syncer::metrics::record_startup_duration_ms(
+        process_start.elapsed().as_secs_f64() * 1000.0,
+    );
     runtime.spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
             rust_syncer::workers::syncer::VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS,

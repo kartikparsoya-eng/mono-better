@@ -80,11 +80,41 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
     let reader = PeriodicReader::builder(exporter)
         .with_interval(std::time::Duration::from_millis(interval_ms))
         .build();
+    // TS builds the same resource in server/otel-start.ts:50-61 — service
+    // version plus `process.worker` / `process.worker_index` — and additionally
+    // runs NodeSDK with `autoDetectResources: true`, which is where `host.name`
+    // and the `process.*` attributes on every TS series come from.
+    //
+    // Rust set only service.name + service.version, so rust-syncer's metrics
+    // arrived at the collector with NO host or worker identity at all. TS's own
+    // comment says why that matters: without the worker tags, "N syncer workers
+    // sharing the same pod labels clobber each other in the OTel collector on
+    // every scrape interval" — and with no host.name, rust's series cannot be
+    // attributed to a pod at all in a real deployment. It also made the two
+    // arms indistinguishable when diffing a shared collector.
+    //
+    // Rust is ONE process whose shards are threads, so there is no worker fan-
+    // out to disambiguate and TS's `process.worker_index` is deliberately NOT
+    // ported: it exists to separate N syncer processes, and a constant 0 would
+    // be a label carrying no information. `process.worker` IS kept — it names
+    // the ROLE (the TS worker whose job rust performs), and the node
+    // change-streamer / dispatcher / serving-replicator that ship in the SAME
+    // rust image already tag themselves that way, so without it rust-syncer
+    // would be the only component in its own container with no worker
+    // identity.
     let resource = Resource::builder()
         .with_service_name("zero-cache")
         .with_attribute(KeyValue::new(
             "service.version",
             service_version.to_string(),
+        ))
+        .with_attribute(KeyValue::new("process.worker", "syncer"))
+        .with_attribute(KeyValue::new("process.runtime.name", "rust"))
+        // Docker/Kubernetes set HOSTNAME to the container/pod name; this is the
+        // same value NodeSDK's host detector reports for the TS arm.
+        .with_attribute(KeyValue::new(
+            "host.name",
+            std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string()),
         ))
         .build();
 
