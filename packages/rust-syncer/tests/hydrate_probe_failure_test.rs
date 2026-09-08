@@ -132,8 +132,13 @@ fn unpreparable_cost_probe_fails_the_hydrate_instead_of_unwinding() {
              db.prepare throws a SqliteError), not unwind past the driver"
         ),
     };
+    assert_eq!(
+        err.name, "SqliteError",
+        "TS `db.prepare` throws better-sqlite3's SqliteError (sqlite-cost-model.ts:78); \
+         its name is what `String(e)` prints on the fail line"
+    );
     assert!(
-        err.contains("probe SQL contains NUL byte"),
+        err.message.contains("probe SQL contains NUL byte"),
         "the reported error must carry the probe failure so the client's \
          Internal error body is diagnostic, like TS's SqliteError message; got: {err}"
     );
@@ -216,7 +221,7 @@ fn unpreparable_cost_probe_fails_the_group_with_an_error_not_a_dead_task() {
              the client-group task",
         );
     assert!(
-        err.contains("probe SQL contains NUL byte"),
+        err.message.contains("probe SQL contains NUL byte"),
         "the group must be failed WITH the underlying error (it becomes the \
          Internal error body the client sees); got: {err}"
     );

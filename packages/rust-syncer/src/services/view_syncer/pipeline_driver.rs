@@ -20,6 +20,7 @@
 //!
 //! See `packages/zero-cache/docs/rust-cvr-port/90-phase7-real-wiring-plan.md`.
 
+use crate::workers::connection::JsError;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -948,11 +949,11 @@ impl IvmPipelines {
         &mut self,
         queries: &[Q],
         timer: Rc<dyn Timer>,
-    ) -> Result<HydrateChanges<'_>, String> {
+    ) -> Result<HydrateChanges<'_>, JsError> {
         // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
         self.poisoned = false;
         if self.engine.is_none() {
-            return Err("Engine not initialized".to_string());
+            return Err("Engine not initialized".into());
         }
         let queries: Vec<HydrateQuery> = queries.iter().cloned().map(Into::into).collect();
         let queries = &queries;
@@ -1031,7 +1032,7 @@ impl IvmPipelines {
                 // (`sqlite_cost_model.rs`), whose TS twin `db.prepare(sql)`
                 // simply THROWS a `SqliteError`.
                 self.on_hydrate_panic(&checkpoint, queries);
-                return Err(panic_message(&payload));
+                return Err(hydrate_js_error(&payload));
             }
         };
         Ok(HydrateChanges {
@@ -1216,7 +1217,7 @@ impl IvmPipelines {
         let syncable_tables = self.syncable_tables.clone();
         let all_table_names = self.all_table_names.clone();
         if self.engine.is_none() {
-            return Err("Engine not initialized".to_string());
+            return Err("Engine not initialized".into());
         }
         if self.snapshotter.is_none() {
             return Err("Snapshotter not initialized".to_string());
@@ -1391,7 +1392,7 @@ pub struct HydrateChanges<'a> {
     queries: Vec<HydrateQuery>,
     /// Set when a pull panicked: the hydrate is over and [`finish`](Self::finish)
     /// reports the failure as an `Err`, mirroring `AdvanceChanges::outcome`.
-    outcome: Option<String>,
+    outcome: Option<JsError>,
 }
 
 impl HydrateChanges<'_> {
@@ -1401,7 +1402,7 @@ impl HydrateChanges<'_> {
     ///
     /// An `Err` here is TS `addQuery` THROWING: the view-syncer must fail the
     /// group with it (TS `#cleanup(err)` → `client.fail`), not continue.
-    pub fn finish(mut self) -> Result<(), String> {
+    pub fn finish(mut self) -> Result<(), JsError> {
         if let Some(outcome) = self.outcome.take() {
             self.stream = None;
             return Err(outcome);
@@ -1437,7 +1438,7 @@ impl Iterator for HydrateChanges<'_> {
                 // does. `Drop for HydrateChanges` then sees `None` and skips
                 // `finish_hydrate` on a half-built graph.
                 self.stream = None;
-                self.outcome = Some(panic_message(&payload));
+                self.outcome = Some(hydrate_js_error(&payload));
                 None
             }
         }
@@ -1572,7 +1573,27 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
+        .or_else(|| {
+            payload
+                .downcast_ref::<rust_ivm::sqlite::sqlite_cost_model::SqliteError>()
+                .map(|e| e.0.clone())
+        })
         .unwrap_or_else(|| "engine job panicked".to_string())
+}
+
+/// The JS value TS would have thrown where rust's hydrate panicked. The
+/// cost-model probe's `db.prepare` failure is better-sqlite3's `SqliteError`
+/// (sqlite-cost-model.ts:78 — rust-ivm panics with the typed
+/// `sqlite_cost_model::SqliteError` payload there); every other payload (an
+/// `assert`, a Take/Cap invariant) is a plain `Error`. TS's `String(e)` in
+/// `ClientHandler.fail` prints that name — `SqliteError: unrecognized token…`
+/// on the 2026-09-08 sandbox TS arm — so the name has to travel with the
+/// message.
+fn hydrate_js_error(payload: &Box<dyn std::any::Any + Send>) -> JsError {
+    match payload.downcast_ref::<rust_ivm::sqlite::sqlite_cost_model::SqliteError>() {
+        Some(e) => JsError::new("SqliteError", e.0.clone()),
+        None => JsError::plain(panic_message(payload)),
+    }
 }
 
 /// If a caught advance panic is a `ScalarResetError`, return its message. Port
@@ -1966,7 +1987,7 @@ mod tests {
             )
             .err()
             .expect("hydrate before init must fail");
-        assert!(err.contains("Engine not initialized"));
+        assert!(err.message.contains("Engine not initialized"));
     }
 
     // The per-query hydrate lifecycle log (TS `#logQueryPipelineLifecycle`) is

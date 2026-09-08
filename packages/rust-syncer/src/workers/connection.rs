@@ -271,27 +271,36 @@ impl Connection {
         // TS `getLogLevel(e)` over the RAW caught value; a bare ProtocolError
         // (`thrown: None`) is the `isProtocolError` → `warn` branch.
         let level = thrown.map_or(LogLevel::Warn, Thrown::get_log_level);
-        // TS `String(e)`: the caught value's own text when there is one, else the
-        // ProtocolError body's message.
+        // TS `String(e)` — `${e.name}: ${e.message}` for an Error instance. A
+        // bare ProtocolError (`thrown: None`) renders `ProtocolError: <body
+        // message>`. Until 2026-09-09 rust logged the bare message, so every
+        // class-named error read differently from TS's line
+        // (`OwnershipError: …`, `SqliteError: …`, `TypeError: …`).
+        let body_message = error.message().to_string();
+        let rendered = match thrown {
+            Some(thrown) => thrown.js_string(&body_message),
+            None => format!("ProtocolError: {body_message}"),
+        };
+        // The RAW message: what `close_with_error_thrown`'s errno /
+        // transient-socket checks run against (TS runs them on the THROWN).
         let message = thrown
             .and_then(Thrown::message)
-            .map(str::to_string)
-            .unwrap_or_else(|| error.message().to_string());
+            .map_or_else(|| body_message.clone(), str::to_string);
         match level {
             LogLevel::Warn => tracing::warn!(
                 client_id = %self.client_id,
                 ws_id = %self.ws_id,
-                "view-syncer closing connection with error: {message}"
+                "view-syncer closing connection with error: {rendered}"
             ),
             LogLevel::Error => tracing::error!(
                 client_id = %self.client_id,
                 ws_id = %self.ws_id,
-                "view-syncer closing connection with error: {message}"
+                "view-syncer closing connection with error: {rendered}"
             ),
             LogLevel::Info => tracing::info!(
                 client_id = %self.client_id,
                 ws_id = %self.ws_id,
-                "view-syncer closing connection with error: {message}"
+                "view-syncer closing connection with error: {rendered}"
             ),
         }
         // TS `#downstream.fail(wrapWithProtocolError(e))`. `wrapWithProtocolError`
@@ -304,7 +313,7 @@ impl Connection {
         // logged an OwnershipError's frame at WARN where TS logs INFO
         // (`ownership_transfer_fails_clients_at_info_like_ts_ownership_error`).
         let wrapped = match thrown {
-            Some(Thrown::WithLevel(level)) => Thrown::WithLevel(level),
+            Some(with_level @ Thrown::WithLevel { .. }) => with_level,
             _ => Thrown::Protocol(&message),
         };
         self.close_with_error_thrown(error, Some(wrapped));
@@ -498,20 +507,32 @@ fn has_errno(msg_lower: &str) -> bool {
 }
 
 /// Port of TS `sendError`'s `thrown?: unknown` parameter (connection.ts:396).
-/// TS branches on what the CAUGHT value IS; rust models exactly the three
-/// properties the classification reads, so no call site has to carry a JS value.
+/// TS branches on what the CAUGHT value IS; rust models exactly the properties
+/// the classification and the `String(e)` log rendering read, so no call site
+/// has to carry a JS value.
 ///
 /// `None` at a call site means TS's `thrown === undefined` — a body the server
 /// SYNTHESIZED rather than caught, which TS logs at `info`.
+///
+/// Every variant knows the JS `Error.name` that `String(e)` prints before the
+/// message (`${e.name}: ${e.message}`): `ProtocolError` sets
+/// `this.name = 'ProtocolError'` (zero-protocol/src/error.ts:166) and most
+/// subclasses inherit it; the cvr-store classes that override it are named at
+/// their construction site (`cvr_store_error_thrown`).
 #[derive(Clone, Copy, Debug)]
 pub enum Thrown<'a> {
     /// TS `thrown instanceof ProtocolErrorWithLevel` — the explicit level wins
-    /// over every other branch.
-    WithLevel(LogLevel),
-    /// TS `isProtocolError(thrown)` — `getLogLevel` yields `warn`.
+    /// over every other branch. `name` is the subclass's `Error.name`
+    /// ('ProtocolError' unless the subclass overrides it).
+    WithLevel { level: LogLevel, name: &'a str },
+    /// TS `isProtocolError(thrown)` — a bare `ProtocolError` (`name` is always
+    /// 'ProtocolError'); `getLogLevel` yields `warn`.
     Protocol(&'a str),
-    /// Any other caught value (a plain `Error`) — `getLogLevel` yields `error`.
-    Other(&'a str),
+    /// Any other caught value — `getLogLevel` yields `error`. `name` is the JS
+    /// class TS throws at that site: 'Error' for a plain `Error`, `must()` or
+    /// `assert()`; 'TypeError'; better-sqlite3's 'SqliteError'; postgres.js's
+    /// 'PostgresError'; the cvr-store's 'RowsVersionBehindError'.
+    Other { name: &'a str, message: &'a str },
 }
 
 impl<'a> Thrown<'a> {
@@ -519,18 +540,90 @@ impl<'a> Thrown<'a> {
     /// checks TS runs against the THROWN (not against the error body).
     fn message(self) -> Option<&'a str> {
         match self {
-            Thrown::WithLevel(_) => None,
-            Thrown::Protocol(m) | Thrown::Other(m) => Some(m),
+            Thrown::WithLevel { .. } => None,
+            Thrown::Protocol(m) | Thrown::Other { message: m, .. } => Some(m),
         }
     }
 
     /// Port of TS `getLogLevel(error)` (types/error-with-level.ts:24-30).
     fn get_log_level(self) -> LogLevel {
         match self {
-            Thrown::WithLevel(level) => level,
+            Thrown::WithLevel { level, .. } => level,
             Thrown::Protocol(_) => LogLevel::Warn,
-            Thrown::Other(_) => LogLevel::Error,
+            Thrown::Other { .. } => LogLevel::Error,
         }
+    }
+
+    /// TS `String(e)` for an `Error` instance: `${e.name}: ${e.message}`. A
+    /// ProtocolError's message IS its body's message (`super(errorBody.message)`,
+    /// zero-protocol/src/error.ts:165), which is why `WithLevel` carries none
+    /// of its own and takes the body's here.
+    pub fn js_string(self, body_message: &str) -> String {
+        match self {
+            Thrown::WithLevel { name, .. } => format!("{name}: {body_message}"),
+            Thrown::Protocol(message) => format!("ProtocolError: {message}"),
+            Thrown::Other { name, message } => format!("{name}: {message}"),
+        }
+    }
+}
+
+/// A caught JS `Error` value crossing rust's `Result` channels: the class
+/// `name` that `String(e)` prints and the `message` that `getErrorMessage(e)`
+/// / the wire body carry. Rust-only carrier (AGENTS.md rule 5) — TS gets both
+/// from the language. `Display` is the bare message, what reaches the client,
+/// so every `{e}` / `e.to_string()` site keeps its text; a `String` converts
+/// into it as a plain `Error` (`must()`, `assert()`, `new Error(msg)`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsError {
+    pub name: &'static str,
+    pub message: String,
+}
+
+impl JsError {
+    pub fn new(name: &'static str, message: impl Into<String>) -> Self {
+        JsError {
+            name,
+            message: message.into(),
+        }
+    }
+
+    /// A plain JS `Error` — `name` is 'Error'.
+    pub fn plain(message: impl Into<String>) -> Self {
+        JsError::new("Error", message)
+    }
+
+    /// The `thrown` this value is at a `sendError` / `fail` site.
+    pub fn thrown(&self) -> Thrown<'_> {
+        Thrown::Other {
+            name: self.name,
+            message: &self.message,
+        }
+    }
+}
+
+impl std::fmt::Display for JsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for JsError {}
+
+impl From<String> for JsError {
+    fn from(message: String) -> Self {
+        JsError::plain(message)
+    }
+}
+
+impl From<&str> for JsError {
+    fn from(message: &str) -> Self {
+        JsError::plain(message)
+    }
+}
+
+impl From<JsError> for String {
+    fn from(e: JsError) -> Self {
+        e.message
     }
 }
 
@@ -559,7 +652,7 @@ pub fn classify_error_log_level(error: &ErrorBody, thrown: Option<Thrown<'_>>) -
     //     bodies the server synthesized itself — 47 rust `error` lines against
     //     TS's `info`/`warn` for the same replay (G44 runtime log differential,
     //     2026-09-08).
-    if let Some(Thrown::WithLevel(level)) = thrown {
+    if let Some(Thrown::WithLevel { level, .. }) = thrown {
         return level;
     }
     let thrown_lower = thrown.and_then(|t| t.message()).map(str::to_lowercase);
@@ -632,6 +725,55 @@ mod tests {
         );
     }
 
+    /// TS `String(e)` is `${e.name}: ${e.message}` (Error.prototype.toString):
+    /// `ProtocolError` names itself (error.ts:166), the cvr-store subclasses
+    /// override `name`, a plain `Error` prints `Error`, better-sqlite3 prints
+    /// `SqliteError`. The 2026-09-08 sandbox TS arm logged
+    /// `view-syncer closing connection with error: SqliteError: unrecognized
+    /// token …` where rust logged the bare message. Non-vacuous: return the
+    /// bare message from `js_string` and every case below fails.
+    #[test]
+    fn thrown_js_string_renders_the_error_name_before_the_message() {
+        assert_eq!(
+            Thrown::Protocol("Reconnect required").js_string("ignored"),
+            "ProtocolError: Reconnect required"
+        );
+        assert_eq!(
+            Thrown::WithLevel {
+                level: LogLevel::Info,
+                name: "OwnershipError"
+            }
+            .js_string("CVR ownership was transferred"),
+            "OwnershipError: CVR ownership was transferred"
+        );
+        assert_eq!(
+            Thrown::WithLevel {
+                level: LogLevel::Warn,
+                name: "ProtocolError"
+            }
+            .js_string("Client has been purged due to inactivity"),
+            "ProtocolError: Client has been purged due to inactivity"
+        );
+        assert_eq!(
+            Thrown::Other {
+                name: "SqliteError",
+                message: "unrecognized token"
+            }
+            .js_string("ignored"),
+            "SqliteError: unrecognized token"
+        );
+        assert_eq!(
+            JsError::from("boom".to_string()).thrown().js_string(""),
+            "Error: boom",
+            "a rust String error is a plain JS Error"
+        );
+        assert_eq!(
+            JsError::new("TypeError", "bad").to_string(),
+            "bad",
+            "Display is the bare message"
+        );
+    }
+
     /// The client-failure path wraps before it closes: TS
     /// `ClientHandler.fail(e)` -> `#downstream.fail(wrapWithProtocolError(e))`
     /// (client-handler.ts:175-181), and the pipeline hands THAT wrapped
@@ -665,7 +807,13 @@ mod tests {
         );
         // A CAUGHT plain error keeps `error` (TS `getLogLevel` default).
         assert_eq!(
-            classify_error_log_level(&ErrorBody::internal("boom"), Some(Thrown::Other("boom"))),
+            classify_error_log_level(
+                &ErrorBody::internal("boom"),
+                Some(Thrown::Other {
+                    name: "Error",
+                    message: "boom"
+                })
+            ),
             LogLevel::Error
         );
     }
@@ -714,7 +862,13 @@ mod tests {
         ] {
             let err = basic(ErrorKind::Internal, msg);
             assert_eq!(
-                classify_error_log_level(&err, Some(Thrown::Other(msg))),
+                classify_error_log_level(
+                    &err,
+                    Some(Thrown::Other {
+                        name: "Error",
+                        message: msg
+                    })
+                ),
                 LogLevel::Warn,
                 "a CAUGHT transient socket error should warn: {msg:?}"
             );
@@ -730,7 +884,10 @@ mod tests {
         assert_eq!(
             classify_error_log_level(
                 &basic(ErrorKind::Internal, "assertion failed: x == y"),
-                Some(Thrown::Other("assertion failed: x == y"))
+                Some(Thrown::Other {
+                    name: "Error",
+                    message: "assertion failed: x == y"
+                })
             ),
             LogLevel::Error
         );

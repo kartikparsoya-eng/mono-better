@@ -92,6 +92,15 @@ pub struct ScanstatusLoop {
 pub const INTERRUPT_ERR_PREFIX: &str = "[sqlite-interrupt] ";
 
 /// True when a cost-model error string was marked as an interrupt.
+/// Panic payload of a failed cost-model probe: the twin of better-sqlite3's
+/// `SqliteError`, the class TS `db.prepare(sql)` throws (sqlite-cost-model.ts:
+/// 78) and whose `name` reaches the view-syncer's `String(e)` log lines as
+/// `SqliteError: <message>`. rust-syncer's hydrate catch downcasts to it to
+/// render that name. Rust-only carrier of a JS class (AGENTS.md rule 5): the
+/// class has no TS source twin — it is better-sqlite3's.
+#[derive(Debug)]
+pub struct SqliteError(pub String);
+
 pub fn is_interrupt_error(e: &str) -> bool {
     e.starts_with(INTERRUPT_ERR_PREFIX)
 }
@@ -605,7 +614,10 @@ pub fn create_sqlite_cost_model_prepared(
                     // CostProbeInterrupted) instead of tearing down the CG.
                     std::panic::panic_any(CostProbeInterrupted(e));
                 }
-                panic!("{e}")
+                // TS `db.prepare(sql)` throws better-sqlite3's `SqliteError`
+                // here (sqlite-cost-model.ts:78); the typed payload carries
+                // that class to the view-syncer's `String(e)` log lines.
+                std::panic::panic_any(SqliteError(e))
             });
 
             // Scanstatus should always be available — parity with TS assert.

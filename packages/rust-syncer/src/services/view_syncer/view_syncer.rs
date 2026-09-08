@@ -42,7 +42,7 @@ use crate::services::view_syncer::query_covering::{
 use crate::workers::cg_executor::CGHandle;
 use crate::workers::cg_executor::{CGMessage, CgTaskContext};
 use crate::workers::connect_params::ConnectParams;
-use crate::workers::connection::{Connection, Thrown};
+use crate::workers::connection::{Connection, JsError, Thrown};
 use crate::workers::syncer::ConnectionInfo;
 #[cfg(test)]
 use crate::workers::syncer::check_and_pin_user;
@@ -791,12 +791,54 @@ fn cvr_store_error_body(error: &CVRStoreError) -> crate::protocol::ErrorBody {
 /// PG outage at WARN where TS logs ERROR.
 fn cvr_store_error_thrown<'a>(error: &CVRStoreError, message: &'a str) -> Thrown<'a> {
     use crate::workers::connection::LogLevel;
+    // `name` is what TS `String(e)` prints before the message: `ProtocolError`
+    // unless the class overrides `Error.name` (cvr-store.ts `readonly name`).
     match error {
-        CVRStoreError::ClientNotFound(_)
-        | CVRStoreError::ConcurrentModification { .. }
-        | CVRStoreError::InvalidClientSchema(_) => Thrown::WithLevel(LogLevel::Warn),
-        CVRStoreError::OwnershipError { .. } => Thrown::WithLevel(LogLevel::Info),
-        _ => Thrown::Other(message),
+        // cvr-store.ts:1354 — no `name` override, inherits 'ProtocolError'.
+        CVRStoreError::ClientNotFound(_) => Thrown::WithLevel {
+            level: LogLevel::Warn,
+            name: "ProtocolError",
+        },
+        // cvr-store.ts:1368 `readonly name = 'ConcurrentModificationException'`.
+        CVRStoreError::ConcurrentModification { .. } => Thrown::WithLevel {
+            level: LogLevel::Warn,
+            name: "ConcurrentModificationException",
+        },
+        // cvr-store.ts:1406 `readonly name = 'InvalidClientSchemaError'`.
+        CVRStoreError::InvalidClientSchema(_) => Thrown::WithLevel {
+            level: LogLevel::Warn,
+            name: "InvalidClientSchemaError",
+        },
+        // cvr-store.ts:1383 `readonly name = 'OwnershipError'`.
+        CVRStoreError::OwnershipError { .. } => Thrown::WithLevel {
+            level: LogLevel::Info,
+            name: "OwnershipError",
+        },
+        // cvr-store.ts:1438 `readonly name = 'RowsVersionBehindError'` (a plain
+        // Error subclass, not a ProtocolError).
+        CVRStoreError::RowsVersionBehind { .. } => Thrown::Other {
+            name: "RowsVersionBehindError",
+            message,
+        },
+        // TS `versionFromString`: a third `:` part is `new TypeError(...)`
+        // (schema/types.ts:339); every other failure is a plain `Error`
+        // (:333, lexi-version.ts:54).
+        CVRStoreError::VersionParse(rust_cvr::schema::types::VersionError::TooManyParts(_)) => {
+            Thrown::Other {
+                name: "TypeError",
+                message,
+            }
+        }
+        // A PG server error is postgres.js's `PostgresError`; a pool / IO
+        // failure surfaces as a plain `Error`.
+        CVRStoreError::Sqlx(sqlx::Error::Database(_)) => Thrown::Other {
+            name: "PostgresError",
+            message,
+        },
+        _ => Thrown::Other {
+            name: "Error",
+            message,
+        },
     }
 }
 
@@ -3036,7 +3078,7 @@ impl ViewSyncerService {
             // will not prepare — TS `db.prepare(sql)` throwing a SqliteError).
             #[cfg(test)]
             let hydrated = match force_hydrate_error_take() {
-                Some(message) => Err(message),
+                Some(error) => Err(error),
                 None => hydrated,
             };
             match hydrated {
@@ -3128,11 +3170,10 @@ impl ViewSyncerService {
                             // with error` line above — and then fails the
                             // downstream with `wrapWithProtocolError(e)`, which
                             // is what decides the FRAME's level (`warn`).
-                            let message = e.to_string();
-                            conn.fail(
-                                wrap_with_protocol_error(&message),
-                                Some(Thrown::Other(&message)),
-                            );
+                            // `e` knows its JS class (`SqliteError` for the
+                            // cost-model probe, `Error` otherwise), so the
+                            // `String(e)` line prints TS's name.
+                            conn.fail(wrap_with_protocol_error(&e.message), Some(e.thrown()));
                         }
                         self.delete_client_due_to_disconnect(client_id, &ws_id);
                     }
@@ -3883,21 +3924,24 @@ impl ViewSyncerService {
             // group whose last client has dropped — the reap not yet fired —
             // takes exactly this path in TS.
             const MESSAGE: &str = "No validated connection is available for shared query work.";
-            // `String(e)` of a ProtocolError: `${name}: ${message}`.
-            let thrown = format!("ProtocolError: {MESSAGE}");
+            // A `ProtocolErrorWithLevel` without a `name` override prints as
+            // `ProtocolError: <message>` under `String(e)`.
+            let thrown = Thrown::WithLevel {
+                level: crate::workers::connection::LogLevel::Warn,
+                name: "ProtocolError",
+            };
             tracing::warn!(
                 cg_id = %self.cg_id,
-                "stopping view-syncer {}: {thrown}",
-                self.cg_id
+                "stopping view-syncer {}: {}",
+                self.cg_id,
+                thrown.js_string(MESSAGE)
             );
             self.fail_group_with_error(
                 crate::protocol::ErrorBody::basic(
                     crate::protocol::ErrorKind::InvalidConnectionRequest,
                     MESSAGE.to_string(),
                 ),
-                Some(Thrown::WithLevel(
-                    crate::workers::connection::LogLevel::Warn,
-                )),
+                Some(thrown),
             );
             return;
         };
@@ -3960,7 +4004,7 @@ impl ViewSyncerService {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
-                self.fail_group(&e.to_string());
+                self.fail_group_js(&e);
                 return;
             }
         };
@@ -4042,10 +4086,26 @@ impl ViewSyncerService {
     fn fail_group(&mut self, message: &str) {
         // TS `#cleanup(err)` calls `client.fail(err)` with the RAW value that
         // escaped the `#stateChanges` loop, so `getLogLevel` yields `error`,
-        // not the `warn` a bare ProtocolError would get.
+        // not the `warn` a bare ProtocolError would get. A bare `&str` here is
+        // a plain JS `Error` (`must()`, `assert()`, `new Error(msg)`) — its
+        // `String(e)` prints `Error: <message>`; a caller holding a `JsError`
+        // with a real class uses `fail_group_js`.
         self.fail_group_with_error(
             wrap_with_protocol_error(message),
-            Some(Thrown::Other(message)),
+            Some(Thrown::Other {
+                name: "Error",
+                message,
+            }),
+        );
+    }
+
+    /// [`fail_group`] for an error that knows its JS class (a hydrate throw:
+    /// `SqliteError` from the cost-model probe, `Error` otherwise), so the
+    /// `String(e)` log lines print TS's name.
+    fn fail_group_js(&mut self, error: &JsError) {
+        self.fail_group_with_error(
+            wrap_with_protocol_error(&error.message),
+            Some(error.thrown()),
         );
     }
 
@@ -4377,11 +4437,17 @@ fn reject_queued_connection(
     );
     let error = crate::protocol::ErrorBody::rehome("Reconnect required");
     // TS `ClientHandler.fail(e)` — `getLogLevel(e)` is the ProtocolErrorWithLevel's own `info`.
+    // `ProtocolErrorWithLevel(Rehome, 'info')` has no `name` override, so
+    // `String(e)` prints `ProtocolError: Reconnect required`.
+    let thrown = Thrown::WithLevel {
+        level: crate::workers::connection::LogLevel::Info,
+        name: "ProtocolError",
+    };
     tracing::info!(
         client_id = %params.client_id,
         ws_id = %params.ws_id,
         "view-syncer closing connection with error: {}",
-        error.message()
+        thrown.js_string(error.message())
     );
     // TS `sendError` (connection.ts:429): `thrown instanceof ProtocolErrorWithLevel` → its level.
     let frame = crate::protocol::error_message(&error);
@@ -4576,16 +4642,16 @@ thread_local! {
 // the code actually exercised.
 #[cfg(test)]
 thread_local! {
-    static FORCE_HYDRATE_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    static FORCE_HYDRATE_ERROR: RefCell<Option<JsError>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
-fn force_hydrate_error(message: &str) {
-    FORCE_HYDRATE_ERROR.with(|c| *c.borrow_mut() = Some(message.to_string()));
+fn force_hydrate_error(error: JsError) {
+    FORCE_HYDRATE_ERROR.with(|c| *c.borrow_mut() = Some(error));
 }
 
 #[cfg(test)]
-fn force_hydrate_error_take() -> Option<String> {
+fn force_hydrate_error_take() -> Option<JsError> {
     FORCE_HYDRATE_ERROR.with(|c| c.borrow_mut().take())
 }
 
@@ -5899,6 +5965,19 @@ mod tests {
             1,
             "OwnershipError is level 'info' in TS (cvr-store.ts:1400); got:\n{logs}"
         );
+        // TS `String(e)` = `${e.name}: ${e.message}`, and `OwnershipError`
+        // overrides `name` (cvr-store.ts:1383). Non-vacuous: render the bare
+        // message and this reads 0.
+        assert_eq!(
+            at(
+                "INFO",
+                "view-syncer closing connection with error: OwnershipError: CVR ownership was \
+                 transferred to other-task at 1970-01-01T00:00:01.000Z (last connect time: \
+                 1970-01-01T00:00:00.000Z)"
+            ),
+            1,
+            "the fail line must print TS's `String(e)`; got:\n{logs}"
+        );
         assert_eq!(
             at("INFO", "Sending error on WebSocket"),
             1,
@@ -6125,6 +6204,60 @@ mod tests {
         for (error, want) in cases {
             let got = serde_json::to_value(cvr_store_error_body(&error)).unwrap();
             assert_eq!(got, want, "wire body for {error:?}");
+        }
+    }
+
+    /// `String(e)` prints `${e.name}: ${e.message}`; the cvr-store classes that
+    /// override `name` (cvr-store.ts:1368, 1383, 1406, 1438) print it, the ones
+    /// that do not print `ProtocolError`, and a third `:` in a version string
+    /// is a `TypeError` (schema/types.ts:339). Non-vacuous: collapse the names
+    /// to 'ProtocolError'/'Error' and the rows fail.
+    #[test]
+    fn cvr_store_error_thrown_prints_the_ts_error_name() {
+        let cases: Vec<(CVRStoreError, &str)> = vec![
+            (
+                CVRStoreError::ClientNotFound("purged".to_string()),
+                "ProtocolError: purged",
+            ),
+            (
+                CVRStoreError::ConcurrentModification {
+                    expected: "01".to_string(),
+                    actual: "02".to_string(),
+                },
+                "ConcurrentModificationException: CVR has been concurrently modified. Expected 01, got 02",
+            ),
+            (
+                CVRStoreError::OwnershipError {
+                    owner: Some("task-B".to_string()),
+                    granted_at: 0.0,
+                    last_connect_time: 0.0,
+                },
+                "OwnershipError: CVR ownership was transferred to task-B at 1970-01-01T00:00:00.000Z (last connect time: 1970-01-01T00:00:00.000Z)",
+            ),
+            (
+                CVRStoreError::InvalidClientSchema("bad".to_string()),
+                "InvalidClientSchemaError: Could not parse clientSchema stored in CVR: bad",
+            ),
+            (
+                CVRStoreError::RowsVersionBehind {
+                    cvr_version: "03".to_string(),
+                    rows_version: None,
+                },
+                "RowsVersionBehindError: Rows version behind: cvr=03, rows=None",
+            ),
+            (
+                CVRStoreError::VersionParse(rust_cvr::schema::types::VersionError::TooManyParts(
+                    "a:b:c".to_string(),
+                )),
+                "TypeError: Invalid version string in CVR data: invalid version string \"a:b:c\": \
+                 more than one ':' separator",
+            ),
+        ];
+        for (error, want) in cases {
+            let message = error.to_string();
+            let body = cvr_store_error_body(&error);
+            let got = cvr_store_error_thrown(&error, &message).js_string(body.message());
+            assert_eq!(got, want, "String(e) for {error:?}");
         }
     }
 
@@ -6685,9 +6818,10 @@ mod tests {
         let _ = error_bodies(&mut rx2);
 
         // The next hydrate answers with the production failure text.
-        force_hydrate_error(
+        force_hydrate_error(JsError::new(
+            "SqliteError",
             "probe SQL contains NUL byte: SELECT \"_0_version\",\"boardId\" FROM \"stages\"",
-        );
+        ));
         use super::engine_tests::{capture_logs, captured};
         let (logs, accepted) = {
             let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
@@ -6733,11 +6867,12 @@ mod tests {
         assert_eq!(
             line_at(
                 "ERROR",
-                "view-syncer closing connection with error: probe SQL contains NUL byte"
+                "view-syncer closing connection with error: SqliteError: probe SQL contains NUL byte"
             ),
             1,
-            "TS `ClientHandler.fail` logs `String(e)` — the RAW hydrate error, not \
-             the wrapped body; got:\n{logs}"
+            "TS `ClientHandler.fail` logs `String(e)` — the RAW hydrate error with its \
+             class name (`db.prepare` throws better-sqlite3's SqliteError, \
+             sqlite-cost-model.ts:78), not the wrapped body; got:\n{logs}"
         );
         assert_eq!(
             line_at("WARN", "Sending error on WebSocket"),
@@ -10344,9 +10479,20 @@ impl ViewSyncerService {
             // `sendError` the raw value and `getLogLevel` yields 'error' — not
             // the 'info' a bodiless `close_with_error` classified this as.
             let message = e.to_string();
+            // TS `versionFromString`: a third `:` part throws `new TypeError(
+            // `Invalid version string ${str}`)` (schema/types.ts:339); every
+            // other failure is a plain `Error` (:333, lexi-version.ts:54).
+            // `String(e)` prints that class before the message.
+            let name = match e {
+                rust_cvr::schema::types::VersionError::TooManyParts(_) => "TypeError",
+                _ => "Error",
+            };
             conn.close_with_error_thrown(
                 crate::protocol::ErrorBody::internal(message.clone()),
-                Some(Thrown::Other(&message)),
+                Some(Thrown::Other {
+                    name,
+                    message: &message,
+                }),
             );
             self.delete_client_due_to_disconnect(client_id, ws_id);
             return false;
@@ -10802,7 +10948,7 @@ impl ViewSyncerService {
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
-    ) -> Result<CVR, String> {
+    ) -> Result<CVR, JsError> {
         self.config_and_hydrate_with_profile(
             cvr,
             client_id,
@@ -10861,7 +11007,7 @@ impl ViewSyncerService {
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
-    ) -> Result<CVR, String> {
+    ) -> Result<CVR, JsError> {
         // Snapshot each connected client's cookie BEFORE any poke advances it.
         // Both the config poke and the hydrate poke call `end()`, which advances
         // `base_version` to the new CVR version; catch-up (below) must replay from
@@ -10958,7 +11104,7 @@ impl ViewSyncerService {
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
-    ) -> Result<CVR, String> {
+    ) -> Result<CVR, JsError> {
         // ── Phase 1: config-driven — record client + desired queries. ──
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         cfg.ensure_client(client_id);
@@ -11082,7 +11228,7 @@ impl ViewSyncerService {
         last_active: i64,
         ttl_clock: TTLClock,
         original_client_versions: std::collections::HashMap<String, NullableCVRVersion>,
-    ) -> Result<CVR, String> {
+    ) -> Result<CVR, JsError> {
         // TS `#syncQueryPipelineSet` first runs `#hydrateUnchangedQueries`
         // (view-syncer.ts:592/1449) — a PROACTIVE re-hydrate of every
         // already-gotten same-hash query each sync, to drift-check still-alive
@@ -11971,7 +12117,7 @@ impl ViewSyncerService {
         executed: &[(String, serde_json::Value, String)],
         errored_query_ids: &[String],
         state_version: &str,
-    ) -> Result<std::collections::HashSet<String>, String> {
+    ) -> Result<std::collections::HashSet<String>, JsError> {
         let mut drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // TS view-syncer.ts:1458 — when the CVR is behind the db, hydration must
         // run through the updater path, so skip the proactive re-check.
@@ -12170,7 +12316,7 @@ impl ViewSyncerService {
         last_active: i64,
         ttl_clock: TTLClock,
         drifted_query_ids: &std::collections::HashSet<String>,
-    ) -> Result<(SyncResult, MultiPoker), String> {
+    ) -> Result<(SyncResult, MultiPoker), JsError> {
         // Port of TS `#lookupRowsForExecutedAndRemovedQueries` (cvr.ts:652-667).
         // TS kicks that off from `trackQueries` and it returns WITHOUT reading the
         // row cache when nothing was executed or removed — its own comment:
@@ -12364,7 +12510,7 @@ impl ViewSyncerService {
         }
         let total_process_time_ms = timer.stop();
         if let Some(e) = cvr_err {
-            return Err(e);
+            return Err(e.into());
         }
         crate::trace::note(
             "hydrate-fetch",

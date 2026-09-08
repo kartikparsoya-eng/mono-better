@@ -257,7 +257,13 @@ fn test_internal_error_level_follows_the_thrown_value() {
         "no caught error -> TS `: 'info'`"
     );
     assert_eq!(
-        classify_error_log_level(&error, Some(Thrown::Other("unexpected failure"))),
+        classify_error_log_level(
+            &error,
+            Some(Thrown::Other {
+                name: "Error",
+                message: "unexpected failure"
+            })
+        ),
         LogLevel::Error,
         "a caught plain error -> TS `getLogLevel(thrown)` = 'error'"
     );
@@ -267,7 +273,13 @@ fn test_internal_error_level_follows_the_thrown_value() {
         "a caught ProtocolError -> TS `getLogLevel(thrown)` = 'warn'"
     );
     assert_eq!(
-        classify_error_log_level(&error, Some(Thrown::WithLevel(LogLevel::Info))),
+        classify_error_log_level(
+            &error,
+            Some(Thrown::WithLevel {
+                level: LogLevel::Info,
+                name: "ProtocolError"
+            })
+        ),
         LogLevel::Info,
         "ProtocolErrorWithLevel's explicit level wins over every branch"
     );
@@ -290,7 +302,13 @@ fn test_epipe_in_message_logged_as_warn() {
     // warns instead of paging.
     let error = ErrorBody::internal("write EPIPE");
     assert_eq!(
-        classify_error_log_level(&error, Some(Thrown::Other("write EPIPE"))),
+        classify_error_log_level(
+            &error,
+            Some(Thrown::Other {
+                name: "Error",
+                message: "write EPIPE"
+            })
+        ),
         LogLevel::Warn,
         "a caught EPIPE is transient -> warn"
     );
