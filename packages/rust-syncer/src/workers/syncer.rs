@@ -1213,14 +1213,17 @@ impl Syncer {
         candidates[shard_for(cg_id, candidates.len())]
     }
 
-    /// Drain and stop: fail every connection with a Rehome error (so clients
-    /// reconnect elsewhere), then shut the executor threads down and join them so
-    /// their CVR pools close before the process exits.
+    /// Drain and stop: close every connection the way TS `#cleanup()` does —
+    /// frame-less `closed clientGroupID=…` (view-syncer.ts:2822; see
+    /// `ViewSyncerService::shutdown`) — then shut the executor threads down and
+    /// join them so their CVR pools close before the process exits.
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
 
-        // Ask each hosted CG to drain. The task fails its sockets with a Rehome
-        // error and terminates on its executor.
+        // Ask each hosted CG to drain. The task closes its sockets (frame-less,
+        // TS `#cleanup()`), rehomes any admission still queued behind the stop
+        // (TS `#runInLockWithCVR` inactive branch), and terminates on its
+        // executor.
         let ids: Vec<String> = self.cg_handles.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             if let Some((_, mut handle)) = self.cg_handles.remove(&id) {
@@ -1250,10 +1253,10 @@ impl Syncer {
     }
 
     /// Staggered graceful drain on SIGTERM — port of TS `Syncer.drain()`
-    /// (workers/syncer.ts:732) paced by the `DrainCoordinator`. Rehomes ONE
-    /// client group per drain interval instead of failing every socket at once
-    /// (`shutdown`), so a deploy does not stampede the receiving servers with
-    /// simultaneous reconnect+rehydrate storms.
+    /// (workers/syncer.ts:732) paced by the `DrainCoordinator`. Stops ONE
+    /// client group per drain interval (TS `vs.stop()`, :746) instead of closing
+    /// every socket at once (`shutdown`), so a deploy does not stampede the
+    /// receiving servers with simultaneous reconnect+rehydrate storms.
     ///
     /// Pacing: TS re-arms each interval with the drained view-syncer's
     /// hydration time; the router does not track per-CG hydration time, so the
@@ -1294,14 +1297,14 @@ impl Syncer {
             while !self.cg_handles.is_empty() {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
-                    tracing::warn!("drain budget exhausted; rehoming remaining groups at once");
+                    tracing::warn!("drain budget exhausted; closing remaining groups at once");
                     break;
                 }
                 tokio::select! {
                     () = coordinator.force_drain_timeout() => {}
                     () = tokio::time::sleep(remaining) => break,
                 }
-                // Pick an arbitrary live CG and rehome it (TS picks the first
+                // Pick an arbitrary live CG and stop it (TS picks the first
                 // view-syncer in its service map).
                 let Some(id) = self.cg_handles.iter().next().map(|e| e.key().clone()) else {
                     break;
@@ -1315,7 +1318,7 @@ impl Syncer {
             }
         }
 
-        // Final sweep: rehome anything left and join the executor threads.
+        // Final sweep: close anything left and join the executor threads.
         self.shutdown().await;
         tracing::info!("finished draining ({} ms)", start.elapsed().as_millis());
     }

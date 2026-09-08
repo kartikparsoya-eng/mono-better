@@ -1,5 +1,5 @@
 {
- "rust_only_count": 136,
+ "rust_only_count": 134,
  "rust_only": [
   "debug|CG {}: No replacement connection available for background retransform",
   "debug|CG {}: Retrying background retransform with replacement connection",
@@ -32,7 +32,6 @@
   "error|CG {} task panicked: {}",
   "error|CG {}: CVR store requested but executor has no CVR pool",
   "error|CG {}: advance_and_sync failed: {}",
-  "error|CG {}: config_and_hydrate failed: {}",
   "error|CG {}: delete_clients failed: {}",
   "error|CG {}: failed to load permissions ({}); denying all client queries (fail-closed)",
   "error|CG {}: initialization failed: {}",
@@ -105,7 +104,6 @@
   "warn|WebSocket {} frame over max payload: {}",
   "warn|WebSocket {} message over max payload",
   "warn|WebSocket {} read error: {}",
-  "warn|[cvr] row cache apply failed: {}",
   "warn|[cvr] row cache: {}",
   "warn|[cvr] row write-back waited {} ms for a pool connection",
   "warn|[rust-ivm-watchdog] slow-job signal: job {} past warn bound {} ago (not aborting \u2014 legit hydrates can take minutes)",
@@ -121,7 +119,7 @@
   "warn|closing slow client: downstream queue exceeded HWM",
   "warn|connect params error: {}",
   "warn|dhat-heap profiling active: dhat-heap.json written on graceful shutdown",
-  "warn|drain budget exhausted; rehoming remaining groups at once",
+  "warn|drain budget exhausted; closing remaining groups at once",
   "warn|hydrate quiet commit discarded a version bump: {} -> {}",
   "warn|initConnection auth validation failed",
   "warn|permissions hash read failed ({}); keeping current permissions",

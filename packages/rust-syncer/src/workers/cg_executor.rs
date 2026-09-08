@@ -101,8 +101,9 @@ impl CGHandle {
         self.tx.send(msg)
     }
 
-    /// Ask the CG task to shut down. Non-blocking: the task fails its sockets with
-    /// a Rehome error and terminates on its executor; the executor's own
+    /// Ask the CG task to shut down. Non-blocking: the task closes its sockets
+    /// frame-less (TS `#cleanup()`), rehomes any admission still queued behind
+    /// the stop, and terminates on its executor; the executor's own
     /// drain-join (see [`Syncer::shutdown`]) is what guarantees the task
     /// has finished before the process exits.
     pub fn shutdown(&mut self) {
@@ -307,9 +308,9 @@ async fn executor_loop(
             Some(ExecutorCommand::Shutdown) | None => break,
         }
     }
-    // Drain: the router has already asked each CG to shut down (Rehome), so the
-    // tasks terminate promptly; await them so the failures are flushed before the
-    // pool (dropped with `rt`) closes.
+    // Drain: the router has already asked each CG to shut down, so the tasks
+    // terminate promptly; await them so the closes are flushed before the pool
+    // (dropped with `rt`) closes.
     tracing::info!("CG executor {idx}: draining {} task(s)", tasks.len());
     for task in tasks {
         let _ = task.await;

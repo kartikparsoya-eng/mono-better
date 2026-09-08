@@ -3943,14 +3943,38 @@ impl ViewSyncerService {
         }
     }
 
+    /// Port of TS `#cleanup()` with NO error (view-syncer.ts:2810-2824) — the
+    /// path every drain and every idle expiry takes. `Syncer.drain()` calls
+    /// `vs.stop()` (workers/syncer.ts:746) → `#stateChanges.cancel()` → the run
+    /// loop ends NORMALLY → `#cleanup()` → `client.close(`closed
+    /// clientGroupID=${id}`)` → `Connection.close` → `ws.close()`: no error
+    /// frame, no status. The idle path is the same loop exit
+    /// (`#stateChanges.cancel()` inside `#runInLockWithCVR`, :486).
+    ///
+    /// Until 2026-09-08 this sent `["error", Rehome "Reconnect required"]` and
+    /// cited `#cleanup`'s `client.fail(...)`. Wrong on both counts:
+    /// `#cleanup(err)` fails clients only with the error that ESCAPED the run
+    /// loop — the cvr-store ownership / CAS Rehomes (cvr-store.ts:1367-1398,
+    /// `warn`, different messages), which rust reaches through `fail_group` —
+    /// and the "Reconnect required" body is thrown to a REQUESTING op in
+    /// `#runInLockWithCVR` (:464-478), never handed to `#cleanup`; rust emits it
+    /// where TS does, for an admission queued behind the stop
+    /// (`reject_queued_connection`). zero-client maps a frame-less close and a
+    /// param-less Rehome to the same `NO_STATUS_TRANSITION` reconnect
+    /// (error.ts:163, zero.ts:2392), so the reconnect cadence never differed;
+    /// the frame on the wire and the client's log line did.
     fn shutdown(&mut self) {
         self.accepting.store(false, Ordering::SeqCst);
-        // Draining: tell each client to reconnect (elsewhere) with a Rehome
-        // error, mirroring TS `#cleanup`'s `client.fail(Rehome "Reconnect
-        // required")`, rather than a silent close. The client library treats
-        // Rehome as "reconnect to another instance".
+        let reason = format!("closed clientGroupID={}", self.cg_id);
         for (_, conn) in self.connections.drain() {
-            conn.close_with_error(crate::protocol::ErrorBody::rehome("Reconnect required"));
+            // TS `ClientHandler.close(reason)` (client-handler.ts:183-186) logs
+            // at DEBUG, then `downstream.cancel()` ends the connection's stream
+            // and `Connection.close` logs `closing connection: …` at INFO.
+            tracing::debug!(
+                client_id = %conn.client_id(),
+                "view-syncer closing connection: {reason}"
+            );
+            conn.close(&reason);
         }
         self.registered_ws.clear();
         self.client_base_versions.clear();
@@ -4273,6 +4297,84 @@ pub(crate) async fn cg_event_loop(
             state.start_ttl_clock_interval();
         }
     }
+
+    // The loop has stopped (drain `Shutdown`, idle expiry, or a terminal
+    // failure). Port of the `!this.#stateChanges.active` branch of TS
+    // `#runInLockWithCVR` (view-syncer.ts:464-478): an op reaching a
+    // view-syncer whose run loop has ended — "a backlog of tasks queued on the
+    // lock, or ... a client connects before the ViewSyncer has been deleted
+    // from the ServiceRunner" (runner.ts:36-46 deletes only in `run().finally`)
+    // — is answered with `ProtocolErrorWithLevel(Rehome "Reconnect required",
+    // 'info')`. Rust's mailbox IS that lock queue: a `NewConnection` the
+    // router sent before it observed `accepting == false` is still in `rx`.
+    // Until 2026-09-08 it was dropped with the receiver, its sink with it, and
+    // the writer task ended on a closed channel — the socket closed with NO
+    // frame (ws_server.rs `None => break`). A queued `Inbound` needs nothing:
+    // TS's queued op throws the same Rehome into a downstream `#cleanup` has
+    // already closed (no second frame), and rust's socket is already closed by
+    // `shutdown()` / `fail_group`. Anything the router sends AFTER this drain
+    // fails at `tx.send` once `rx` drops and is rehomed there
+    // (syncer.rs `Client-group worker restarted`).
+    while let Ok(msg) = rx.try_recv() {
+        if let CGMessage::NewConnection { params, sink } = msg {
+            reject_queued_connection(&state_rc.borrow(), &params, sink);
+        }
+    }
+}
+
+/// Answer a `NewConnection` that reached a group whose loop has stopped — TS
+/// `#runInLockWithCVR`'s inactive branch (view-syncer.ts:464-478) as seen from
+/// `initConnection`: the throw is caught by `.catch(e => newClient.fail(e))`
+/// (:964), so `ClientHandler.fail` logs at the error's OWN level (`info`,
+/// client-handler.ts:176), and `Connection` sends the frame and closes with no
+/// status (`#closeWithThrown` → `sendError` + `close`, connection.ts:319-337).
+/// No `Connection` exists yet for a queued admission, so the three TS lines are
+/// emitted here and the frame goes straight to the sink.
+fn reject_queued_connection(
+    state: &ViewSyncerService,
+    params: &ConnectParams,
+    sink: DirectWebSocketSink,
+) {
+    // TS `this.#lc.debug?.('state changes are inactive')` (view-syncer.ts:469).
+    tracing::debug!(
+        client_id = %params.client_id,
+        ws_id = %params.ws_id,
+        "state changes are inactive"
+    );
+    let error = crate::protocol::ErrorBody::rehome("Reconnect required");
+    // TS `ClientHandler.fail(e)` — `getLogLevel(e)` is the ProtocolErrorWithLevel's own `info`.
+    tracing::info!(
+        client_id = %params.client_id,
+        ws_id = %params.ws_id,
+        "view-syncer closing connection with error: {}",
+        error.message()
+    );
+    // TS `sendError` (connection.ts:429): `thrown instanceof ProtocolErrorWithLevel` → its level.
+    let frame = crate::protocol::error_message(&error);
+    let error_body = frame
+        .get(1)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "null".to_string());
+    tracing::info!(
+        client_id = %params.client_id,
+        error_kind = ?error.kind(),
+        error_body = %error_body,
+        "Sending error on WebSocket"
+    );
+    // The admission was counted by the router (`get_or_create_cg`) and recorded
+    // in the global map by the accept path; undo both, as the init-failure
+    // reject above does.
+    let mut global = lock_unpoisoned(&state.global_connections);
+    if global
+        .get(&params.client_id)
+        .is_some_and(|info| info.ws_id == params.ws_id)
+    {
+        global.remove(&params.client_id);
+    }
+    drop(global);
+    decrement_nonzero(&state.connection_count);
+    // TS `Connection.#closeWithError`: error frame, then `ws.close()` with no status.
+    sink.fail_with_code(error, None);
 }
 
 /// Handle one CG message. Returns `false` when the event loop must stop
@@ -7777,10 +7879,19 @@ mod tests {
         assert!(state.connections.contains_key("c1"));
     }
 
-    /// On shutdown (drain), each connection is failed with a `Rehome` error so
-    /// the client reconnects elsewhere, rather than a silent close.
+    /// Drain closes every known connection the way TS `#cleanup()` does
+    /// (view-syncer.ts:2810-2824): `client.close(`closed clientGroupID=${id}`)`
+    /// → `Connection.close` → `ws.close()` — NO error frame, no status. Every TS
+    /// drain path lands here: `Syncer.drain()` → `vs.stop()` (workers/syncer.ts:
+    /// 746) → `#stateChanges.cancel()` → the run loop ends normally.
+    ///
+    /// NON-VACUOUS (2026-09-08): until this commit rust sent `["error", Rehome
+    /// "Reconnect required"]` here and the test asserted exactly that, citing a
+    /// `#cleanup` `client.fail(...)` that does not exist on this path (see the
+    /// `shutdown` doc). Restore `close_with_error(rehome(..))` and the
+    /// no-error-frame assertion fails.
     #[test]
-    fn shutdown_fails_connections_with_rehome() {
+    fn shutdown_closes_connections_frameless_like_ts_cleanup() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
@@ -7804,19 +7915,35 @@ mod tests {
         let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+        // Discard the accept-path frames (`connected`, …) so only the drain's
+        // output is judged.
+        while drx.try_recv().is_ok() {}
 
         state.shutdown();
 
-        let mut saw_rehome = false;
-        while let Ok(WsCommand::Send { msg: v, .. }) = drx.try_recv() {
-            if v[0] == "error" {
-                let s = serde_json::to_string(&v).unwrap();
-                if s.contains("Rehome") {
-                    saw_rehome = true;
+        let mut error_frames = 0;
+        let mut close_reason: Option<String> = None;
+        while let Ok(cmd) = drx.try_recv() {
+            match cmd {
+                WsCommand::Send { msg, .. } => {
+                    if msg[0] == "error" {
+                        error_frames += 1;
+                    }
                 }
+                WsCommand::Fail(_) | WsCommand::FailWithCode { .. } => error_frames += 1,
+                WsCommand::Close(reason) => close_reason = Some(reason),
+                WsCommand::CloseWithCode { reason, .. } => close_reason = Some(reason),
             }
         }
-        assert!(saw_rehome, "expected a Rehome error frame on shutdown");
+        assert_eq!(
+            error_frames, 0,
+            "TS `#cleanup()` closes a drained client with NO error frame"
+        );
+        assert_eq!(
+            close_reason.as_deref(),
+            Some("closed clientGroupID=cg1"),
+            "TS `client.close(`closed clientGroupID=${{id}}`)` (view-syncer.ts:2822)"
+        );
         assert_eq!(state.connections.len(), 0);
         assert_eq!(state.registered_ws.len(), 0);
         assert!(!state.accepting.load(Ordering::SeqCst));
@@ -7825,6 +7952,131 @@ mod tests {
         // terminal failure or an idle-expiry path.
         state.shutdown();
         assert_eq!(state.connection_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// TS `#runInLockWithCVR` (view-syncer.ts:464-478): an op that reaches a
+    /// view-syncer whose `#stateChanges` is no longer active — "a backlog of
+    /// tasks queued on the lock, or ... a client connects before the ViewSyncer
+    /// has been deleted from the ServiceRunner" — throws
+    /// `ProtocolErrorWithLevel(Rehome "Reconnect required", 'info')`; for an
+    /// `initConnection` that is `.catch(e => newClient.fail(e))` (:964), so the
+    /// client gets the Rehome frame and a no-status close. Rust's mailbox is
+    /// that lock queue: a `NewConnection` the router sent (and counted) before
+    /// it observed `accepting == false` sits behind the drain `Shutdown`.
+    ///
+    /// NON-VACUOUS (2026-09-08): before the post-loop drain in `cg_event_loop`
+    /// the queued admission was dropped with the receiver, its sink with it,
+    /// and the writer task ended on a closed channel — the socket closed with
+    /// NO frame. Remove the `while let Ok(msg) = rx.try_recv()` block and the
+    /// sink's channel yields `Disconnected` instead of the Rehome.
+    #[test]
+    fn queued_connection_behind_shutdown_is_rehomed_like_ts_run_in_lock_with_cvr() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        let ctx = crate::workers::cg_executor::CgTaskContext {
+            services_factory: factory,
+            auth_validator: validator,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            cvr_pool: None,
+            serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
+        };
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<CGMessage>();
+        // The router counted the admission before sending it (`get_or_create_cg`).
+        let connection_count = Arc::new(AtomicU64::new(1));
+        let accepting = Arc::new(AtomicBool::new(true));
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+
+        // Order is the point: the stop lands first, the admission is queued
+        // behind it.
+        tx.send(CGMessage::Shutdown).unwrap();
+        tx.send(CGMessage::NewConnection {
+            params: Box::new(test_params("c1", "ws1")),
+            sink: DirectWebSocketSink::new(ws_tx),
+        })
+        .unwrap();
+        drop(tx);
+
+        rt.block_on(cg_event_loop(
+            "cg1",
+            rx,
+            connection_count.clone(),
+            accepting.clone(),
+            ctx,
+            None,
+        ));
+
+        match ws_rx.try_recv() {
+            Ok(WsCommand::FailWithCode { error, code }) => {
+                assert!(matches!(error.kind(), crate::protocol::ErrorKind::Rehome));
+                assert_eq!(error.message(), "Reconnect required");
+                assert_eq!(code, None, "TS `ws.close()` with no status");
+            }
+            Ok(_) => panic!("expected the Rehome error frame first"),
+            Err(_) => {
+                panic!("the queued admission must be answered, not dropped with the receiver")
+            }
+        }
+        assert_eq!(
+            connection_count.load(Ordering::Relaxed),
+            0,
+            "the rejected admission is un-counted"
+        );
+        assert!(!accepting.load(Ordering::SeqCst));
+    }
+
+    /// I-1 observable (INVENTIONS.md): a connection arriving for a group whose
+    /// handle has stopped accepting — the TS "client connects before the
+    /// ViewSyncer has been deleted from the ServiceRunner" race that TS answers
+    /// with a Rehome (view-syncer.ts:464-478) — is admitted to a FRESH group and
+    /// served. Contract: never left hanging.
+    ///
+    /// NON-VACUOUS: drop the `!handle.accepting` branch of `get_or_create_cg`
+    /// (always return the existing handle) and the two handles share one
+    /// channel.
+    #[test]
+    fn connection_after_a_groups_shutdown_is_admitted_to_a_fresh_group_not_rehomed() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        let router = Arc::new(crate::workers::syncer::Syncer::new_with_limit(
+            factory,
+            validator,
+            Arc::new(crate::metrics::Metrics::default()),
+            4,
+        ));
+
+        let first = router.get_or_create_cg("cg1").unwrap();
+        // The group stops (idle expiry / drain) — its handle flips first.
+        first.accepting.store(false, Ordering::SeqCst);
+
+        let second = router.get_or_create_cg("cg1").unwrap();
+        assert!(
+            !first.tx.same_channel(&second.tx),
+            "a stopped group's handle must be replaced, not handed back"
+        );
+        assert!(
+            second.accepting.load(Ordering::SeqCst),
+            "the replacement is a live group"
+        );
+        assert_eq!(router.cg_count(), 1, "the stale handle is gone");
+        rt.block_on(router.shutdown());
     }
 
     /// `broadcast_notification` fans out to every CG thread. With none

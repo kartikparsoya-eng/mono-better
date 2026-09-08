@@ -437,11 +437,11 @@ fn main() {
         tokio::pin!(server);
         // Serve until the accept loop ends OR a shutdown signal arrives.
         // SIGTERM (a deploy: the ProcessManager signals and waits for exit)
-        // takes the staggered drain — one client group Rehomed per drain
+        // takes the staggered drain — one client group stopped per drain
         // interval (TS `Syncer.drain`) — so the receiving servers absorb the
         // reconnects gradually. SIGINT keeps dev ctrl-C fast: an immediate
-        // `router.shutdown()` fails every connection with a Rehome error and
-        // joins the CG threads. A second signal (either kind) DURING the
+        // `router.shutdown()` closes every connection (frame-less, like TS
+        // `#cleanup()`) and joins the CG threads. A second signal (either kind) DURING the
         // SIGTERM drain expedites to an immediate shutdown.
         let result = tokio::select! {
             res = &mut server => res,

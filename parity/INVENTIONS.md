@@ -57,6 +57,30 @@ guarantees, error semantics) versus TS.
   `send_error_and_close_sends_error_frame_then_close_3000` (connect-time error
   ordering). Pong keepalive liveness is structural (writer task, ws_server.rs:474)
   — the L7 prose-invariant checklist carries its citation.
+- **Observables of the model, registered 2026-09-08 (rule 10):**
+  - *A connection racing a group's shutdown.* TS keeps a stopped view-syncer in
+    the ServiceRunner until `run().finally` (runner.ts:36-46), so a connection
+    landing on it is told to reconnect: `#runInLockWithCVR` throws
+    `Rehome "Reconnect required"` at `info` (view-syncer.ts:464-478). Rust has no
+    such window for the idle case — `idle_shutdown_due` requires
+    `connection_count == 0` and the router counts the admission BEFORE sending
+    `NewConnection` (syncer.rs `get_or_create_cg`), so the group stays up; and a
+    handle already flipped to `accepting == false` is replaced by a fresh group.
+    The client is SERVED where TS would Rehome it — the Rehome exists only to
+    paper over a window this model does not have. Contract: a client is never
+    left hanging — served, or told to reconnect. Pinned by
+    `connection_after_a_groups_shutdown_is_admitted_to_a_fresh_group_not_rehomed`.
+  - *An admission queued behind the stop.* The one place the TS window DOES
+    exist in rust — a `NewConnection` still in the mailbox when the loop breaks
+    (drain `Shutdown` / terminal) — gets TS's exact answer: the Rehome(info)
+    frame and a no-status close (`reject_queued_connection`, view_syncer.rs).
+    Until 2026-09-08 it was dropped with the receiver: NO frame at all. Pinned
+    by `queued_connection_behind_shutdown_is_rehomed_like_ts_run_in_lock_with_cvr`.
+  - *Drain is frame-less, like TS.* `ViewSyncerService::shutdown` does
+    `#cleanup()`'s `client.close(`closed clientGroupID=…`)` (view-syncer.ts:2822)
+    instead of the Rehome frame it sent until 2026-09-08 under a wrong citation
+    (see the fn doc). Same zero-client reconnect cadence either way (error.ts:163,
+    zero.ts:2392). Pinned by `shutdown_closes_connections_frameless_like_ts_cleanup`.
 - **History:** violated by bug-1 (connect-ack was on the serial path). Fixed
   `5e71e24f4`.
 
