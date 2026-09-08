@@ -37,10 +37,13 @@ pub struct InitConnectionBody {
     // Every `.optional()` below is absent-or-value, never an explicit `null`
     // (M13 R4) — valita `.optional()` does not admit null, serde's `Option`
     // does.
+    // `clientSchemaSchema.optional()` — the VALUE is validated against the
+    // ported client-schema.ts shape, not just non-null (see
+    // `protocol/client_schema.rs`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::protocol::optional_no_null"
+        deserialize_with = "crate::protocol::client_schema::optional_client_schema"
     )]
     pub client_schema: Option<Value>,
     #[serde(

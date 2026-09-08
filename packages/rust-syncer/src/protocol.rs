@@ -9,15 +9,21 @@
 /// A TS `v.number()` — a JS number, in both directions.
 ///
 /// JS has ONE numeric type, so a `v.number()` field accepts `1`, `1.5`, `1E5`,
-/// `-0`, `1e309` (-> Infinity) and `1e-330` (-> 0) alike. Typing such a field
-/// `i64` in rust rejected all of those and CLOSED the connection where TS
-/// served the query — `1E5` is an ordinary way to write a timestamp (M13 R1).
+/// `-0` and `1e-330` (-> 0) alike. Typing such a field `i64` in rust rejected
+/// all of those and CLOSED the connection where TS served the query — `1E5` is
+/// an ordinary way to write a timestamp (M13 R1).
 ///
 /// Plain `f64` fixes the inbound half and breaks the outbound half: serde
 /// renders `404.0` where `JSON.stringify` renders `404`. `JsNumber` does both —
-/// it deserializes from any JSON number and serializes the way
-/// `JSON.stringify` renders a JS number (integral values as integers,
-/// non-finite as `null`, exactly as JS does).
+/// it deserializes from any JSON number `serde_json` can represent as an f64
+/// and serializes the way `JSON.stringify` renders a JS number (integral values
+/// as integers, non-finite as `null`, exactly as JS does).
+///
+/// STILL DIVERGENT (M13 R6, `parity/ZERO-DIVERGENCE-PLAN.md` "Remaining"): a
+/// literal that OVERFLOWS f64 — `1e309`, which `JSON.parse` coerces to
+/// `Infinity` and valita's `v.number()` accepts — is rejected by `serde_json`
+/// as `NumberOutOfRange` before this type ever sees it, so rust still closes
+/// the connection on that frame. Nothing here covers it.
 ///
 /// This is the same rule already hand-written in three places —
 /// `rust_ivm::ivm::data::Value`'s `Serialize`, `tdigest::number_to_value`, and
@@ -95,6 +101,7 @@ where
 
 pub mod analyze_query_result;
 pub mod change_desired_queries;
+pub mod client_schema;
 pub mod close_connection;
 pub mod connect;
 pub mod delete_clients;
@@ -253,6 +260,87 @@ mod tests {
         let body = arr.get(1).cloned().unwrap_or(serde_json::Value::Null);
         assert!(!body.is_null(), "init body collapsed to null: {body}");
         assert_eq!(body["tag"], serde_json::json!("\u{FFFD}"));
+    }
+
+    /// `initConnectionBodySchema.clientSchema` is `clientSchemaSchema.optional()`
+    /// (client-schema.ts:28-30 via connect.ts): absent is fine, but a PRESENT
+    /// value must be the strict object tree — `null`, a non-object, an object
+    /// without `tables`, an unknown key at any level, a column `type` outside
+    /// the literal union, or a non-string primary-key entry all fail valita and
+    /// close the connection. Rust typed the field `Option<Value>` behind
+    /// `optional_no_null`, and `Value` deserializes ANY JSON, so every one of
+    /// these was accepted and the handler then treated `null` as "no schema".
+    /// The M13 corpus had no `clientSchema` case, which is how it hid
+    /// (`wrongtype/initConnection.clientSchema/*`, `clientschema/*` now cover
+    /// it against the TS oracle). Non-vacuous: restore `optional_no_null` on
+    /// the field and the `null` case (the first rejected frame below) parses.
+    #[test]
+    fn init_connection_client_schema_is_validated_like_client_schema_schema() {
+        let frame = |schema: &str| {
+            format!(r#"["initConnection",{{"desiredQueriesPatch":[],"clientSchema":{schema}}}]"#)
+        };
+        for ok in [
+            r#"{"tables":{}}"#,
+            r#"{"tables":{"t":{"columns":{"id":{"type":"string"},"n":{"type":"number"},"b":{"type":"boolean"},"z":{"type":"null"},"j":{"type":"json"}},"primaryKey":["id"]}}}"#,
+            r#"{"tables":{"t":{"columns":{},"primaryKey":[]}}}"#,
+        ] {
+            let parsed =
+                parse_upstream(&frame(ok)).unwrap_or_else(|e| panic!("valita accepts {ok}: {e}"));
+            let Upstream::InitConnection(body) = parsed else {
+                panic!("expected InitConnection")
+            };
+            // The handler still gets the RAW value, untouched.
+            assert_eq!(
+                body["clientSchema"],
+                serde_json::from_str::<serde_json::Value>(ok).unwrap()
+            );
+        }
+        assert!(
+            parse_upstream(r#"["initConnection",{"desiredQueriesPatch":[]}]"#).is_ok(),
+            "absent stays optional"
+        );
+        for bad in [
+            "null",
+            r#""s""#,
+            "42",
+            "true",
+            "[]",
+            "{}",
+            r#"{"tables":[]}"#,
+            r#"{"tables":{},"extra":1}"#,
+            r#"{"tables":{"t":{"columns":{},"primaryKey":[],"x":1}}}"#,
+            r#"{"tables":{"t":{"columns":{"id":{"type":"date"}},"primaryKey":["id"]}}}"#,
+            r#"{"tables":{"t":{"columns":{"id":{}},"primaryKey":["id"]}}}"#,
+            r#"{"tables":{"t":{"columns":{"id":{"type":"string"}},"primaryKey":[1]}}}"#,
+            r#"{"tables":{"t":{"columns":{"id":{"type":"string"}}}}}"#,
+        ] {
+            assert!(
+                parse_upstream(&frame(bad)).is_err(),
+                "valita rejects clientSchema {bad}; rust accepted it"
+            );
+        }
+    }
+
+    /// INVENTIONS.md I-17: the repaired literal IS U+FFFD inside the AST, i.e.
+    /// the value the IVM filter later compares. TS holds the unpaired UTF-16
+    /// unit (0xD800) there instead, so a TS filter never equals a replica
+    /// U+FFFD where rust's does — the registered, bounded divergence. This
+    /// pins the boundary so a change to the repair is a deliberate act.
+    #[test]
+    fn lone_surrogate_ast_literal_is_u_fffd_in_rust_registered_i17() {
+        let frame = r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"simple","op":"=","left":{"type":"column","name":"name"},"right":{"type":"literal","value":"\ud800"}}}}]}]"#;
+        let parsed = parse_upstream(frame).expect("TS JSON.parse accepts the lone surrogate");
+        let Upstream::ChangeDesiredQueries(body) = parsed else {
+            panic!("expected ChangeDesiredQueries")
+        };
+        let raw = serde_json::to_value(&body).unwrap();
+        let literal = &raw["desiredQueriesPatch"][0]["ast"]["where"]["right"]["value"];
+        assert_eq!(literal, &serde_json::json!("\u{FFFD}"));
+        assert_eq!(
+            "\u{FFFD}".encode_utf16().next(),
+            Some(0xFFFD),
+            "TS compares 0xD800 here; rust compares U+FFFD (I-17)"
+        );
     }
 
     /// Port of TS `errorBodySchema` wire shapes (zero-protocol/src/error.ts +

@@ -1196,6 +1196,11 @@ pub struct ViewSyncerService {
     /// the existing tests.
     #[cfg(test)]
     config_pass_runs: u64,
+    /// Test observability: the CCM client id whose context each post-reset
+    /// rehydrate pass ran with. TS runs exactly ONE pass, with the background
+    /// connection's context (view-syncer.ts:592-606, :1500-1501, :1913-1914).
+    #[cfg(test)]
+    reset_pass_contexts: Vec<String>,
     /// Test seam (empty in production): forced outcomes for `flush_ops_to_store`,
     /// so the storeless harness can exercise the QUIET-COMMIT branch
     /// (`flushed: false` — TS `#flush` returning `{cvr: this._orig, flushed:
@@ -1313,7 +1318,14 @@ pub struct ViewSyncerService {
     /// Last observed tracked-row count (published to the `rows` gauge). Refreshed
     /// where the CG already holds the row map, so reading it costs no CVR I/O.
     /// Port of TS `ViewSyncerService.rowCount` (there a cheap in-memory getter).
-    last_row_count: usize,
+    /// TS `ViewSyncerService.rowCount` reads `#cvrStore.rowCount`, which the
+    /// store sets in exactly two places, both inside `#flush` (cvr-store.ts:1068
+    /// and :1217-1218). Rust copies the store's `row_count()` out under the
+    /// store lock right after each flush (`flush_ops_to_store`) — shared with
+    /// the offloaded flush task, hence the atomic. Nothing else writes it: an
+    /// advance that collected nothing never touches the row map (4453a0f91) and
+    /// must not zero this either (it did, until 2026-09-09).
+    last_row_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Process-wide serving-lag registry this CG publishes its snapshot into.
     serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
@@ -1555,6 +1567,8 @@ impl ViewSyncerService {
             #[cfg(test)]
             config_pass_runs: 0,
             #[cfg(test)]
+            reset_pass_contexts: Vec::new(),
+            #[cfg(test)]
             forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             existing_rows_calls: std::cell::Cell::new(0),
@@ -1589,7 +1603,7 @@ impl ViewSyncerService {
             terminal: initialization_failed,
             created_at_ms: created_at,
             served_version: None,
-            last_row_count: 0,
+            last_row_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             // Replaced by the process-wide registry in `cg_event_loop`; a
             // standalone default keeps the test constructor self-contained.
             serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
@@ -1637,7 +1651,7 @@ impl ViewSyncerService {
     /// TS `ViewSyncerService.rowCount`: `#cvrStore.rowCount`. The tracked-row
     /// count as last observed while the CG held the row map (no CVR I/O here).
     fn row_count(&self) -> usize {
-        self.last_row_count
+        self.last_row_count.load(Ordering::Relaxed)
     }
 
     /// Publish (or refresh) this CG's snapshot into the shared serving-lag
@@ -3843,138 +3857,113 @@ impl ViewSyncerService {
         // the once-per-init `hydrate_unchanged_queries` so the first re-hydrate
         // pass below rebuilds every already-gotten query from the CVR.
         self.pipelines_synced = false;
-        // Re-hydrate by re-running the config pass for every connected client
-        // with an empty desired-queries patch. Since the pipeline is now empty,
-        // Phase 2 re-adds all of the client's (and the internal) queries. The
-        // first client hydrates the shared/internal queries; later clients only
-        // add what's still missing (`has_query` guards duplicates).
-        let clients: Vec<(String, String)> = self
-            .registered_ws
-            .iter()
-            .map(|(c, w)| (c.clone(), w.clone()))
-            .collect();
-        let now = now_ms();
-        let mut cvr = cvr;
-        // Poke every registered connection on each pass (TS `#getClients()`).
-        // The first client's pass re-hydrates the full query set and pokes
-        // everyone to the new version; later passes then find their queries
-        // running and their catch-up interval empty (cheap no-ops).
-        let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        // TS's post-reset rehydrate is CVR-driven, not client-driven:
+        // TS's post-reset rehydrate (view-syncer.ts:592-606) is ONE pass —
         // `#hydrateUnchangedQueries(lc, cvr)` then `#syncQueryPipelineSet(lc,
-        // cvr, 'missing', undefined, driftedQueryIDs)` (view-syncer.ts:592-605)
-        // run ONCE off the CVR's query set with `connCtx === undefined` — the
-        // background connection's context — and never iterate `#clients`. A CG
-        // is still notified after its last client drops (the reap has not fired
-        // yet), and TS rebuilds the pipelines on that pass too. The per-client
-        // loop below would skip the rehydrate entirely for an empty client set
-        // and then `mark_version_served` a version it never hydrated or poked,
-        // leaving the engine on the stale snapshot with an empty pipeline set
-        // (so `total_hydration_time_ms` — the advance budget — reads 0) and
-        // recording a phantom e2e serving-lag observation. Run TS's pass with
-        // no poke targets.
-        if clients.is_empty() {
-            let (permissions, auth_data, custom_ctx, state_version, replica_version) =
-                self.sync_query_pipeline_set_inputs(&cvr, None);
-            let shard = self.shard.clone();
-            let ttl_clock = self.get_ttl_clock(now);
-            match self
-                .sync_query_pipeline_set(
-                    cvr,
-                    CustomQueryTransformMode::Missing,
-                    &[],
-                    &shard,
-                    permissions.as_ref(),
-                    &auth_data,
-                    custom_ctx.as_ref(),
-                    state_version,
-                    replica_version,
-                    self.last_connect_time,
-                    now,
-                    ttl_clock,
-                    std::collections::HashMap::new(),
-                )
-                .await
-            {
-                Ok(c) => cvr = c,
-                Err(e) => {
-                    tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
-                    self.fail_group(&e);
-                    return;
-                }
-            }
-            self.mark_version_served(&cvr.version);
-            self.cvr = Some(cvr);
+        // cvr, 'missing', undefined, driftedQueryIDs)` — and both resolve their
+        // `connCtx` to `connContextManager.mustGetBackgroundConnectionContext()`
+        // (view-syncer.ts:1500-1501 and :1913-1914). It never iterates
+        // `#clients`; the pokes go to `#getClients()`, every connection.
+        //
+        // Until 2026-09-09 rust ran this pass once PER registered client, each
+        // with that client's own context, and — with no client registered —
+        // once with an empty auth (d8c00a28f). Same frames, but a different
+        // context for the custom-query transform, and a group TS would have
+        // stopped kept serving. One pass, the background connection's context,
+        // read at use time (rules 8 and 9).
+        let background = lock_unpoisoned(&self.ccm).get_background_connection_context();
+        let Some(background) = background else {
+            // TS `mustGetBackgroundConnectionContext()` throws
+            // `ProtocolErrorWithLevel({kind: InvalidConnectionRequest, message},
+            // 'warn')` (connection-context-manager.ts:555-565). Thrown inside
+            // the `#stateChanges` loop it escapes `run()`, whose catch logs
+            // `stopping view-syncer ${id}: ${String(e)}` at `getLogLevel(e)`
+            // (view-syncer.ts:617-622; `String(e)` of a ProtocolError is
+            // `ProtocolError: <message>`, zero-protocol error.ts:165-166) and
+            // hands it to `#cleanup(e)`, which fails every client with it. A
+            // group whose last client has dropped — the reap not yet fired —
+            // takes exactly this path in TS.
+            const MESSAGE: &str = "No validated connection is available for shared query work.";
+            // `String(e)` of a ProtocolError: `${name}: ${message}`.
+            let thrown = format!("ProtocolError: {MESSAGE}");
+            tracing::warn!(
+                cg_id = %self.cg_id,
+                "stopping view-syncer {}: {thrown}",
+                self.cg_id
+            );
+            self.fail_group_with_error(
+                crate::protocol::ErrorBody::basic(
+                    crate::protocol::ErrorKind::InvalidConnectionRequest,
+                    MESSAGE.to_string(),
+                ),
+                Some(Thrown::WithLevel(
+                    crate::workers::connection::LogLevel::Warn,
+                )),
+            );
             return;
-        }
-        for (client_id, ws_id) in clients {
-            let state_version = self
-                .pipelines()
-                .current_version()
-                .unwrap_or_else(|| cvr.version.state_version.clone());
-            let replica_version = self.replica_version.clone();
-            // No eager row-map read. TS reaches the row records only through
-            // `#lookupRowsForExecutedAndRemovedQueries`, which returns without
-            // reading them when nothing was executed or removed — "Query-less
-            // update. This can happen for config only changes." (cvr.ts:661-667).
-            // `hydrate_and_sync` performs that read behind the same condition, so
-            // a config-only pass no longer touches `cvr.rows` at all. `rowCount`
-            // is maintained by the store during flush (cvr-store.ts:1068/:1217),
-            // which is where TS reads it from too.
-            // authData read from the ConnectionContextManager at use time (TS
-            // `mustGetConnectionContext(selector).auth?.raw`, decoded).
-            let auth_data = lock_unpoisoned(&self.ccm)
-                .must_get_connection_context(&CcmConnectionSelector {
-                    client_id: client_id.clone(),
-                    ws_id: ws_id.clone(),
-                })
-                .ok()
-                .and_then(|c| c.auth)
-                .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
-                .unwrap_or_else(|| serde_json::json!({}));
-            let ttl_clock = self.get_ttl_clock(now);
-            let query_ctx = self.query_context_for(&client_id, &ws_id);
-            // Clone the CVR into the call so a failure doesn't consume it.
-            // Staged clones (same &mut-receiver split as above).
-            let shard = self.shard.clone();
-            let profile_id = self.client_profile_ids.get(&client_id).cloned();
-            let permissions = self.permissions.clone();
-            match self
-                .config_and_hydrate_with_profile(
-                    cvr.clone(),
-                    &client_id,
-                    &all_ws_ids,
-                    &shard,
-                    Vec::new(),
-                    Vec::new(),
-                    false,
-                    None,
-                    // TS's run-loop init sync re-transforms only what is missing:
-                    // `#hydrateUnchangedQueries` (which just transformed every
-                    // custom query) is followed by
-                    // `#syncQueryPipelineSet(lc, cvr, 'missing', undefined, drifted)`
-                    // (view-syncer.ts:599-605).
-                    CustomQueryTransformMode::Missing,
-                    profile_id.as_deref(),
-                    permissions.as_ref(),
-                    &auth_data,
-                    query_ctx.as_ref(),
-                    state_version,
-                    replica_version,
-                    self.last_connect_time,
-                    now,
-                    ttl_clock,
-                )
-                .await
-            {
-                Ok(c) => cvr = c,
-                Err(e) => {
-                    tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
-                    self.fail_group(&e.to_string());
-                    return;
-                }
+        };
+        #[cfg(test)]
+        self.reset_pass_contexts.push(background.client_id.clone());
+        let now = now_ms();
+        // TS `#getClients()` — every registered connection is a poke target.
+        let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
+        let state_version = self
+            .pipelines()
+            .current_version()
+            .unwrap_or_else(|| cvr.version.state_version.clone());
+        let replica_version = self.replica_version.clone();
+        // No eager row-map read. TS reaches the row records only through
+        // `#lookupRowsForExecutedAndRemovedQueries`, which returns without
+        // reading them when nothing was executed or removed. `rowCount` is
+        // maintained by the store during flush (cvr-store.ts:1068/:1217),
+        // which is where TS reads it from too.
+        // authData: the BACKGROUND connection's, decoded at use time (TS
+        // `resolvedConnCtx.auth?.raw`).
+        let auth_data = background
+            .auth
+            .as_ref()
+            .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let ttl_clock = self.get_ttl_clock(now);
+        let query_ctx = self.query_context_for(&background.client_id, &background.ws_id);
+        // Staged clones: `self.pipelines()` takes `&mut self`.
+        let shard = self.shard.clone();
+        let profile_id = self.client_profile_ids.get(&background.client_id).cloned();
+        let permissions = self.permissions.clone();
+        let cvr = match self
+            .config_and_hydrate_with_profile(
+                cvr,
+                &background.client_id,
+                &all_ws_ids,
+                &shard,
+                Vec::new(),
+                Vec::new(),
+                false,
+                None,
+                // TS's run-loop init sync re-transforms only what is missing:
+                // `#hydrateUnchangedQueries` (which just transformed every
+                // custom query) is followed by
+                // `#syncQueryPipelineSet(lc, cvr, 'missing', undefined, drifted)`
+                // (view-syncer.ts:599-605).
+                CustomQueryTransformMode::Missing,
+                profile_id.as_deref(),
+                permissions.as_ref(),
+                &auth_data,
+                query_ctx.as_ref(),
+                state_version,
+                replica_version,
+                self.last_connect_time,
+                now,
+                ttl_clock,
+            )
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
+                self.fail_group(&e.to_string());
+                return;
             }
-        }
+        };
         self.mark_version_served(&cvr.version);
         self.cvr = Some(cvr);
     }
@@ -4961,56 +4950,52 @@ mod tests {
         }
     }
 
-    /// TS's post-reset rehydrate is CVR-driven, not client-driven:
-    /// `#hydrateUnchangedQueries(lc, cvr)` then `#syncQueryPipelineSet(lc, cvr,
-    /// 'missing', undefined, driftedQueryIDs)` (view-syncer.ts:592-605) run off
-    /// the CVR's query set with an UNDEFINED connection context and never
-    /// iterate `#clients`; `#pipelinesSynced = true` follows (:606). Rust's
-    /// reset looped over `registered_ws`, so a reset on a CG whose last client
-    /// had dropped (the 5s reap not yet fired — `on_notification` has no client
-    /// gate) rebuilt NOTHING, left `pipelines_synced` false with an empty
-    /// pipeline set, and still marked the version served. An empty pipeline set
-    /// zeroes `total_hydration_time_ms`, which IS the advance budget
-    /// (`advancementResetTimeLimitMs`, pipeline-driver.ts:191). Reverting the
-    /// `clients.is_empty()` branch fails both assertions.
-    #[test]
-    fn reset_with_no_registered_client_still_rebuilds_the_pipelines_from_the_cvr() {
+    /// Replica for the post-reset tests: the `issue` table the CVR below
+    /// declares, with one row.
+    fn reset_replica_db(tag: &str) -> String {
         use rusqlite::Connection;
-        let db_path = format!("/tmp/rust-syncer-reset-noclient-{}.db", std::process::id());
+        let db_path = format!("/tmp/rust-syncer-reset-{tag}-{}.db", std::process::id());
         for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            let _ = conn.pragma_update(None, "journal_mode", "wal2");
-            let _ = conn.pragma_update(None, "journal_mode", "wal");
-            conn.execute_batch(
-                r#"
-                CREATE TABLE "_zero.replicationConfig" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
-                    replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
-                CREATE TABLE "_zero.replicationState" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
-                    stateVersion TEXT NOT NULL);
-                CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "table" TEXT NOT NULL,
-                    "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, "pos" INTEGER NOT NULL,
-                    PRIMARY KEY ("stateVersion","pos"));
-                INSERT INTO "_zero.replicationConfig" VALUES ('singleton','00','[]');
-                INSERT INTO "_zero.replicationState"  VALUES ('singleton','01');
-                CREATE TABLE "issue" ("id" "text|NOT_NULL", "title" "text", "_0_version" "text",
-                    PRIMARY KEY ("id"));
-                INSERT INTO "issue" VALUES ('i1','one','01');
-                CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);
-                "#,
-            )
-            .unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        let _ = conn.pragma_update(None, "journal_mode", "wal");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+            CREATE TABLE "_zero.replicationState" (lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL);
+            CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "table" TEXT NOT NULL,
+                "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, "pos" INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion","pos"));
+            INSERT INTO "_zero.replicationConfig" VALUES ('singleton','00','[]');
+            INSERT INTO "_zero.replicationState"  VALUES ('singleton','01');
+            CREATE TABLE "issue" ("id" "text|NOT_NULL", "title" "text", "_0_version" "text",
+                PRIMARY KEY ("id"));
+            INSERT INTO "issue" VALUES ('i1','one','01');
+            CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);
+            "#,
+        )
+        .unwrap();
+        db_path
+    }
+
+    fn reset_replica_cleanup(db_path: &str) {
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    }
+
+    fn reset_state(rt: &tokio::runtime::Runtime, db_path: &str) -> ViewSyncerService {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(PermsReloadFactory {
             handle: rt.handle().clone(),
-            replica_path: db_path.clone(),
+            replica_path: db_path.to_string(),
             initial_hash: None,
             initial_permissions: Some(serde_json::json!({"tables": {}})),
         });
-        let mut state = ViewSyncerService::new_test(
+        ViewSyncerService::new_test(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5022,13 +5007,38 @@ mod tests {
             }),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
-        );
-        // A CVR carrying one gotten query, and NO registered connection: the
-        // last client dropped but the CG has not been reaped yet.
+        )
+    }
+
+    /// A CVR carrying one gotten query over `issue`, desired by client `c1`
+    /// (a query no client desires is unreferenced and would be dropped by the
+    /// pass itself, which is not what a reset re-hydrates).
+    fn reset_cvr() -> CVR {
         let mut cvr = empty_cvr("cg1", "00");
         cvr.client_schema = Some(serde_json::json!({
             "tables": {"issue": {"columns": {"id": {"type": "string"}}, "primaryKey": ["id"]}}
         }));
+        for client in ["c1", "c2"] {
+            cvr.clients.insert(
+                client.to_string(),
+                rust_cvr::schema::types::ClientRecord {
+                    id: client.to_string(),
+                    desired_query_ids: vec!["q1".to_string()],
+                },
+            );
+        }
+        let version = cvr.version.clone();
+        let mut client_state = std::collections::BTreeMap::new();
+        for client in ["c1", "c2"] {
+            client_state.insert(
+                client.to_string(),
+                rust_cvr::schema::types::ClientState {
+                    inactivated_at: None,
+                    ttl: 1_000,
+                    version: version.clone(),
+                },
+            );
+        }
         cvr.queries.insert(
             "q1".to_string(),
             QueryRecord::Client(rust_cvr::schema::types::ClientQueryRecord {
@@ -5039,34 +5049,116 @@ mod tests {
                     row_set_signature: None,
                 },
                 ast: serde_json::json!({"table": "issue"}),
-                client_state: std::collections::BTreeMap::new(),
-                patch_version: None,
+                client_state,
+                patch_version: Some(version),
             }),
         );
+        cvr
+    }
+
+    /// TS's post-reset rehydrate resolves its context with
+    /// `mustGetBackgroundConnectionContext()` (view-syncer.ts:1500-1501,
+    /// :1913-1914), which THROWS `ProtocolErrorWithLevel(InvalidConnectionRequest,
+    /// 'warn')` when no validated connection exists
+    /// (connection-context-manager.ts:555-565). The throw escapes the
+    /// `#stateChanges` loop; `run()`'s catch logs `stopping view-syncer <id>:
+    /// <String(e)>` at warn (:617-622) and `#cleanup(e)` ends the group. A CG
+    /// whose last client just dropped (reap pending) is notified and takes
+    /// exactly this path. Rust used to rehydrate it with an empty auth instead
+    /// (d8c00a28f) and keep serving. Non-vacuous: restore that branch and the
+    /// group stays live with its query rebuilt.
+    #[test]
+    fn reset_with_no_validated_connection_stops_the_group_like_ts() {
+        use super::engine_tests::{capture_logs, captured};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let db_path = reset_replica_db("noconn");
+        let mut state = reset_state(&rt, &db_path);
         assert!(
-            state.registered_ws.is_empty(),
-            "the fixture must have no registered connection"
+            state.registered_ws.is_empty()
+                && lock_unpoisoned(&state.ccm)
+                    .get_background_connection_context()
+                    .is_none(),
+            "the fixture must have no validated connection"
         );
         state.pipelines_synced = true;
-        rt.block_on(state.reset_pipelines_and_rehydrate(cvr, "advancement-timeout"));
+        let logs = {
+            let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+            rt.block_on(state.reset_pipelines_and_rehydrate(reset_cvr(), "advancement-timeout"));
+            captured(&buf)
+        };
+        reset_replica_cleanup(&db_path);
+        assert!(
+            state.terminal,
+            "TS's mustGetBackgroundConnectionContext throw ends the group; rust kept it live"
+        );
+        assert_eq!(
+            state.query_count(),
+            0,
+            "the throw precedes every addQuery: nothing is rebuilt"
+        );
+        assert!(
+            state.reset_pass_contexts.is_empty(),
+            "no rehydrate pass may run without a background connection"
+        );
+        let line = "stopping view-syncer cg1: ProtocolError: No validated connection is \
+                    available for shared query work.";
+        assert_eq!(
+            logs.lines()
+                .filter(|l| l.contains("WARN") && l.contains(line))
+                .count(),
+            1,
+            "TS run() logs the escaped error at getLogLevel(e) = warn (view-syncer.ts:617-622); got:\n{logs}"
+        );
+    }
+
+    /// With validated connections, TS rebuilds in ONE pass —
+    /// `#hydrateUnchangedQueries` then `#syncQueryPipelineSet('missing')`,
+    /// view-syncer.ts:592-606 — using the BACKGROUND connection's context for
+    /// both (:1500-1501, :1913-1914) and poking `#getClients()`. Rust looped
+    /// once per registered client, each with that client's own context.
+    /// Non-vacuous: restore the per-client loop and two contexts are recorded.
+    #[test]
+    fn reset_runs_one_pass_with_the_background_connection_context_like_ts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let db_path = reset_replica_db("bg");
+        let mut state = reset_state(&rt, &db_path);
+        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx1),
+        ));
+        rt.block_on(state.on_new_connection(
+            pinned_params("c2", "ws2", "user-1"),
+            DirectWebSocketSink::new(tx2),
+        ));
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
+        validate_test_connection(&rt, &mut state, "c2", "ws2");
+        let background = lock_unpoisoned(&state.ccm)
+            .get_background_connection_context()
+            .map(|c| c.client_id)
+            .expect("two validated connections must yield a background connection");
+        state.pipelines_synced = true;
+        rt.block_on(state.reset_pipelines_and_rehydrate(reset_cvr(), "advancement-timeout"));
+        reset_replica_cleanup(&db_path);
         assert!(
             !state.terminal,
-            "a clientless reset must not fail the group"
+            "a reset with a background connection must not fail the group"
         );
         assert!(
             state.pipelines_synced,
-            "TS re-syncs the pipeline set from the CVR after a reset and sets \
-             #pipelinesSynced = true (view-syncer.ts:599-606); rust left it false"
+            "TS sets #pipelinesSynced = true after the single pass (view-syncer.ts:606)"
         );
         assert_eq!(
             state.query_count(),
             1,
-            "the CVR's query must be back in the pipelines — an empty pipeline set \
-             zeroes total_hydration_time_ms, the advance budget"
+            "the CVR's query is back in the pipelines"
         );
-        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
-        }
+        assert_eq!(
+            state.reset_pass_contexts,
+            vec![background],
+            "exactly ONE pass, run with the background connection's context"
+        );
     }
 
     /// TS parity (view-syncer.ts:1933): the transform site re-reads permissions
@@ -9970,6 +10062,8 @@ impl ViewSyncerService {
             #[cfg(test)]
             config_pass_runs: 0,
             #[cfg(test)]
+            reset_pass_contexts: Vec::new(),
+            #[cfg(test)]
             forced_flush_outcomes: std::cell::RefCell::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             existing_rows_calls: std::cell::Cell::new(0),
@@ -10004,7 +10098,7 @@ impl ViewSyncerService {
             terminal: false,
             created_at_ms: created_at,
             served_version: None,
-            last_row_count: 0,
+            last_row_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
             _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_GROUP),
         }
@@ -10559,6 +10653,7 @@ impl ViewSyncerService {
         let log_shard_num = self.shard.shard_num;
         let log_cg_id = self.cg_id.clone();
         let cvr_flush_id = rust_cvr::cvr_store::next_cvr_flush_id();
+        let last_row_count = self.last_row_count.clone();
         // TS `#flushUpdater` wraps EVERY CVR flush (config, hydrate, advance)
         // in `#runPriorityOp(lc, 'flushing cvr', ...)` (view-syncer.ts:
         // 1069-1071); this is the one seat all rust flushes pass through.
@@ -10595,7 +10690,15 @@ impl ViewSyncerService {
                 let result = loop {
                     let outcome = {
                         let mut store = store_arc.lock().await;
-                        store.flush(&expected, &flushed, last_connect_time as f64).await
+                        let outcome = store
+                            .flush(&expected, &flushed, last_connect_time as f64)
+                            .await;
+                        // TS `get rowCount() { return this.#cvrStore.rowCount; }`
+                        // — the count as `#flush` left it (cvr-store.ts:1068,
+                        // 1217-1218), copied out under the lock so
+                        // `publish_serving_lag` reads what TS reads.
+                        last_row_count.store(store.row_count(), Ordering::Relaxed);
+                        outcome
                     };
                     match outcome {
                         Ok(r) => break Ok(r),
@@ -11641,10 +11744,13 @@ impl ViewSyncerService {
         // against the un-advanced cookies — this snapshot reproduces that.
         original_versions: &std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<(), String> {
+        // TS has no client-count guard: `startPoke([], …)` is a poker with no
+        // targets, the patches are still gathered, and `#markVersionServed`
+        // still runs (view-syncer.ts:2399-2400, 2464-2467). Returning early on
+        // an empty set skipped the served mark — the serving-lag observation
+        // and `servedVersion` TS records for a group whose last client has
+        // just dropped.
         let clients = self.get_clients(poke_ws_ids);
-        if clients.is_empty() {
-            return Ok(());
-        }
 
         // TS creates the pokers BEFORE gathering any patches
         // (view-syncer.ts:2400 `const pokers = usePokers ?? startPoke(...)`) and
@@ -12525,7 +12631,6 @@ impl ViewSyncerService {
         } else {
             self.existing_rows().await.map_err(|e| e.to_string())?
         };
-        self.last_row_count = existing_rows_owned.len();
         let existing_rows: &RowRecordMap = &existing_rows_owned;
 
         // Build the updater with the real post-advance version, then replay the
@@ -13853,10 +13958,14 @@ mod engine_tests {
         // at ~900 CGs against ~3K on the TS arm. Drop the `collected.is_empty()`
         // guard in `advance_and_sync` and the assertion below fails with 1.
         engine.existing_rows_calls.set(0);
+        engine
+            .last_row_count
+            .store(7, std::sync::atomic::Ordering::Relaxed);
         let result = engine
             .advance_and_sync(make_cvr(), "v1".to_string(), &["ws1".to_string()], 0, 0, 0)
             .await;
         let row_map_reads = engine.existing_rows_calls.get();
+        let row_count_after = engine.row_count();
 
         cleanup();
         let result = result.expect("advance_and_sync must not error/panic");
@@ -13869,6 +13978,17 @@ mod engine_tests {
             row_map_reads, 0,
             "an advance with no collected row changes must not touch the CVR row \
              map — TS never materialises one for an advance"
+        );
+        // TS `rowCount` is `#cvrStore.rowCount`, written only by `#flush`
+        // (cvr-store.ts:1068, 1217); a zero-change advance flushes no rows, so
+        // the count must be exactly what it was. 4453a0f91 assigned the (now
+        // empty) lazily-read map's length here, zeroing the `zero.sync.rows`
+        // gauge after every no-op advance. Non-vacuous: restore that
+        // assignment and this reads 0.
+        assert_eq!(
+            row_count_after, 7,
+            "a zero-change advance must leave rowCount untouched (TS reads \
+             #cvrStore.rowCount, which only #flush writes)"
         );
     }
 
@@ -15397,6 +15517,37 @@ mod engine_tests {
             engine.served_version.as_deref(),
             Some(cvr.version.state_version.as_str()),
             "TS marks the version served after pokers.end(), even with no patches"
+        );
+    }
+
+    /// TS `#catchupClients` has no client-count guard: with `#getClients()`
+    /// empty it still builds the (target-less) pokers, gathers the patches and
+    /// runs `#markVersionServed(cvr.version)` (view-syncer.ts:2399-2400,
+    /// 2464-2467). Rust returned early on an empty client set, skipping the
+    /// served mark — the e2e serving-lag observation and the cross-CG
+    /// `servedVersion` TS records for a group whose last client just dropped.
+    /// Non-vacuous: restore the `clients.is_empty()` early return and
+    /// `served_version` stays `None`.
+    #[tokio::test]
+    async fn catchup_clients_marks_the_version_served_with_no_clients_like_ts() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let cvr = super::empty_cvr("cg1", "v1");
+        engine
+            .catchup_clients(
+                &cvr,
+                &cvr.version.clone(),
+                &[],
+                &[],
+                &std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.served_version.as_deref(),
+            Some(cvr.version.state_version.as_str()),
+            "TS marks the version served even when no client is connected"
         );
     }
 

@@ -812,7 +812,20 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
 - **Tests:** xyne-art `tools/frameseq_gate.py` counts this exact shape as
   `known(K1)` and fails on anything else; `hydrate_real_rows_produces_row_pokes`
   (stage_e) pins (c)'s poke contents.
-- **Known gap:** none beyond (b) and the transform-once retry gap above.
+- **Failure-scope observable (registered 2026-09-09):** because the first
+  sync runs inside the config pass, a hydrate throw out of
+  `hydrate_unchanged_queries` (view_syncer.rs, the config-pass call) fails the
+  REQUESTING connection (`Connection::fail`, TS `#runInLockForClient`'s catch)
+  where TS's twin — the same throw from the `#stateChanges` loop init
+  (view-syncer.ts:592) — escapes `run()` and `#cleanup(err)` fails EVERY
+  client of the group. With one client the two are identical; with several,
+  rust fails the requester and the next client's config pass repeats the
+  hydrate and fails it too, so the group converges to TS's end state one
+  connection at a time. The run-loop twin (`reset_pipelines_and_rehydrate`)
+  fails the whole group. Test:
+  `hydrate_failure_fails_only_the_requesting_connection_like_ts`.
+- **Known gap:** none beyond (b), the transform-once retry gap and the
+  failure-scope observable above.
 
 ## I-16 — Advance buffers the change delta, then applies it to the CVR
 - **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`
@@ -850,3 +863,71 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   (`advance_yield_test` — row changes byte-identical with and without yields —
   and the syncer's `advance_and_sync` tests). The budget half is NOT pinned:
   that is exactly the open divergence above.
+
+## I-17 — Unpaired-surrogate escapes are repaired to U+FFFD at the frame parser
+- **Files:** `rust-syncer/src/protocol/up.rs` (`parse_frame_json`,
+  `replace_unpaired_surrogate_escapes`); every raw-frame re-read in
+  `workers/syncer_ws_message_handler.rs` routes through `parse_frame_json`.
+- **No TS twin (string model, not logic):** TS `JSON.parse` yields a JS string
+  holding the unpaired UTF-16 unit (`"\ud800"` → `charCodeAt(0) === 0xd800`),
+  and valita's string check is a `typeof`, so TS serves the frame. A rust
+  `String` cannot hold a lone surrogate, so the escape becomes U+FFFD before
+  the AST exists (01d4790f1). Only the error path runs the repair.
+- **Contract (TS-observable):** a frame TS accepts is accepted (no
+  `InvalidMessage` close), and what TS PERSISTS for that string — CVR
+  `queryArgs` / `clientAST`, PG rows written through the mutator — is U+FFFD
+  as well, because node re-encodes a lone surrogate at every UTF-8 boundary it
+  crosses; stored state is therefore identical.
+- **KNOWN DIVERGENCE (registered 2026-09-09; not fixable inside a `String`):**
+  (a) in-memory comparison — a ZQL filter literal that held a lone surrogate
+  never `=`/`LIKE`-matches a replica string in TS (0xD800 ≠ U+FFFD, and the
+  UTF-16 `stringCompare` port orders them apart) but DOES match rows that
+  store U+FFFD in rust, and its sort position differs; (b)
+  `transformationHash` / `hashOfNameAndArgs` — `JSON.stringify` emits the
+  ASCII escape `\ud800` (well-formed stringify), so TS hashes seven ASCII
+  bytes where rust hashes the three bytes of U+FFFD, and the two engines
+  compute DIFFERENT hashes for the same query; a TS→rust hand-over re-hydrates
+  it once. Bounded to strings containing an unpaired surrogate, which a
+  browser produces only by slicing mid-astral-pair (a length-capped input).
+- **Tests:** `parse_upstream_accepts_unpaired_surrogate_like_ts_json_parse`,
+  `parse_upstream_accepts_unpaired_low_surrogate`,
+  `parse_upstream_preserves_well_formed_surrogate_pairs`,
+  `parse_upstream_does_not_treat_escaped_backslash_as_a_unicode_escape`,
+  `parse_frame_json_keeps_the_body_of_a_surrogate_bearing_init_frame`
+  (protocol.rs) pin the accept and the U+FFFD value;
+  `lone_surrogate_ast_literal_is_u_fffd_in_rust_registered_i17` pins the
+  boundary of divergence (a) inside the AST so a change to the repair is a
+  deliberate act.
+
+## I-18 — `TimeSliceTimer` laps on thread CPU time (`process_clock_ms`), not wall time
+- **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`
+  (`process_clock_ms`, `TimeSliceTimer::{start_lap, stop_lap, elapsed_lap,
+  total_elapsed}`, 16597ad7c). Consumers: the `PipelineDriver#shouldYield`
+  port (yield cadence), `total_hydration_time_ms` (the advance budget's base),
+  `AdvanceGate::new(.., clock)` (the budget arms read this timer, bee9a81b5).
+- **No TS twin (execution model):** TS reads `performance.now()`. One event
+  loop per sync-worker PROCESS means a running slice is never preempted, so
+  its wall time IS its execution time. Rust runs `ZERO_SYNCER_SHARDS`
+  `current_thread` executors as OS threads (I-12), where wall time also counts
+  OS preemption TS never experiences. `CLOCK_THREAD_CPUTIME_ID` is the
+  quantity TS's wall clock measures under TS's model. Measured 2026-09-06,
+  same image and trace, only the shard count changed: 1,523 threads → 1,194
+  `advancement-timeout` resets per 10 min; 63 threads → 3.
+- **Contract (TS-observable):** the yield cadence and the hydrate / advance
+  budgets charge a lap the execution time TS would charge it, so a client sees
+  the same reset-or-not decision TS makes for the same CPU work; a lap never
+  spans an `.await`, and each shard is one thread, so a lap is always measured
+  on the thread that ran it.
+- **KNOWN DIVERGENCE (registered 2026-09-09):** a lap that BLOCKS — SQLite
+  page reads from disk inside a fetch, the disk-bound regime the sandbox
+  measurements sat in — advances TS's wall clock but not this clock. Under
+  disk-bound load rust therefore (a) yields less often within a shard than TS
+  would, and (b) records a smaller `total_hydration_time_ms`, i.e. a smaller
+  advance budget, than TS. The rust-only `ADVANCE_WALL_CLOCK_CEILING_MS` arm
+  (60 s, exclusion-free wall time) backstops a blocked advance. A platform
+  without `CLOCK_THREAD_CPUTIME_ID` falls back to wall time — TS's exact
+  quantity.
+- **Tests:** `tests/time_slice_clock_test.rs` (a lap reads CPU time; preempted
+  wall time is not charged);
+  `advance_gate::the_budget_reads_the_time_slice_timer_not_wall_clock`
+  (rust-ivm: the budget reads this timer, not wall clock).

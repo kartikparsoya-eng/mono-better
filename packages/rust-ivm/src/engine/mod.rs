@@ -1326,8 +1326,6 @@ impl Engine {
             buffered: std::collections::VecDeque::new(),
             result: None,
             should_yield,
-            last_return: Instant::now(),
-            last_was_yield: false,
             perf_timer,
             restored: false,
         })
@@ -2372,14 +2370,6 @@ pub struct AdvanceStream {
     /// Terminal outcome once the diff is exhausted or a reset / error fired.
     result: Option<Result<(), crate::snapshotter::DiffError>>,
     should_yield: Option<Rc<dyn Fn() -> bool>>,
-    /// When the previous `next()` returned — the gap until the next pull is
-    /// consumer time, excluded from the economic budget.
-    last_return: Instant,
-    /// Whether the item returned by the previous `next()` was a `Yield`, i.e.
-    /// the consumer spent the interval awaiting its time slice. Only that
-    /// interval is excluded from the economic budget (TS `TimeSliceTimer`
-    /// stops exclusively inside `yieldProcess`).
-    last_was_yield: bool,
     perf_timer: Instant,
     restored: bool,
 }
@@ -2614,29 +2604,22 @@ impl Iterator for AdvanceStream {
         // `TimeSliceTimer` — `#advancePipelines` hands the same timer to
         // `pipelines.advance(timer)` (which the budget arms read as
         // `advanceTimer.totalElapsed()`, pipeline-driver.ts:1102) and to
-        // `#processChanges` (view-syncer.ts:2579-2585). `#processChanges` stops
-        // it in exactly ONE place: `await timer.yieldProcess(…)`
-        // (view-syncer.ts:2508-2512). Every other consumer cost —
-        // `updater.received()`, `pokers.addPatch()` — runs with the timer
-        // RUNNING and counts against the budget.
+        // `#processChanges` (view-syncer.ts:2579-2585), and that timer stops in
+        // exactly ONE place: `await timer.yieldProcess(…)` (view-syncer.ts:
+        // 2508-2512). The gate reads that same timer (`AdvanceGate::new(..,
+        // clock)`, bee9a81b5), so NOTHING is excluded here: every consumer cost
+        // between two pulls — `updater.received()`, `pokers.addPatch()` —
+        // counts against the budget, and a yielded lap does not, both exactly
+        // as in TS. (Earlier revisions excluded the inter-pull gap themselves,
+        // first for a NAPI boundary deleted in a5e502ad9, then only after a
+        // `Yield`; the shared clock superseded both, and the bookkeeping they
+        // needed is gone.)
         //
-        // So exclude the awaited time slice and NOTHING else. Excluding all
-        // inter-pull time (the previous behaviour, justified by a NAPI boundary
-        // deleted in a5e502ad9) made rust's `elapsed` smaller than TS's for
-        // identical work, so rust shed LESS eagerly than TS. The wall-clock
-        // ceiling arm stays exclusion-free.
-        if self.last_was_yield {
-            // (no exclusion: the gate now reads the view-syncer's
-            // TimeSliceTimer, which TS stops for the yielded lap itself)
-        }
         // Arm the per-fetch gate for THIS pull only. The guard disarms on
         // return (and on unwind), so a suspended stream never leaves its
         // budget armed on a shard another client group is hydrating on.
         let _gate_guard = crate::advance_gate::arm(self.advance_gate.clone());
-        let item = self.next_inner();
-        self.last_was_yield = matches!(item, Some(crate::ivm::stream::StreamItem::Yield));
-        self.last_return = Instant::now();
-        item
+        self.next_inner()
     }
 }
 

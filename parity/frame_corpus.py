@@ -109,6 +109,31 @@ NUMBER_SLOTS = {
     "pull.cookie":      '["pull",{"clientGroupID":"g1","cookie":%s,"requestID":"r1"}]',
 }
 
+# `initConnectionBodySchema.clientSchema` is `clientSchemaSchema.optional()`
+# (zero-protocol/src/client-schema.ts:28-30): a STRICT object tree — absent or a
+# value, never null; unknown keys, a column `type` outside the literal union and a
+# non-string primaryKey entry all fail valita. Added 2026-09-09: the corpus had
+# no clientSchema case, and rust accepted every shape here (`Option<Value>`).
+CLIENT_SCHEMA_SLOT = '["initConnection",{"desiredQueriesPatch":[],"clientSchema":%s}]'
+CLIENT_SCHEMAS = {
+    "empty-tables":       '{"tables":{}}',
+    "one-table":          '{"tables":{"t":{"columns":{"id":{"type":"string"}},"primaryKey":["id"]}}}',
+    "all-value-types":    '{"tables":{"t":{"columns":{"s":{"type":"string"},"n":{"type":"number"},'
+                          '"b":{"type":"boolean"},"z":{"type":"null"},"j":{"type":"json"}},'
+                          '"primaryKey":["s"]}}}',
+    "no-tables-key":      '{}',
+    "unknown-key":        '{"tables":{},"extra":1}',
+    "tables-array":       '{"tables":[]}',
+    "table-unknown-key":  '{"tables":{"t":{"columns":{},"primaryKey":[],"x":1}}}',
+    "table-no-columns":   '{"tables":{"t":{"primaryKey":["id"]}}}',
+    "table-no-pk":        '{"tables":{"t":{"columns":{"id":{"type":"string"}}}}}',
+    "column-bad-type":    '{"tables":{"t":{"columns":{"id":{"type":"date"}},"primaryKey":["id"]}}}',
+    "column-no-type":     '{"tables":{"t":{"columns":{"id":{}},"primaryKey":["id"]}}}',
+    "column-unknown-key": '{"tables":{"t":{"columns":{"id":{"type":"string","opt":true}},"primaryKey":["id"]}}}',
+    "pk-number":          '{"tables":{"t":{"columns":{"id":{"type":"string"}},"primaryKey":[1]}}}',
+    "pk-string":          '{"tables":{"t":{"columns":{"id":{"type":"string"}},"primaryKey":"id"}}}',
+}
+
 STRUCTURAL = {
     "not-json":           "{",
     "not-array-object":   '{"0":"ping"}',
@@ -156,6 +181,11 @@ def main() -> int:
     for slot, tmpl in NUMBER_SLOTS.items():
         for nname, ntext in NUMBERS.items():
             add("number/%s/%s" % (slot, nname), tmpl % ntext)
+
+    for wname, wtext in WRONG.items():
+        add("wrongtype/initConnection.clientSchema/%s" % wname, CLIENT_SCHEMA_SLOT % wtext)
+    for sname, stext in CLIENT_SCHEMAS.items():
+        add("clientschema/%s" % sname, CLIENT_SCHEMA_SLOT % stext)
 
     required = {
         "updateAuth": ["auth"],
