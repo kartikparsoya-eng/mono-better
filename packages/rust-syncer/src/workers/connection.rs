@@ -229,9 +229,19 @@ impl Connection {
     /// from the CAUGHT error and pass it along, so the level comes from what was
     /// thrown rather than defaulting to `info`.
     pub fn close_with_thrown(&self, message: &str) {
+        // The value that reaches TS's `#closeWithThrown` on this path is ALREADY
+        // a ProtocolError: `ClientHandler.fail(e)` does
+        // `this.#downstream.fail(wrapWithProtocolError(e))` (client-handler.ts:175),
+        // and it is that wrapped error the downstream pipeline hands to
+        // `#closeWithThrown` (connection.ts:319). So `getLogLevel(thrown)` takes
+        // the `isProtocolError` branch and yields `warn`, NOT the plain-error
+        // `error`. Rust wraps with the same `wrap_with_protocol_error`, so it
+        // classifies the same way. Measured: TS logged these 47 Internal bodies
+        // at WARN while rust logged ERROR (G44 runtime log differential,
+        // 2026-09-08, level x error_kind breakdown).
         self.close_with_error_thrown(
             crate::services::view_syncer::view_syncer::wrap_with_protocol_error(message),
-            Some(Thrown::Other(message)),
+            Some(Thrown::Protocol(message)),
         );
     }
 
@@ -554,6 +564,25 @@ mod tests {
         assert_eq!(
             classify_error_log_level(&basic(ErrorKind::TransformFailed, "bad transform"), None),
             LogLevel::Warn
+        );
+    }
+
+    /// The client-failure path wraps before it closes: TS
+    /// `ClientHandler.fail(e)` -> `#downstream.fail(wrapWithProtocolError(e))`
+    /// (client-handler.ts:175-181), and the pipeline hands THAT wrapped
+    /// ProtocolError to `#closeWithThrown` (connection.ts:319). So
+    /// `getLogLevel(thrown)` takes the `isProtocolError` branch -> `warn`.
+    ///
+    /// NON-VACUOUS: classify this as `Thrown::Other` (a plain error) and it
+    /// reports `error` — which is exactly what rust shipped, logging 47 Internal
+    /// bodies at ERROR where TS logged WARN for the identical events.
+    #[test]
+    fn a_wrapped_client_failure_is_a_protocol_error_and_warns_like_ts() {
+        let body = ErrorBody::internal("probe SQL contains NUL byte");
+        assert_eq!(
+            classify_error_log_level(&body, Some(Thrown::Protocol("probe SQL contains NUL byte"))),
+            LogLevel::Warn,
+            "a wrapped ProtocolError is TS `getLogLevel` = 'warn', not 'error'"
         );
     }
 
