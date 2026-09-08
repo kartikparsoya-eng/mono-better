@@ -154,21 +154,133 @@ pub enum AdvanceOutcome {
 ///      the error — a `SQLITE_BUSY` close then silently leaks the whole
 ///      handle (~11.5MB page cache + fds per CG churn; ART G6).
 ///
-/// Port of TS `QueryPipelineLifecycleLog` (pipeline-driver.ts:133) — the record
-/// `#logQueryPipelineLifecycle` formats. `pipelineRunID` / `transformationHash` /
-/// `queryName` / `hydrationReason` are omitted: they are not available at this
-/// rust layer (they live in the view-syncer or are set after hydrate), and TS
-/// itself drops each from the log line when it is `undefined`, so their absence
-/// is protocol-faithful. `zero_event` is always a fixed literal; `stop_reason`
-/// only present for the `query-pipeline-stop` event.
+/// Port of TS `PipelineHydrationReason` (pipeline-driver.ts:123-125): why a
+/// pipeline was (re)hydrated, carried on every lifecycle log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineHydrationReason {
+    /// `'query-set-sync'` — added by `#syncQueryPipelineSet` (the default
+    /// `addQuery` parameter, pipeline-driver.ts:580).
+    QuerySetSync,
+    /// `'unchanged-query-rehydrate'` — rebuilt by `#hydrateUnchangedQueries`
+    /// (view-syncer.ts:1625).
+    UnchangedQueryRehydrate,
+}
+
+impl PipelineHydrationReason {
+    /// The TS string-literal union member.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PipelineHydrationReason::QuerySetSync => "query-set-sync",
+            PipelineHydrationReason::UnchangedQueryRehydrate => "unchanged-query-rehydrate",
+        }
+    }
+}
+
+/// One query of a [`IvmPipelines::hydrate`] batch — the TS `addQuery`
+/// parameter list (pipeline-driver.ts:575-582: `transformationHash`, `queryID`,
+/// `query`, `queryName?`, `hydrationReason`) minus the `timer`, which is shared
+/// by the whole batch. `ast_json` is the TS-shaped transformed AST.
+#[derive(Debug, Clone)]
+pub struct HydrateQuery {
+    pub query_id: String,
+    pub ast_json: String,
+    pub transformation_hash: String,
+    pub query_name: Option<String>,
+    pub hydration_reason: PipelineHydrationReason,
+}
+
+/// A bare `(query_id, ast_json)` pair hydrates with TS's `addQuery` defaults:
+/// no `queryName`, `hydrationReason = 'query-set-sync'` (pipeline-driver.ts:
+/// 580) and an empty transformation hash (the caller records the real one via
+/// `set_query_transformation_hash`, exactly as before this struct existed).
+impl From<(String, String)> for HydrateQuery {
+    fn from((query_id, ast_json): (String, String)) -> Self {
+        HydrateQuery {
+            query_id,
+            ast_json,
+            transformation_hash: String::new(),
+            query_name: None,
+            hydration_reason: PipelineHydrationReason::QuerySetSync,
+        }
+    }
+}
+
+/// The per-pipeline identity TS keeps on its `Pipeline` record
+/// (pipeline-driver.ts:91-101: `pipelineRunID`, `transformationHash`,
+/// `queryName`, `hydrationReason`) and stamps on every lifecycle log line for
+/// that pipeline. Recorded at hydrate START (TS `const pipelineRunID =
+/// randomID()` precedes the `-start` line, :607-615) so `-start`, `-finish`,
+/// `-failed`, `-aborted` and `-stop` all correlate on the same run id.
+#[derive(Debug, Clone)]
+struct PipelineLogInfo {
+    pipeline_run_id: String,
+    transformation_hash: String,
+    query_name: Option<String>,
+    hydration_reason: PipelineHydrationReason,
+}
+
+/// Port of TS `randomID()` (pipeline-driver.ts:176-178):
+/// `randInt(1, Number.MAX_SAFE_INTEGER).toString(36)`.
+fn random_id() -> String {
+    const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+    let n: u64 = rand::Rng::gen_range(&mut rand::thread_rng(), 1..=MAX_SAFE_INTEGER);
+    to_string_radix_36(n)
+}
+
+/// JS `Number.prototype.toString(36)` for a non-negative integer.
+fn to_string_radix_36(mut n: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut buf = Vec::with_capacity(11);
+    while n > 0 {
+        buf.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    buf.reverse();
+    String::from_utf8(buf).expect("base36 digits are ASCII")
+}
+
+/// Port of TS `QueryPipelineLifecycleLog` (pipeline-driver.ts:133-143) — the
+/// record `#logQueryPipelineLifecycle` formats. `zero_event` is always a fixed
+/// literal; the `Option` fields mirror TS's optional properties and are omitted
+/// from the emitted line when `None` (TS `withContext` only when defined).
 #[derive(Default)]
 struct QueryPipelineLifecycleLog {
     zero_event: &'static str,
+    pipeline_run_id: String,
     query_hash: String,
+    transformation_hash: String,
+    query_name: Option<String>,
+    hydration_reason: Option<PipelineHydrationReason>,
     hydration_time_ms: Option<f64>,
     hydration_row_count: Option<u64>,
     stop_reason: Option<&'static str>,
     pipeline_lifetime_ms: Option<f64>,
+}
+
+impl QueryPipelineLifecycleLog {
+    /// Seed the identity fields from the pipeline's recorded [`PipelineLogInfo`]
+    /// (TS reads them off the `Pipeline` record, e.g. `#destroyPipeline`
+    /// pipeline-driver.ts:851-856).
+    fn for_pipeline(
+        zero_event: &'static str,
+        query_hash: &str,
+        info: Option<&PipelineLogInfo>,
+    ) -> Self {
+        QueryPipelineLifecycleLog {
+            zero_event,
+            pipeline_run_id: info.map(|i| i.pipeline_run_id.clone()).unwrap_or_default(),
+            query_hash: query_hash.to_string(),
+            transformation_hash: info
+                .map(|i| i.transformation_hash.clone())
+                .unwrap_or_default(),
+            query_name: info.and_then(|i| i.query_name.clone()),
+            hydration_reason: info.map(|i| i.hydration_reason),
+            ..Default::default()
+        }
+    }
 }
 
 /// Port of TS `Timer` (pipeline-driver.ts:158-161): the caller-controlled
@@ -236,6 +348,10 @@ pub struct IvmPipelines {
     /// tie-break depends on it; iterating the HashMap made it nondeterministic
     /// run-to-run.
     query_order: Vec<String>,
+    /// query_id → the identity fields TS keeps on its `Pipeline` record for the
+    /// lifecycle log (see [`PipelineLogInfo`]). Set at hydrate start, dropped
+    /// with the pipeline (`destroy_pipeline`).
+    pipeline_log_info: HashMap<String, PipelineLogInfo>,
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
@@ -280,6 +396,7 @@ impl IvmPipelines {
             active_queries: HashMap::new(),
             query_asts: HashMap::new(),
             query_order: Vec::new(),
+            pipeline_log_info: HashMap::new(),
             poisoned: false,
             yield_threshold_ms: None,
             hydrate_context: Rc::new(RefCell::new(None)),
@@ -693,47 +810,37 @@ impl IvmPipelines {
     /// Rust-only shape (HARD RULE 5): an associated fn (no `&self`) rather than a
     /// method, because the caller holds a `&mut self.engine` borrow across the
     /// hydrate and cannot also borrow `&self`; TS `this.#lc.withContext(...)` is
-    /// replaced by the global `tracing` subscriber. `pipelineRunID` /
-    /// `transformationHash` / `queryName` / `hydrationReason` are not available at
-    /// this layer (they live one layer up in the view-syncer, or are set after
-    /// hydrate) and TS itself omits each from the log line when it is undefined —
-    /// so their absence here is protocol-faithful, not a divergence.
+    /// replaced by the global `tracing` subscriber. The optional TS contexts
+    /// (`queryName`, `hydrationReason`, `stopReason`, `hydrationTimeMs`,
+    /// `hydrationRowCount`, `pipelineLifetimeMs`) are passed as `Option`s:
+    /// `tracing` records nothing for a `None`, so each is omitted from the line
+    /// exactly when TS skips its `withContext` (pipeline-driver.ts:488-505).
     fn log_query_pipeline_lifecycle(log: QueryPipelineLifecycleLog) {
         let QueryPipelineLifecycleLog {
             zero_event,
+            pipeline_run_id,
             query_hash,
+            transformation_hash,
+            query_name,
+            hydration_reason,
             hydration_time_ms,
             hydration_row_count,
             stop_reason,
             pipeline_lifetime_ms,
         } = log;
-        // tracing fields cannot be conditionally omitted within a single macro
-        // call, so branch on the event shape: `-stop` (all fields), `-finish`
-        // (timing + rows), and `-start`/`-failed`/`-aborted` (hash only).
-        match (
+        tracing::info!(
+            zero_event,
+            pipeline_run_id,
+            query_hash,
+            transformation_hash,
+            query_name = query_name.as_deref(),
+            hydration_reason = hydration_reason.map(PipelineHydrationReason::as_str),
             stop_reason,
             hydration_time_ms,
             hydration_row_count,
             pipeline_lifetime_ms,
-        ) {
-            (Some(sr), Some(t), Some(n), Some(lt)) => tracing::info!(
-                zero_event,
-                query_hash,
-                stop_reason = sr,
-                hydration_time_ms = t,
-                hydration_row_count = n,
-                pipeline_lifetime_ms = lt,
-                "query pipeline lifecycle"
-            ),
-            (None, Some(t), Some(n), _) => tracing::info!(
-                zero_event,
-                query_hash,
-                hydration_time_ms = t,
-                hydration_row_count = n,
-                "query pipeline lifecycle"
-            ),
-            _ => tracing::info!(zero_event, query_hash, "query pipeline lifecycle"),
-        }
+            "query pipeline lifecycle"
+        );
     }
 
     /// VENDED per-table debug log — port of the `runtimeDebugFlags
@@ -802,14 +909,18 @@ impl IvmPipelines {
             )
         {
             Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                zero_event: "query-pipeline-stop",
-                query_hash: query_id.to_string(),
                 hydration_time_ms: Some(t),
                 hydration_row_count: Some(n),
                 stop_reason: Some(stop_reason),
                 pipeline_lifetime_ms: Some(lt),
+                ..QueryPipelineLifecycleLog::for_pipeline(
+                    "query-pipeline-stop",
+                    query_id,
+                    self.pipeline_log_info.get(query_id),
+                )
             });
         }
+        self.pipeline_log_info.remove(query_id);
         if let Some(eng) = self.engine.as_mut() {
             eng.remove_query(query_id);
         }
@@ -833,9 +944,9 @@ impl IvmPipelines {
     ///
     /// Row-set-signature maintenance is intentionally NOT done here — it is
     /// caller-driven (Stage B / view-syncer), matching the napi path.
-    pub fn hydrate(
+    pub fn hydrate<Q: Clone + Into<HydrateQuery>>(
         &mut self,
-        queries: &[(String, String)],
+        queries: &[Q],
         timer: Rc<dyn Timer>,
     ) -> Result<HydrateChanges<'_>, String> {
         // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
@@ -843,13 +954,15 @@ impl IvmPipelines {
         if self.engine.is_none() {
             return Err("Engine not initialized".to_string());
         }
+        let queries: Vec<HydrateQuery> = queries.iter().cloned().map(Into::into).collect();
+        let queries = &queries;
 
         let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
-        for (query_id, ast_json) in queries {
-            let ast = parse_ts_ast(ast_json)
-                .map_err(|e| format!("AST parse error for qid={query_id}: {e}"))?;
+        for q in queries {
+            let ast = parse_ts_ast(&q.ast_json)
+                .map_err(|e| format!("AST parse error for qid={}: {e}", q.query_id))?;
             specs.push(QuerySpec {
-                query_id: query_id.clone(),
+                query_id: q.query_id.clone(),
                 ast,
             });
         }
@@ -865,12 +978,22 @@ impl IvmPipelines {
         // `-failed` on a hydrate panic. This is the always-on analog of TS
         // `VENDED` (which is gated behind the `trackRowCountsVended` debug flag) —
         // it makes a slow/heavy query identifiable from logs by time + rows.
-        for (query_id, _ast_json) in queries {
-            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                zero_event: "query-pipeline-hydrate-start",
-                query_hash: query_id.clone(),
-                ..Default::default()
-            });
+        for q in queries {
+            // TS: `const pipelineRunID = randomID()` then the `-start` line
+            // (pipeline-driver.ts:607-615); the identity is kept on the pipeline
+            // record so every later line for this run carries the same id.
+            let info = PipelineLogInfo {
+                pipeline_run_id: random_id(),
+                transformation_hash: q.transformation_hash.clone(),
+                query_name: q.query_name.clone(),
+                hydration_reason: q.hydration_reason,
+            };
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog::for_pipeline(
+                "query-pipeline-hydrate-start",
+                &q.query_id,
+                Some(&info),
+            ));
+            self.pipeline_log_info.insert(q.query_id.clone(), info);
         }
 
         // TS pipeline-driver.ts:623-629.
@@ -915,7 +1038,7 @@ impl IvmPipelines {
             driver: self,
             stream: Some(stream),
             checkpoint,
-            queries: queries.to_vec(),
+            queries: queries.clone(),
             outcome: None,
         })
     }
@@ -923,21 +1046,20 @@ impl IvmPipelines {
     /// Shared by every hydrate panic path (build or a later pull): clear the
     /// hydrate context (TS `finally`), roll the partially-wired source
     /// connections back, and emit the `-failed` lifecycle line per query.
-    fn on_hydrate_panic(
-        &mut self,
-        checkpoint: &HashMap<String, usize>,
-        queries: &[(String, String)],
-    ) {
+    fn on_hydrate_panic(&mut self, checkpoint: &HashMap<String, usize>, queries: &[HydrateQuery]) {
         *self.hydrate_context.borrow_mut() = None;
         if let Some(eng) = self.engine.as_mut() {
             eng.rollback_source_connections(checkpoint);
         }
-        for (query_id, _ast_json) in queries {
-            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                zero_event: "query-pipeline-hydrate-failed",
-                query_hash: query_id.clone(),
-                ..Default::default()
-            });
+        for q in queries {
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog::for_pipeline(
+                "query-pipeline-hydrate-failed",
+                &q.query_id,
+                self.pipeline_log_info.get(&q.query_id),
+            ));
+            // No pipeline was registered for a failed hydrate (TS `#pipelines`
+            // is only set on the success path, :771), so drop its identity.
+            self.pipeline_log_info.remove(&q.query_id);
         }
     }
 
@@ -946,7 +1068,7 @@ impl IvmPipelines {
     /// `-aborted` lifecycle lines and the VENDED diagnostic, and record the
     /// hydrated queries. Port of the TS `#addQueryImpl` register tail +
     /// `finally` (pipeline-driver.ts:723-810).
-    fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[(String, String)]) {
+    fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[HydrateQuery]) {
         *self.hydrate_context.borrow_mut() = None;
         let Some(eng) = self.engine.as_mut() else {
             return;
@@ -955,11 +1077,13 @@ impl IvmPipelines {
         let finished: HashSet<&str> = results.iter().map(|r| r.query_id.as_str()).collect();
         for r in &results {
             Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                zero_event: "query-pipeline-hydrate-finish",
-                query_hash: r.query_id.clone(),
                 hydration_time_ms: Some(r.hydration_time_ms),
                 hydration_row_count: Some(r.hydration_row_count),
-                ..Default::default()
+                ..QueryPipelineLifecycleLog::for_pipeline(
+                    "query-pipeline-hydrate-finish",
+                    &r.query_id,
+                    self.pipeline_log_info.get(&r.query_id),
+                )
             });
             // VENDED per-table debug log — port of TS `#addQueryImpl`'s
             // `runtimeDebugFlags.trackRowCountsVended` block (pipeline-driver.ts:
@@ -979,13 +1103,14 @@ impl IvmPipelines {
         // A query that started but the engine never registered was aborted
         // mid-stream (cancel-during-hydrate → engine discards partial pipelines
         // and returns no result for it).
-        for (query_id, _ast_json) in queries {
-            if !finished.contains(query_id.as_str()) {
-                Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                    zero_event: "query-pipeline-hydrate-aborted",
-                    query_hash: query_id.clone(),
-                    ..Default::default()
-                });
+        for q in queries {
+            if !finished.contains(q.query_id.as_str()) {
+                Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog::for_pipeline(
+                    "query-pipeline-hydrate-aborted",
+                    &q.query_id,
+                    self.pipeline_log_info.get(&q.query_id),
+                ));
+                self.pipeline_log_info.remove(&q.query_id);
             }
         }
         // Track the newly-hydrated queries so `has_query` reports them — ONLY
@@ -996,17 +1121,20 @@ impl IvmPipelines {
         // (`hydrate_and_sync`) right after this returns, via
         // `set_query_transformation_hash`; entries hydrated directly (tests)
         // keep an empty-string placeholder hash.
-        for (query_id, ast_json) in queries {
-            if !finished.contains(query_id.as_str()) {
+        for q in queries {
+            if !finished.contains(q.query_id.as_str()) {
                 continue;
             }
-            self.active_queries.entry(query_id.clone()).or_default();
+            self.active_queries.entry(q.query_id.clone()).or_default();
             if self
                 .query_asts
-                .insert(query_id.clone(), std::sync::Arc::from(ast_json.as_str()))
+                .insert(
+                    q.query_id.clone(),
+                    std::sync::Arc::from(q.ast_json.as_str()),
+                )
                 .is_none()
             {
-                self.query_order.push(query_id.clone());
+                self.query_order.push(q.query_id.clone());
             }
         }
     }
@@ -1260,7 +1388,7 @@ pub struct HydrateChanges<'a> {
     driver: &'a mut IvmPipelines,
     stream: Option<HydrateStream>,
     checkpoint: HashMap<String, usize>,
-    queries: Vec<(String, String)>,
+    queries: Vec<HydrateQuery>,
     /// Set when a pull panicked: the hydrate is over and [`finish`](Self::finish)
     /// reports the failure as an `Err`, mirroring `AdvanceChanges::outcome`.
     outcome: Option<String>,

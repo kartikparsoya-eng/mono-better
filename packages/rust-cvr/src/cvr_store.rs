@@ -340,7 +340,7 @@ impl Drop for CVRStoreHandle {
         // drop path via a gated backtrace so the field can identify who bypassed
         // the flush. `RUST_CVR_DROP_BACKTRACE=1` to enable; prod pays nothing.
         if !self.pending.is_empty() {
-            eprintln!(
+            tracing::error!(
                 "[cvr] CVRStoreHandle dropped with pending writes (cvr_id={}) \
                  — buffered changes were NOT flushed [census {}]",
                 self.cvr_id,
@@ -367,7 +367,7 @@ impl CVRStoreHandle {
     /// parameters only when a caller actually needs to override one.
     pub fn new(pool: PgPool, schema: String, cvr_id: String, task_id: String) -> Self {
         let fail: crate::row_record_cache::FailCallback = Arc::new(|e: String| {
-            eprintln!("[cvr] row cache: {e}");
+            tracing::warn!("[cvr] row cache: {e}");
         });
         // TS `#recordAsyncFlushStats` — the write-back flush loop's OTel stats.
         let metrics: crate::row_record_cache::MetricsCallback =
@@ -1396,7 +1396,7 @@ impl CVRStoreHandle {
             .await
         {
             Ok(count) => self.row_count = count,
-            Err(e) => eprintln!("[cvr] row cache apply failed: {e}"),
+            Err(e) => tracing::warn!("[cvr] row cache apply failed: {e}"),
         }
 
         // (`self.pending` was consumed by the mem::take above — nothing to clear.)
@@ -1462,7 +1462,9 @@ impl CVRStoreHandle {
             }
             match self.load_once(last_connect_time).await {
                 Err(e @ CVRStoreError::RowsVersionBehind { .. }) => {
-                    eprintln!("CVR load attempt {}: {e}", attempt + 1);
+                    // TS `lc.info?.(`attempt ${i + 1}: ${String(result)}`)`
+                    // (cvr-store.ts:285) — same text, same level.
+                    tracing::info!("attempt {}: {e}", attempt + 1);
                     last_behind = Some(e);
                     continue;
                 }
@@ -1473,7 +1475,7 @@ impl CVRStoreHandle {
                 // flush path does, instead of failing the client group into a
                 // reconnect + cold-rehydrate storm.
                 Err(CVRStoreError::Sqlx(sqlx::Error::PoolTimedOut)) => {
-                    eprintln!(
+                    tracing::warn!(
                         "CVR load attempt {}: pool acquire timed out; retrying",
                         attempt + 1
                     );

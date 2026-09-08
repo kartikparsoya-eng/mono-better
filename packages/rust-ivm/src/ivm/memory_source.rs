@@ -146,9 +146,10 @@ impl MemorySource {
                 *self.db_conn.borrow_mut() = Some(c);
             }
             Err(e) => {
-                eprintln!(
+                tracing::error!(
                     "[rust-ivm] Failed to open connection for {}: {}",
-                    self.table_name, e
+                    self.table_name,
+                    e
                 );
             }
         }

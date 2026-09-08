@@ -229,7 +229,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
             // this bound. Aborting here would cause a reset-storm.
             for e in s.entries.iter() {
                 if now >= e.warn_at && !warned.contains(&e.id) {
-                    eprintln!(
+                    tracing::warn!(
                         "[rust-ivm-watchdog] slow-job signal: job {} past warn bound {:?} ago (not aborting — legit hydrates can take minutes)",
                         e.id,
                         now.saturating_duration_since(e.warn_at),
@@ -260,7 +260,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
                 }
                 drop(handles);
                 aborted.push(e.id);
-                eprintln!(
+                tracing::error!(
                     "[rust-ivm-watchdog] stuck-actor abort: job {} overran abort bound {:?} ago — cancel flipped + handles interrupted",
                     e.id,
                     now.saturating_duration_since(e.abort_at),

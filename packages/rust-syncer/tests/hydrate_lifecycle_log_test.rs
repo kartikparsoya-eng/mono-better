@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rust_syncer::services::view_syncer::pipeline_driver::{
-    IvmColumnSchema, IvmPipelines, IvmTableSpec,
+    HydrateQuery, IvmColumnSchema, IvmPipelines, IvmTableSpec, PipelineHydrationReason,
 };
 
 fn users_spec() -> IvmTableSpec {
@@ -168,4 +168,155 @@ fn remove_query_emits_query_pipeline_stop_log() {
         "stop carries the pipeline's hydration stats; got: {logged}"
     );
     assert!(logged.contains("q1"), "query hash present; got: {logged}");
+}
+
+/// The `pipeline_run_id=<id>` value of every lifecycle line in `logged`, in
+/// order (quotes stripped whatever formatter quoting applies).
+fn pipeline_run_ids(logged: &str) -> Vec<String> {
+    logged
+        .lines()
+        .filter(|l| l.contains("query pipeline lifecycle"))
+        .map(|l| {
+            let start = l
+                .find("pipeline_run_id=")
+                .unwrap_or_else(|| panic!("lifecycle line without pipeline_run_id: {l}"))
+                + "pipeline_run_id=".len();
+            l[start..]
+                .split([' ', ','])
+                .next()
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect()
+}
+
+/// Non-vacuous (log parity, 2026-09-08): every TS lifecycle line carries the
+/// pipeline's identity — `pipelineRunID` (a fresh `randomID()` per `addQuery`,
+/// pipeline-driver.ts:607), `transformationHash`, `queryName` (when defined) and
+/// `hydrationReason` (:470-505, :608-615, :784-792, :851-856) — which is what
+/// lets an operator map a slow `queryHash` back to the named query and its
+/// transform, and correlate `-start`/`-finish`/`-stop` of one hydrate. Rust
+/// emitted only `zero_event` + `query_hash`. Dropping any of the four fields
+/// from `log_query_pipeline_lifecycle` fails the matching assert; minting the
+/// run id per LINE instead of per pipeline fails the "same id" assert.
+#[test]
+fn lifecycle_log_carries_the_ts_pipeline_identity_fields() {
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let mut p = IvmPipelines::new();
+        p.init(vec![users_spec()], None, "zero").unwrap();
+        {
+            let timer = std::rc::Rc::new(
+                rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer::new(),
+            );
+            timer.start_without_yielding();
+            let mut changes = p
+                .hydrate(
+                    &[HydrateQuery {
+                        query_id: "q1".to_string(),
+                        ast_json: r#"{"table":"users"}"#.to_string(),
+                        transformation_hash: "th-1".to_string(),
+                        query_name: Some("usersByName".to_string()),
+                        hydration_reason: PipelineHydrationReason::UnchangedQueryRehydrate,
+                    }],
+                    timer,
+                )
+                .unwrap();
+            for _ in changes.by_ref() {}
+            changes.finish().unwrap();
+        }
+        p.remove_query("q1", "remove-query");
+    });
+
+    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let lines: Vec<&str> = logged
+        .lines()
+        .filter(|l| l.contains("query pipeline lifecycle"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "-start, -finish, -stop for one pipeline; got:\n{logged}"
+    );
+    for line in &lines {
+        assert!(
+            line.contains("th-1"),
+            "TS `transformationHash` context on every line; got: {line}"
+        );
+        assert!(
+            line.contains("usersByName"),
+            "TS `queryName` context on every line; got: {line}"
+        );
+        assert!(
+            line.contains("unchanged-query-rehydrate"),
+            "TS `hydrationReason` context on every line; got: {line}"
+        );
+    }
+    let ids = pipeline_run_ids(&logged);
+    assert!(
+        !ids[0].is_empty()
+            && ids[0]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+        "TS `randomID()` = randInt(1, MAX_SAFE_INTEGER).toString(36); got {ids:?}"
+    );
+    assert!(
+        ids.iter().all(|id| id == &ids[0]),
+        "one pipelineRunID per hydrate, shared by -start/-finish/-stop; got {ids:?}"
+    );
+}
+
+/// TS omits `queryName` when the query has none and defaults
+/// `hydrationReason` to `'query-set-sync'` (pipeline-driver.ts:580, :488-491);
+/// a bare `(query_id, ast_json)` hydrate must log exactly that shape.
+#[test]
+fn lifecycle_log_omits_query_name_when_undefined_and_defaults_the_reason() {
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let mut p = IvmPipelines::new();
+        p.init(vec![users_spec()], None, "zero").unwrap();
+        let timer = std::rc::Rc::new(
+            rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer::new(),
+        );
+        timer.start_without_yielding();
+        let mut changes = p
+            .hydrate(
+                &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                timer,
+            )
+            .unwrap();
+        for _ in changes.by_ref() {}
+        changes.finish().unwrap();
+    });
+
+    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("query-pipeline-hydrate-finish"),
+        "got:\n{logged}"
+    );
+    assert!(
+        !logged.contains("query_name="),
+        "no `queryName` context for a nameless query; got:\n{logged}"
+    );
+    assert!(
+        logged.contains("query-set-sync"),
+        "default `hydrationReason` = 'query-set-sync'; got:\n{logged}"
+    );
+    assert!(
+        logged.contains("pipeline_run_id="),
+        "`pipelineRunID` is always present; got:\n{logged}"
+    );
 }

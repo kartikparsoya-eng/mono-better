@@ -423,11 +423,12 @@ impl Drop for Snapshot {
         conn.flush_prepared_statement_cache();
         let busy = settle_statements(&conn);
         if busy > 0 {
-            eprintln!(
+            tracing::warn!(
                 "[rust-ivm] snapshot drop: settled {} busy statement(s) that outlived \
                  snapshot version {:?} — the connection handle may leak on close, but \
                  the read-mark is released (no checkpoint pin)",
-                busy, self.version,
+                busy,
+                self.version,
             );
         }
         if let Err(e) = conn.execute_batch("ROLLBACK") {
@@ -435,11 +436,12 @@ impl Drop for Snapshot {
             // "no transaction is active" is the normal case for a snapshot that
             // was never pinned (create-failure unwind) — not worth logging.
             if !msg.contains("no transaction is active") {
-                eprintln!(
+                tracing::warn!(
                     "[rust-ivm] snapshot drop: ROLLBACK failed for version {:?}: {} — \
                      if the close below also fails, this connection is a zombie \
                      checkpoint pin (unbounded WAL growth)",
-                    self.version, msg,
+                    self.version,
+                    msg,
                 );
             }
         }
@@ -455,7 +457,7 @@ impl Drop for Snapshot {
         // close is unobservable, which is exactly the leak-risk to surface.
         let holders = Rc::strong_count(&self.conn);
         if holders > 1 {
-            eprintln!(
+            tracing::warn!(
                 "[rust-ivm] snapshot drop: {} outstanding conn holder(s) at drop \
                  (version {:?}); close defers to the last holder and any close \
                  failure there is SILENT — leaked-handle risk [census {}]",
@@ -469,7 +471,7 @@ impl Drop for Snapshot {
             // steady-state prod logging doesn't pay the capture cost unless
             // enabled.
             if std::env::var("RUST_IVM_DROP_BACKTRACE").as_deref() == Ok("1") {
-                eprintln!(
+                tracing::warn!(
                     "[rust-ivm] snapshot drop backtrace:\n{}",
                     std::backtrace::Backtrace::force_capture()
                 );
@@ -484,10 +486,11 @@ impl Drop for Snapshot {
             if let Ok(cell) = Rc::try_unwrap(rc)
                 && let Err((leaked, e)) = cell.into_inner().close()
             {
-                eprintln!(
+                tracing::error!(
                     "[rust-ivm] snapshot close FAILED for version {:?}: {} — \
                      sqlite handle leaked (schema/stat4/page-cache retained)",
-                    self.version, e,
+                    self.version,
+                    e,
                 );
                 drop(leaked);
             }
@@ -607,10 +610,11 @@ impl Snapshot {
         // orphan this connection (the zombie-pin class). Settle it, loudly.
         let busy = settle_statements(&self.conn.borrow());
         if busy > 0 {
-            eprintln!(
+            tracing::warn!(
                 "[rust-ivm] snapshot leapfrog: settled {} busy statement(s) still \
                  open on snapshot version {:?} — a cursor outlived its advance",
-                busy, self.version,
+                busy,
+                self.version,
             );
         }
         if let Err(e) = self.conn.borrow().execute_batch("ROLLBACK") {

@@ -197,5 +197,8 @@ python3 "$ROOT/parity/helper_imports.py"; chk $? "M10 helper-import ledger"
 step "parity — M11 prod-path reachability (a ported symbol prod cannot reach is not parity)"
 python3 "$ROOT/parity/prod_reachability.py"; chk $? "M11 prod-path reachability"
 
+step "parity — M14 log differential (a rust log line with no TS twin, or a twin at a different severity, is a divergence operators see)"
+python3 "$ROOT/parity/log_differential.py"; chk $? "M14 log differential"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

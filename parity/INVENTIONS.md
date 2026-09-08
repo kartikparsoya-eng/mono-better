@@ -754,10 +754,24 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   initial poke of a connection whose initConnection carried no queries; (c) a
   connection whose initConnection carries queries produces frames identical
   to TS.
+- **Transform-once corollary (2026-09-08):** TS transforms the got custom
+  queries INSIDE `#hydrateUnchangedQueries` (view-syncer.ts:1503-1512) and
+  then again, `'missing'` mode, in `#syncQueryPipelineSet` (:1970). rust
+  transforms ONCE, at the top of `sync_query_pipeline_set`, and hands that
+  result (`executed` + `errored_query_ids`) down to
+  `hydrate_unchanged_queries`, which classifies it exactly as TS classifies
+  its own (same-hash → hydrated; hash changed → custom/other mismatch; error →
+  custom transform error; all-inactivated → inactivated) and emits TS's
+  `hydrateUnchangedQueries: … got queries, …` summary (:1570-1577) from those
+  counts. Contract (d): the set of queries hydrated by the unchanged pass and
+  the summary line are what TS produces for the same transform result.
+  Known gap: a custom query whose transform fails transiently is retried by
+  TS's second (`'missing'`) transform in the same pass; rust reports the first
+  result. Test: `hydrate_unchanged_queries_logs_the_ts_summary_line`.
 - **Tests:** xyne-art `tools/frameseq_gate.py` counts this exact shape as
   `known(K1)` and fails on anything else; `hydrate_real_rows_produces_row_pokes`
   (stage_e) pins (c)'s poke contents.
-- **Known gap:** none beyond (b).
+- **Known gap:** none beyond (b) and the transform-once retry gap above.
 
 ## I-16 — Advance buffers the change delta, then applies it to the CVR
 - **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`

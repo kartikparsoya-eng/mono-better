@@ -156,7 +156,7 @@ impl Drop for CacheState {
         // `pending_rows_version` — a leak-suspect teardown. Gated backtrace
         // (`RUST_CVR_DROP_BACKTRACE=1`) names the drop path; prod pays nothing.
         if !self.pending.is_empty() || self.pending_rows_version != self.flushed_rows_version {
-            eprintln!(
+            tracing::error!(
                 "[cvr] RowRecordCache dropped with pending row writes \
                  (pending={}, pending_version={:?}, flushed_version={:?}) \
                  — deferred rows were NOT flushed [census {}]",
@@ -273,6 +273,7 @@ impl RowRecordCache {
             self.cvr("rows")
         );
 
+        let load_started = std::time::Instant::now();
         let mut stream = sqlx::query_as::<_, RowsRowDb>(&sql)
             .bind(&self.cvr_id)
             .fetch(&self.pool);
@@ -295,6 +296,12 @@ impl RowRecordCache {
             return Ok(existing.len());
         }
         let count = cache.len();
+        // TS `lc.info?.(`Loaded ${cache.size} row records in ${Date.now() -
+        // start} ms`)` (row-record-cache.ts:204-206).
+        tracing::info!(
+            "Loaded {count} row records in {} ms",
+            load_started.elapsed().as_millis()
+        );
         state.cache = Some(Arc::new(cache));
         Ok(count)
     }
@@ -524,6 +531,14 @@ impl RowRecordCache {
             }
         }
         let total_count = deletes.len() + inserts.len();
+        // TS `lc.info?.(`flushing ${rowUpdates.size} rows (${rowRecordRows.length}
+        // inserts, ${rowUpdates.size - rowRecordRows.length} deletes)`)`
+        // (row-record-cache.ts:477-481).
+        tracing::info!(
+            "flushing {total_count} rows ({} inserts, {} deletes)",
+            inserts.len(),
+            deletes.len()
+        );
         ExecuteResult::Execute(RowUpdateStatements {
             rows_version,
             deletes,
@@ -544,10 +559,14 @@ impl RowRecordCache {
         current: &CVRVersion,
         exclude_query_hashes: &[String],
     ) -> Result<CatchupCursor, sqlx::Error> {
+        // TS `const startMs = Date.now()` before `await this.flushed(lc)`
+        // (row-record-cache.ts:361-362).
+        let catchup_started = std::time::Instant::now();
         // Before reading, pending flushes must complete (TS: `await this.flushed(lc)`).
         self.flushed()
             .await
             .map_err(|e| sqlx::Error::Configuration(e.into()))?;
+        let flush_ms = catchup_started.elapsed().as_millis();
 
         let start = after_version
             .as_ref()
@@ -559,6 +578,13 @@ impl RowRecordCache {
         if crate::schema::types::cmp_versions(&after_version, &Some(up_to_version.clone()))
             != std::cmp::Ordering::Less
         {
+            // TS `lc.info?.(`finished row catchup (flush: ${flushMs} ms, total:
+            // ${totalMs} ms)`)` (row-record-cache.ts:407-410) — TS reaches it on
+            // every catchup, including the nothing-to-send one.
+            tracing::info!(
+                "finished row catchup (flush: {flush_ms} ms, total: {} ms)",
+                catchup_started.elapsed().as_millis()
+            );
             return Ok(CatchupCursor::empty());
         }
 
@@ -689,7 +715,17 @@ async fn flush_loop(context: FlushLoopContext) {
         let (pending, pending_version) = {
             let mut state = state.lock().await;
             if state.pending_rows_version == state.flushed_rows_version {
-                // Caught up — done.
+                // Caught up — done. TS `lc.info?.(`up to date rows@${
+                // versionToNullableCookie(this.#flushedRowsVersion)}`)`
+                // (row-record-cache.ts:301-303).
+                tracing::info!(
+                    "up to date rows@{}",
+                    state
+                        .flushed_rows_version
+                        .as_ref()
+                        .map(version_string)
+                        .unwrap_or_else(|| "null".to_string())
+                );
                 state.flushing = false;
                 is_flushing.store(false, Ordering::SeqCst);
                 return;
@@ -719,8 +755,13 @@ async fn flush_loop(context: FlushLoopContext) {
                 // (${elapsed} ms)` at INFO — the write-back's own duration, which a
                 // catchup read (`catchupRowPatches` → `await this.flushed()`) and
                 // therefore the client's pokeEnd wait on.
-                eprintln!(
-                    "[cvr] flushed {rows_count} rows@{} ({elapsed_ms:.1} ms) cg={cvr_id}",
+                // 1:1 with TS: `lc.info?.(`flushed ${rows} rows@${versionString(
+                // rowsVersion)} (${elapsed} ms)`)` (row-record-cache.ts:289-291).
+                // The CG id rides as a structured FIELD, not in the message, so
+                // the text matches TS exactly (M14 log differential, 2026-09-08).
+                tracing::info!(
+                    cg = %cvr_id,
+                    "flushed {rows_count} rows@{} ({elapsed_ms:.1} ms)",
                     version_string(&version)
                 );
 
@@ -739,6 +780,9 @@ async fn flush_loop(context: FlushLoopContext) {
                 }
             }
             Err(e) => {
+                // TS `lc.info?.(`row record flush failed`, e)`
+                // (row-record-cache.ts:307) — the error rides as context.
+                tracing::info!(error = %e, "row record flush failed");
                 let err_msg = format!("row record flush failed: {}", e);
                 (fail_service)(err_msg.clone());
                 let last = {
@@ -772,8 +816,9 @@ async fn flush_one_iteration(
     if acquire_ms > 50.0 {
         // Pool-acquire wait is the one cost of this transaction TS never pays
         // (postgres.js queues without a bounded pool); surface it when material.
-        eprintln!(
-            "[cvr] row write-back waited {acquire_ms:.1} ms for a pool connection cg={cvr_id}"
+        tracing::warn!(
+            cg = %cvr_id,
+            "[cvr] row write-back waited {acquire_ms:.1} ms for a pool connection"
         );
     }
 

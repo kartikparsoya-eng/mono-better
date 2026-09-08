@@ -1666,6 +1666,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
+ "tracing",
 ]
 
 [[package]]

@@ -85,6 +85,9 @@ opentelemetry-otlp = { version = "0.32.0", default-features = false, features = 
 ] }
 urlpattern = "0.6"
 regex = "1.13.1"
+# Port of TS `randomID()` (pipeline-driver.ts:176): the per-hydrate
+# `pipelineRunID` on every `query pipeline lifecycle` log line.
+rand = "0.8"
 
 [build-dependencies]
 cc = "1"

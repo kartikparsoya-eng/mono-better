@@ -61,7 +61,7 @@ source; maintainer citations are in HTML comments.
 | `QUERY_URLS_JSON`, `QUERY_API_KEY`, `QUERY_ALLOWED_CLIENT_HEADERS_JSON`, `QUERY_ALLOWED_REQUEST_HEADERS_JSON`, `QUERY_FORWARD_COOKIES` | normalized `query` (or legacy `getQueries`) config | no custom-query fetch config |
 | `ENABLE_QUERY_COVERING` | only an explicit `false` is forwarded | `true` (shadow/log-only) |
 | `ZERO_LOG_FORMAT` / `ZERO_LOG_LEVEL` | normalized log config | plaintext / `info` |
-| `ZERO_SLOW_HYDRATE_THRESHOLD_MS` | `log.slowHydrateThreshold` | 1000 ms (NB: TS default is 100 ms) |
+| `ZERO_LOG_SLOW_HYDRATE_THRESHOLD` | `log.slowHydrateThreshold` (same env name as TS; `ZERO_SLOW_HYDRATE_THRESHOLD_MS` accepted as a deprecated alias) | 100 ms (= TS default) |
 | `NOTIFY_AUTH_TOKEN` | per-dispatcher random UUID gating `/notify` | unset → `/notify` open |
 | `PUSHER_URL` / `PUSHER_AUTH_TOKEN` | loopback push-relay URL + token (only when a push/mutate URL is configured) | unset → custom pushes rejected read-only |
 

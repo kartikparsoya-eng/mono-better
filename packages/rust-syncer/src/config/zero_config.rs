@@ -199,8 +199,8 @@ impl SyncerConfig {
                             .map(|d| d.as_nanos())
                             .unwrap_or(0)
                     );
-                    eprintln!(
-                        "WARNING: TASK_ID unset; using unique fallback owner id \
+                    tracing::warn!(
+                        "TASK_ID unset; using unique fallback owner id \
                          '{auto}'. Set TASK_ID in production."
                     );
                     auto

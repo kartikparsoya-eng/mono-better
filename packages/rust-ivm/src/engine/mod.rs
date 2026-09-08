@@ -553,8 +553,10 @@ impl Engine {
             return Some(model.clone());
         }
         let Some(specs) = &self.cost_model_specs else {
-            eprintln!(
-                "WARNING: planner cost-model conn set without table specs; \
+            // The level carries the severity; the literal "WARNING:" prefix
+            // was how this got noticed at all as an `eprintln!` (M14).
+            tracing::warn!(
+                "planner cost-model conn set without table specs; \
                  running UNPLANNED (TS plans with scanstatus — call \
                  set_cost_model_table_specs)"
             );
@@ -569,8 +571,8 @@ impl Engine {
                 Some(model)
             }
             Err(e) => {
-                eprintln!(
-                    "WARNING: scanstatus cost model unavailable; running \
+                tracing::warn!(
+                    "scanstatus cost model unavailable; running \
                      UNPLANNED (TS plans with scanstatus): {e}"
                 );
                 None
@@ -602,15 +604,18 @@ impl Engine {
         // `options.planDebugger`) — so read it back here and pass it EXPLICITLY,
         // exactly as TS does.
         let installed = crate::planner::current_plan_debugger();
-        // RUST_IVM_PERF_TRACE additionally attaches a fresh AccumulatorDebugger
-        // so a PRODUCTION query's cost reasoning can be dumped; in TS the same
-        // data comes from `analyzeQuery --join-plans`. Diagnostic only, and only
-        // when the analyze path has not already supplied a debugger.
-        let trace_dbg = (crate::perf_trace::enabled() && installed.is_none()).then(|| {
-            std::rc::Rc::new(std::cell::RefCell::new(
-                crate::planner::AccumulatorDebugger::new(),
-            ))
-        });
+        // RUST_IVM_PLAN_DEBUG attaches a fresh AccumulatorDebugger so a
+        // PRODUCTION query's cost reasoning can be dumped; in TS the same data
+        // comes from `analyzeQuery --join-plans`. Diagnostic only, only when the
+        // analyze path has not already supplied a debugger, and deliberately
+        // NOT tied to RUST_IVM_PERF_TRACE (see `perf_trace::plan_debug_enabled`:
+        // the dump is ~98% of the log volume when it is on).
+        let trace_dbg =
+            (crate::perf_trace::plan_debug_enabled() && installed.is_none()).then(|| {
+                std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::planner::AccumulatorDebugger::new(),
+                ))
+            });
         let plan_debugger: Option<crate::planner::SharedPlanDebugger> = installed.or_else(|| {
             trace_dbg
                 .clone()
@@ -623,7 +628,7 @@ impl Engine {
             for ev in crate::planner::serialize_plan_debug_events(&dbg.borrow().events) {
                 let s = ev.to_string();
                 if s.contains("node-cost") || s.contains("best-plan-selected") {
-                    eprintln!("[rust-ivm][PLANDBG] {s}");
+                    tracing::debug!("[rust-ivm][PLANDBG] {s}");
                 }
             }
         }
@@ -637,7 +642,11 @@ impl Engine {
                 if crate::perf_trace::enabled() {
                     let flips = crate::planner::runtime::flip_order(&planned);
                     if !flips.is_empty() {
-                        eprintln!("[rust-ivm][PLAN] table={} flips={:?}", planned.table, flips);
+                        tracing::debug!(
+                            "[rust-ivm][PLAN] table={} flips={:?}",
+                            planned.table,
+                            flips
+                        );
                     }
                 }
                 planned
@@ -646,7 +655,7 @@ impl Engine {
                 if let Some(interrupted) =
                     payload.downcast_ref::<crate::sqlite::sqlite_cost_model::CostProbeInterrupted>()
                 {
-                    eprintln!(
+                    tracing::warn!(
                         "planner probe interrupted; building without flips: {}",
                         interrupted.0
                     );

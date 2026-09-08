@@ -161,8 +161,12 @@ export function rustSyncerEnv(
   if (config.log?.level) {
     out.ZERO_LOG_LEVEL = config.log.level;
   }
+  // Same env name the TS option is read from (otel/src/log-options.ts:24), so
+  // the rust view-syncer's `slow_hydrate_threshold_ms` and TS's
+  // `#slowHydrateThreshold` resolve one value; rust also accepts the older
+  // `ZERO_SLOW_HYDRATE_THRESHOLD_MS` this bridge emitted before 2026-09-08.
   if (config.log?.slowHydrateThreshold !== undefined) {
-    out.ZERO_SLOW_HYDRATE_THRESHOLD_MS = String(
+    out.ZERO_LOG_SLOW_HYDRATE_THRESHOLD = String(
       config.log.slowHydrateThreshold,
     );
   }

@@ -28,6 +28,11 @@ name = "replay"
 path = "src/bin/replay.rs"
 
 [dependencies]
+# Log through the subscriber rust-syncer installs, not bare stderr: an
+# `eprintln!` has no level, ignores ZERO_LOG_LEVEL, and is invisible to every
+# error-count alert, while its TS twin goes through the LogContext at a real
+# severity (parity/log_differential.py, M14).
+tracing = "0.1"
 indexmap = "2"
 parking_lot = "0.12"
 rustc-hash = "2"

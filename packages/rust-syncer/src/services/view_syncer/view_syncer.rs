@@ -32,7 +32,8 @@ use crate::services::view_syncer::connection_context_manager::{
     FetchConfig, InitConnectionBody, MaintenanceKind, UpdateAuthBody, resolve_auth,
 };
 use crate::services::view_syncer::pipeline_driver::{
-    AdvanceOutcome, IvmPipelines, IvmTableSpec, json_to_value,
+    AdvanceOutcome, HydrateQuery, IvmPipelines, IvmTableSpec, PipelineHydrationReason,
+    json_to_value,
 };
 use crate::services::view_syncer::query_covering::{
     QueryCoverageShadowHit, QueryCoveringIndex, RunningQuery,
@@ -138,6 +139,17 @@ impl ConfigPassOrigin {
     /// connection, a refreshed credential, a background re-authorization).
     fn forces_config_pass(self) -> bool {
         !matches!(self, ConfigPassOrigin::ChangeDesiredQueries)
+    }
+
+    /// The TS message name — `cmd` in `#runInLockForClient` (view-syncer.ts
+    /// :1192) — for the origins that carry a client message.
+    fn cmd(self) -> &'static str {
+        match self {
+            ConfigPassOrigin::InitConnection => "initConnection",
+            ConfigPassOrigin::ChangeDesiredQueries => "changeDesiredQueries",
+            ConfigPassOrigin::UpdateAuth => "updateAuth",
+            ConfigPassOrigin::BackgroundRetransform => "backgroundRetransform",
+        }
     }
 }
 /// Upper bound on a single eviction-timer delay (matches `rust_cvr::ttl::MAX_TTL_MS`).
@@ -349,21 +361,51 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// Threshold (ms) above which a hydration is logged as a slow query — the prod
-/// signal operators use to find pathological queries. Port of TS's
-/// `slowHydrateThreshold` (view-syncer.ts / pipeline-driver.ts). Read once from
-/// `ZERO_SLOW_HYDRATE_THRESHOLD_MS` (default 1000), cached.
+/// signal operators use to find pathological queries. Port of TS
+/// `log.slowHydrateThreshold` (otel/src/log-options.ts:24-29: env
+/// `ZERO_LOG_SLOW_HYDRATE_THRESHOLD`, default 100 ms), which the view-syncer
+/// receives as its `slowHydrateThreshold` ctor arg (view-syncer.ts:414). Read
+/// once, cached.
 ///
 /// `pub(crate)` so the pipeline driver's `VENDED` log gate reads the same
 /// threshold — TS shares one `#logConfig.slowHydrateThreshold` across the
 /// view-syncer's slow-hydrate log and the pipeline-driver's VENDED log.
 pub(crate) fn slow_hydrate_threshold_ms() -> f64 {
+    #[cfg(test)]
+    if let Some(t) = SLOW_HYDRATE_THRESHOLD_OVERRIDE.with(|o| *o.borrow()) {
+        return t;
+    }
     static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *T.get_or_init(|| {
-        std::env::var("ZERO_SLOW_HYDRATE_THRESHOLD_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1000.0)
-    })
+    *T.get_or_init(|| slow_hydrate_threshold_from_env(|k| std::env::var(k).ok()))
+}
+
+/// Env resolution for [`slow_hydrate_threshold_ms`], pure for testing. The TS
+/// option's env name wins; `ZERO_SLOW_HYDRATE_THRESHOLD_MS` is the rust-only
+/// name the TS bridge emitted before 2026-09-08 (rust-syncer-bridge.ts), kept
+/// as a deprecated alias so a rust binary newer than its bridge still honors
+/// the configured value. Unset / unparseable → TS's default of 100.
+pub(crate) fn slow_hydrate_threshold_from_env(var: impl Fn(&str) -> Option<String>) -> f64 {
+    [
+        "ZERO_LOG_SLOW_HYDRATE_THRESHOLD",
+        "ZERO_SLOW_HYDRATE_THRESHOLD_MS",
+    ]
+    .iter()
+    .find_map(|k| var(k).and_then(|s| s.trim().parse::<f64>().ok()))
+    .unwrap_or(100.0)
+}
+
+#[cfg(test)]
+thread_local! {
+    // Test seam (rust-only): lets a test pin the threshold without touching the
+    // process env behind the `OnceLock` (TS tests pass `slowHydrateThreshold`
+    // straight into the ViewSyncerService ctor).
+    static SLOW_HYDRATE_THRESHOLD_OVERRIDE: std::cell::RefCell<Option<f64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_slow_hydrate_threshold_for_test(threshold: Option<f64>) {
+    SLOW_HYDRATE_THRESHOLD_OVERRIDE.with(|o| *o.borrow_mut() = threshold);
 }
 
 thread_local! {
@@ -1551,11 +1593,13 @@ impl ViewSyncerService {
         svc
     }
 
-    /// TS `ViewSyncerService.servingLagEligible`: `#clients.size > 0 &&
-    /// getBackgroundConnectionContext() !== undefined`. Approximated here as
-    /// "has a registered client with a live connection to serve".
+    /// TS `ViewSyncerService.servingLagEligible` (view-syncer.ts:670-675):
+    /// `#clients.size > 0 && getBackgroundConnectionContext() !== undefined`.
     fn serving_lag_eligible(&self) -> bool {
-        !self.registered_ws.is_empty() && !self.connections.is_empty()
+        !self.clients.is_empty()
+            && lock_unpoisoned(&self.ccm)
+                .get_background_connection_context()
+                .is_some()
     }
 
     /// TS `ViewSyncerService.queryCount`: `#pipelines.initialized() ?
@@ -1664,14 +1708,25 @@ impl ViewSyncerService {
             return Ok(true);
         }
         if self.cvr_pg {
+            // The test seam injects the store's verdict as the LOAD RESULT, so
+            // the failure arm below (its log line included) is the one exercised.
             #[cfg(test)]
-            if let Some(error) = force_load_error_take() {
-                return Err(LoadCvrError::Store(error));
-            }
-            match self.load_cvr(self.last_connect_time as f64).await {
+            let loaded = match force_load_error_take() {
+                Some(error) => Err(LoadCvrError::Store(error)),
+                None => self.load_cvr(self.last_connect_time as f64).await,
+            };
+            #[cfg(not(test))]
+            let loaded = self.load_cvr(self.last_connect_time as f64).await;
+            match loaded {
                 Ok(cvr) => self.cvr = cvr,
                 Err(e) => {
-                    tracing::error!("CG {}: load_cvr failed: {e}", self.cg_id);
+                    // TS logs nothing at the load site: the one line for a load
+                    // failure is `sendError`'s, at the thrown error's level
+                    // (connection.ts:428 — `warn` for ClientNotFound, cvr-store.ts:
+                    // 1362), which `Connection::send_error` emits. Rust-only
+                    // diagnostic, kept below INFO so it never masquerades as a
+                    // second, higher-severity event.
+                    tracing::debug!("CG {}: load_cvr failed: {e}", self.cg_id);
                     return Err(e);
                 }
             }
@@ -2361,53 +2416,41 @@ impl ViewSyncerService {
                 self.cg_id, params.client_id, params.ws_id
             ),
         );
-        self.last_connect_time = now_ms();
-        self.keepalive_until = self.last_connect_time + CG_KEEPALIVE_MS;
+        // TS `keepalive()` at socket accept (syncer.ts:370 → view-syncer.ts
+        // :718-724): `#keepAliveUntil = Date.now() + keepaliveMs`. `#lastConnectTime`
+        // is NOT set here — TS sets it in `#runInLockForClient` when the
+        // initConnection message arrives (:1194-1196); see `run_in_lock_for_client`.
+        self.keepalive_until = now_ms() + CG_KEEPALIVE_MS;
         let client_id = params.client_id.clone();
         let ws_id = params.ws_id.clone();
         let protocol_version = params.protocol_version;
         let client_group_id = params.client_group_id.clone();
 
-        // Close any prior connection for this clientID before installing the new
-        // one. Otherwise the previous ws_id's ClientHandler stays registered in
-        // the SyncEngine — it keeps receiving pokes and its socket is never
-        // closed, so a stale connection can go on emitting under the same
-        // clientID. TS closes the superseded connection when a client reconnects.
+        // Port of syncer.ts:643-650 (`handleConnection`): a clientID that is
+        // already connected has its EXISTING socket closed frame-less —
+        // `existing.close(`replaced by ${params.wsID}`)` → `Connection.close`
+        // → ws close, no error frame. In production the router already sent
+        // `CGMessage::CloseConnection` for it (`close_connection`); this is the
+        // same close for a connection that reached the CG thread without one.
         if let Some(prev_ws_id) = self.registered_ws.get(&client_id).cloned()
             && prev_ws_id != ws_id
         {
-            tracing::debug!(
-                "CG {}: client {client_id} reconnected; closing superseded connection (ws {prev_ws_id} -> {ws_id})",
-                self.cg_id
-            );
-            self.fail_client(
-                &prev_ws_id,
-                "Connection superseded by a newer connection for the same clientID",
-            );
+            tracing::debug!("client {client_id} already connected, closing existing connection");
+            if let Some(conn) = self.connections.get(&client_id) {
+                conn.close(&format!("replaced by {ws_id}"));
+            }
             self.unregister_client(&prev_ws_id);
             self.decrement_active_client(&prev_ws_id);
         }
 
-        // Register the client with the SyncEngine so notifications can poke it.
-        let cvr_sink: Arc<dyn rust_cvr::client_handler::WebSocketSink> = Arc::new(sink.clone());
-        // Staged clones: the borrow checker cannot split `&mut self` (the
-        // receiver) from `&self.<field>` args now that the engine methods live
-        // on the service itself.
-        let shard = self.shard.clone();
-        self.register_client(
-            &client_id,
-            &ws_id,
-            &client_group_id,
-            &shard,
-            params.base_cookie.as_deref(),
-            cvr_sink,
-        );
+        // NOT registered as a poke target here: TS creates the `ClientHandler`
+        // and puts it in `#clients` when the initConnection MESSAGE arrives
+        // (`initConnection`, view-syncer.ts:903-914), and `#activeClients` moves
+        // there too (:888-890) — both ported in `init_connection`. Between accept
+        // and that message the socket is a connection (CCM-registered below) but
+        // not a client: no pokes, no deleteClients acks, and its other messages
+        // are dropped by `run_in_lock_for_client`.
         self.open_ws_ids.insert(ws_id.clone());
-        // Active-clients gauge +1 (TS `#activeClients.add(1, {protocol.version})`).
-        // Remember the version so the matching disconnect decrements the same tag.
-        self.active_client_pv
-            .insert(ws_id.clone(), params.protocol_version);
-        crate::metrics::record_active_client_delta(1, params.protocol_version);
         // TS's dispatcher tracks the highest protocol version any client has
         // connected with (`zero.sync.max-protocol-version`,
         // server/worker-dispatcher.ts:56-64). Rust has no worker_dispatcher
@@ -2600,24 +2643,6 @@ impl ViewSyncerService {
         // this point already passed `accept_connection`'s gate.
         self.connections.insert(client_id.clone(), Rc::new(conn));
 
-        // TS parity: a malformed baseCookie FAILS the connection. TS parses it
-        // in the ClientHandler constructor (client-handler.ts `cookieToVersion`
-        // → `versionFromString`, schema/types.ts) — the throw escapes to the
-        // connection boundary and is wrapped as a fatal `Internal` error
-        // (`wrapWithProtocolError`, types/error-with-level.ts), sent after
-        // `connected`. The lenient registrations above keep the CG task
-        // panic-safe (Rust-only concern); this check reproduces the TS-visible
-        // outcome: ["error",{kind:"Internal"}] then close.
-        if let Some(c) = params.base_cookie.as_deref()
-            && let Err(e) = rust_cvr::schema::types::maybe_version_string(c)
-        {
-            if let Some(conn) = self.connections.get(&*client_id) {
-                conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
-            }
-            self.delete_client_due_to_disconnect(&client_id, &ws_id);
-            return None;
-        }
-
         // Piggybacked initConnection from the sec-websocket-protocol header:
         // hand the raw message back to the caller, which dispatches it through
         // the SAME path as a socket frame (Connection -> SyncerWsMessageHandler
@@ -2660,6 +2685,23 @@ impl ViewSyncerService {
         // `ConfigPassOrigin`.
         let is_init = origin.is_init_connection();
         let force_config_pass = origin.forces_config_pass();
+        // TS `initConnection` (view-syncer.ts:864-914): the ClientHandler is
+        // created and registered when the initConnection MESSAGE arrives, before
+        // the locked body below — never at socket accept.
+        if is_init && !self.init_connection(client_id, &ws_id) {
+            return false;
+        }
+        // TS `#runInLockForClient` (view-syncer.ts:1180-1250) wraps
+        // initConnection, changeDesiredQueries and updateAuth; the background
+        // retransform is a `#runInLockWithCVR` with no client (:2670) and skips
+        // the gate.
+        if origin != ConfigPassOrigin::BackgroundRetransform
+            && self
+                .run_in_lock_for_client(client_id, &ws_id, origin.cmd(), is_init)
+                .is_none()
+        {
+            return false;
+        }
         let (puts, dels, clear) = parse_desired_queries_patch(body);
         // Client push overrides (TS ConnectionContextManager handleInitConnection:
         // `userPushURL` replaces the push target; `userPushHeaders` become
@@ -2760,7 +2802,8 @@ impl ViewSyncerService {
                 return false;
             }
             Err(LoadCvrError::Store(error)) => {
-                tracing::error!("CG {}: unable to load CVR: {error}", self.cg_id);
+                // Level lives on the `send_error` line (see `ensure_cvr`).
+                tracing::debug!("CG {}: unable to load CVR: {error}", self.cg_id);
                 self.fail_group_with_error(cvr_store_error_body(&error));
                 return false;
             }
@@ -2883,12 +2926,19 @@ impl ViewSyncerService {
             let now = now_ms();
             let ttl_clock = self.get_ttl_clock(now);
             let hydrate_started = std::time::Instant::now();
-            // TS view-syncer.ts:590 `lc.info?.(`init pipelines@${version} (cvr@${cvrVer})`)`.
-            tracing::info!(
-                cg_id = %self.cg_id,
-                "init pipelines@{state_version} (cvr@{})",
-                rust_cvr::schema::types::version_string(&cvr.version)
-            );
+            // TS view-syncer.ts:590 `lc.info?.(`init pipelines@${version} (cvr@${cvrVer})`)`
+            // is reached ONLY on the run loop's `!#pipelinesSynced` path (:568-606):
+            // the first sync after (re)init, never on a later `changeDesiredQueries`
+            // (`#syncQueryPipelineSet('missing')`, :644). Rust folds both into this
+            // method, so gate on the same flag (`sync_query_pipeline_set` flips it
+            // after the first sync; `reset_pipelines_and_rehydrate` re-arms it).
+            if !self.pipelines_synced {
+                tracing::info!(
+                    cg_id = %self.cg_id,
+                    "init pipelines@{state_version} (cvr@{})",
+                    rust_cvr::schema::types::version_string(&cvr.version)
+                );
+            }
             crate::trace::note(
                 "hydrate-start",
                 &format!("cg={} client={client_id}", self.cg_id),
@@ -2953,13 +3003,9 @@ impl ViewSyncerService {
                         ),
                     );
                     self.metrics.record_hydration(elapsed_ms);
-                    if elapsed_ms > slow_hydrate_threshold_ms() {
-                        tracing::warn!(
-                            "CG {}: Slow query materialization: config_and_hydrate took \
-                             {elapsed_ms:.0}ms for client {client_id}",
-                            self.cg_id
-                        );
-                    }
+                    // No whole-pass slow warn: TS's `Slow query materialization`
+                    // is PER QUERY, on each query's own process time
+                    // (view-syncer.ts:2305-2307) — emitted from `hydrate_and_sync`.
                 }
                 Err(e) => {
                     tracing::error!("CG {}: config_and_hydrate failed: {e}", self.cg_id);
@@ -3107,7 +3153,7 @@ impl ViewSyncerService {
         if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
             let selector = CcmConnectionSelector {
                 client_id: client_id.to_string(),
-                ws_id,
+                ws_id: ws_id.clone(),
             };
             let conn_ctx = {
                 let mut ccm = lock_unpoisoned(&self.ccm);
@@ -3121,6 +3167,15 @@ impl ViewSyncerService {
                 // against the refreshed credential's revision.
                 ccm.must_get_connection_context(&selector).ok()
             };
+            // TS `updateAuth` runs inside `#runInLockForClient` (view-syncer.ts
+            // :995): a socket that has not sent initConnection has no handler and
+            // is dropped here, after the handler-level CCM refresh above.
+            if self
+                .run_in_lock_for_client(client_id, &ws_id, "updateAuth", false)
+                .is_none()
+            {
+                return;
+            }
             // TS: "If pipelines are not yet synced, there is no transform request
             // that can absorb validation, so validate immediately."
             //   if (!this.#pipelinesSynced) {
@@ -3178,6 +3233,14 @@ impl ViewSyncerService {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             return;
         };
+        // TS `inspect` → `#runInLockForClient(selector, msg, this.#handleInspect)`
+        // (view-syncer.ts:2640).
+        if self
+            .run_in_lock_for_client(client_id, &ws_id, "inspect", false)
+            .is_none()
+        {
+            return;
+        }
         // Resolve the per-CG dependencies (socket, TTL clock) and delegate to
         // the 1:1 `handleInspect` (services/view_syncer/inspect_handler.rs),
         // mirroring how TS's lock body hands inspect-handler.ts the resolved
@@ -3235,6 +3298,18 @@ impl ViewSyncerService {
         deleted_client_ids: &[String],
         deleted_group_ids: &[String],
     ) {
+        // TS `deleteClients` runs inside `#runInLockForClient` (view-syncer.ts
+        // :1036): the requesting socket must have sent initConnection. (The
+        // deletion pass of `handle_desired_queries` re-enters here already gated.)
+        let Some(ws_id) = self.registered_ws.get(caller_client_id).cloned() else {
+            return;
+        };
+        if self
+            .run_in_lock_for_client(caller_client_id, &ws_id, "deleteClients", false)
+            .is_none()
+        {
+            return;
+        }
         match self.ensure_cvr(true).await {
             Ok(true) => {}
             Ok(false) => {
@@ -3266,7 +3341,8 @@ impl ViewSyncerService {
                 return;
             }
             Err(LoadCvrError::Store(e)) => {
-                tracing::error!("CG {}: unable to load CVR: {e}", self.cg_id);
+                // Level lives on the `send_error` line (see `ensure_cvr`).
+                tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
                 self.fail_group_with_error(cvr_store_error_body(&e));
                 return;
             }
@@ -3375,10 +3451,12 @@ impl ViewSyncerService {
         }
         drop(global);
         // Last client gone: sync the ttlClock to the CVR one final time before
-        // the group idles out — port of TS `#removeClient`'s clients-empty
-        // branch (view-syncer.ts:761-766; the `#ttlClock !== undefined` guard
-        // is the loaded-CVR check inside the callee).
-        if self.connections.is_empty() {
+        // the group idles out — port of TS `#deleteClientDueToDisconnect`'s
+        // `#clients.size === 0` branch (view-syncer.ts:761-766; the `#ttlClock
+        // !== undefined` guard is the loaded-CVR check inside the callee).
+        // `clients` — not `connections` — because TS counts initConnection'd
+        // handlers, not accepted sockets.
+        if self.clients.is_empty() {
             self.update_ttl_clock_in_cvr_without_lock();
             // TS `#deleteClientDueToDisconnect` also stops the eviction timer on
             // the last disconnect (view-syncer.ts:767): an idle group with no
@@ -3511,7 +3589,8 @@ impl ViewSyncerService {
                 return;
             }
             Err(LoadCvrError::Store(e)) => {
-                tracing::error!("CG {}: unable to load CVR: {e}", self.cg_id);
+                // Level lives on the `send_error` line (see `ensure_cvr`).
+                tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
                 self.fail_group_with_error(cvr_store_error_body(&e));
                 return;
             }
@@ -4041,6 +4120,9 @@ pub(crate) async fn cg_event_loop(
                                 "CG thread {cg_id}: idle keepalive elapsed; shutting down"
                             );
                             state.shutdown();
+                            // TS `lc.info?.(`view-syncer ${this.id} finished`)`
+                            // at the tail of `run()` (view-syncer.ts:629).
+                            tracing::info!("view-syncer {cg_id} finished");
                             break;
                         }
                         // A wake could be for either deadline; run each if due.
@@ -5420,6 +5502,11 @@ mod tests {
             pinned_params("clientB", "wsB", "user-1"),
             DirectWebSocketSink::new(tx_b),
         ));
+        // `deleteClients` is honored only from a socket that has sent
+        // initConnection (TS `#runInLockForClient`, view-syncer.ts:1216):
+        // register both handlers the TS way (view-syncer.ts:914).
+        assert!(state.init_connection("clientA", "wsA"));
+        assert!(state.init_connection("clientB", "wsB"));
 
         // The next store load answers with TS's purge verdict (cvr-store.ts:423).
         state.cvr = None;
@@ -5428,7 +5515,55 @@ mod tests {
             "Client has been purged due to inactivity".to_string(),
         ));
 
-        rt.block_on(state.apply_client_deletions("clientA", None, &["clientC".to_string()], &[]));
+        // Log-level parity (2026-09-08): TS logs a load failure ONCE, from
+        // `sendError` at the thrown error's level — `warn` for
+        // `ClientNotFoundError` (cvr-store.ts:1362, connection.ts:428). Rust
+        // additionally logged a rust-only `unable to load CVR` line at ERROR,
+        // which turned a routine purged-client reconnect into a paging-level
+        // event ("0 ERROR" is the prod health signal). Capture ERROR-and-above:
+        // it must stay empty. Revert the `tracing::debug!` back to
+        // `tracing::error!` in `apply_client_deletions` → fails.
+        let errors_logged = {
+            use std::sync::{Arc, Mutex};
+            #[derive(Clone)]
+            struct CapWriter(Arc<Mutex<Vec<u8>>>);
+            struct CapGuard(Arc<Mutex<Vec<u8>>>);
+            impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+                type Writer = CapGuard;
+                fn make_writer(&'a self) -> CapGuard {
+                    CapGuard(self.0.clone())
+                }
+            }
+            impl std::io::Write for CapGuard {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(CapWriter(buf.clone()))
+                .with_ansi(false)
+                .with_max_level(tracing::Level::ERROR)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                rt.block_on(state.apply_client_deletions(
+                    "clientA",
+                    None,
+                    &["clientC".to_string()],
+                    &[],
+                ));
+            });
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+        assert!(
+            errors_logged.is_empty(),
+            "a purged client is a WARN-level event in TS (ClientNotFoundError → 'warn'); \
+             rust logged at ERROR:\n{errors_logged}"
+        );
 
         let mut errors_a: Vec<serde_json::Value> = Vec::new();
         while let Ok(cmd) = rx_a.try_recv() {
@@ -5924,6 +6059,143 @@ mod tests {
         );
     }
 
+    /// `RevalidateFactory` with a real table, so a desired-queries pass actually
+    /// hydrates (the init/sync flag flips only after a successful sync).
+    struct IssueTableFactory {
+        handle: tokio::runtime::Handle,
+    }
+    impl CGServicesFactory for IssueTableFactory {
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            None
+        }
+        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
+            SyncEngineConfig {
+                initialization_error: None,
+                tables: vec![issue_table_spec()],
+                full_tables: vec![issue_full_table_spec()],
+                replica_path: None,
+                app_id: "zero".to_string(),
+                replica_version: "00".to_string(),
+                shard: ShardID {
+                    app_id: "zero".to_string(),
+                    shard_num: 0,
+                },
+                cvr_pg: None,
+                permissions: None,
+                permissions_hash: None,
+                revalidate_interval_ms: None,
+                query_config: None,
+                enable_query_covering: true,
+                enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
+                tokio_handle: self.handle.clone(),
+                admin_password: None,
+                server_version: "test".to_string(),
+                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            }
+        }
+    }
+
+    /// NON-VACUOUS (log parity, 2026-09-08): TS logs `init pipelines@…` ONLY on
+    /// the run loop's `!#pipelinesSynced` path (view-syncer.ts:568-606) — once
+    /// per pipeline (re)init — never on a later `changeDesiredQueries`
+    /// (`#syncQueryPipelineSet('missing')`, :644). The GKE sandbox log showed rust
+    /// printing it on EVERY query-set change (34 lines / 10 min for one client),
+    /// which reads as a pipeline reset. Revert the `if !self.pipelines_synced`
+    /// gate around the line in `handle_desired_queries` → the count is 2 → fails.
+    #[test]
+    fn init_pipelines_is_logged_once_per_pipeline_init_not_per_query_set_change() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(IssueTableFactory {
+            handle: rt.handle().clone(),
+        });
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(ToggleAuthValidator { valid }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        seed_test_client_schema(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let put = |hash: &str| {
+            serde_json::json!({"desiredQueriesPatch": [
+                {"op": "put", "hash": hash, "ast": {"table": "issue"}}
+            ]})
+        };
+
+        let logged = {
+            use std::sync::{Arc, Mutex};
+            #[derive(Clone)]
+            struct CapWriter(Arc<Mutex<Vec<u8>>>);
+            struct CapGuard(Arc<Mutex<Vec<u8>>>);
+            impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+                type Writer = CapGuard;
+                fn make_writer(&'a self) -> CapGuard {
+                    CapGuard(self.0.clone())
+                }
+            }
+            impl std::io::Write for CapGuard {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(CapWriter(buf.clone()))
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                // initConnection → first sync → pipelines (re)init → the line.
+                let accepted = rt.block_on(state.handle_desired_queries(
+                    "c1",
+                    &put("q1"),
+                    ConfigPassOrigin::InitConnection,
+                    CustomQueryTransformMode::All,
+                ));
+                assert!(accepted, "initConnection pass must be accepted");
+                // changeDesiredQueries → `'missing'` sync → no line.
+                let accepted = rt.block_on(state.handle_desired_queries(
+                    "c1",
+                    &put("q2"),
+                    ConfigPassOrigin::ChangeDesiredQueries,
+                    CustomQueryTransformMode::Missing,
+                ));
+                assert!(accepted, "changeDesiredQueries pass must be accepted");
+            });
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+        assert!(
+            state.pipelines_synced,
+            "the passes must have synced the pipeline set"
+        );
+        let cvr = state.cvr.as_ref().expect("cvr");
+        assert!(
+            cvr.queries.contains_key("q1") && cvr.queries.contains_key("q2"),
+            "both passes must have run; cvr queries: {:?}",
+            cvr.queries.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            logged.matches("init pipelines@").count(),
+            1,
+            "`init pipelines@` once per pipeline init (TS view-syncer.ts:590); got:\n{logged}"
+        );
+    }
+
     /// NON-VACUOUS (fix, 2026-09-02): `updateAuth` and the background retransform
     /// carry an EMPTY desired-queries body, and both MUST still run the
     /// config/hydrate pass — re-transforming every query under the refreshed
@@ -5952,6 +6224,15 @@ mod tests {
             rt.block_on(state.on_new_connection(
                 pinned_params("c1", "ws1", "user-1"),
                 DirectWebSocketSink::new(tx),
+            ));
+            // `updateAuth` runs inside `#runInLockForClient`, which honors only
+            // a socket that has sent initConnection (view-syncer.ts:914/:1216):
+            // register the client the TS way first.
+            rt.block_on(state.handle_desired_queries(
+                "c1",
+                &empty,
+                ConfigPassOrigin::InitConnection,
+                CustomQueryTransformMode::All,
             ));
             let before = state.config_pass_runs;
             rt.block_on(state.handle_desired_queries(
@@ -6258,6 +6539,11 @@ mod tests {
         let mut params = authed_params("c1", "ws1", "opaque-token-1");
         params.user_id = Some("user-1".to_string());
         rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+        // `updateAuth` runs inside `#runInLockForClient`, which honors only a
+        // socket that has sent initConnection (view-syncer.ts:914/:1216) —
+        // register the handler the TS way (the prefix only: the barebones
+        // factory's config pass would tear the connection down).
+        assert!(state.init_connection("c1", "ws1"));
 
         // Pipelines NOT synced (a connection that has not completed its first
         // sync): updateAuth must validate immediately.
@@ -6286,6 +6572,7 @@ mod tests {
             state.registered_ws.contains_key("c2"),
             "the second half needs a live connection or it asserts nothing"
         );
+        assert!(state.init_connection("c2", "ws2"));
         state.pipelines_synced = true;
         let before = state.validate_connection_runs;
         rt.block_on(state.handle_update_auth("c2", "opaque-token-3"));
@@ -7211,16 +7498,23 @@ mod tests {
             state.on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx2)),
         );
 
-        // The superseded ws1 socket must have been failed/closed.
-        let mut ws1_failed = false;
+        // The superseded ws1 socket is closed FRAME-LESS — TS syncer.ts:649
+        // `existing.close(`replaced by ${params.wsID}`)` → ws close, no error
+        // frame (an `error` frame here was the G49-class divergence).
+        let mut ws1_closed = false;
+        let mut ws1_errored = false;
         while let Ok(cmd) = drx1.try_recv() {
-            if matches!(cmd, WsCommand::Fail(_)) {
-                ws1_failed = true;
+            match cmd {
+                WsCommand::Close(_) | WsCommand::CloseWithCode { .. } => ws1_closed = true,
+                WsCommand::Fail(_) | WsCommand::FailWithCode { .. } => ws1_errored = true,
+                WsCommand::Send { msg, .. } if msg[0] == "error" => ws1_errored = true,
+                _ => {}
             }
         }
+        assert!(ws1_closed, "the superseded ws1 connection must be closed");
         assert!(
-            ws1_failed,
-            "the superseded ws1 connection must be failed/closed"
+            !ws1_errored,
+            "the supersede close carries no error frame (TS syncer.ts:649)"
         );
 
         // The mapping now points at ws2, with exactly one registered client.
@@ -7901,10 +8195,11 @@ mod tests {
     /// The `connected`-before-`error` ordering TS guarantees is now structural:
     /// `handle_connection` (accept task) sends `connected` BEFORE dispatching
     /// `NewConnection` to the CG thread, and this `Internal` error is emitted
-    /// later on the CG thread by `on_new_connection`. This unit test drives
-    /// `on_new_connection` directly, so it asserts only the CG-thread half (the
-    /// `Internal` close); the ordering is covered by `handle_connection`'s
-    /// accept-task emission.
+    /// later on the CG thread by `init_connection` — when the initConnection
+    /// MESSAGE is handled (the ClientHandler constructor, view-syncer.ts:903-910),
+    /// not at accept. This unit test drives the CG thread directly, so it
+    /// asserts only that half (nothing at accept, the `Internal` close at init);
+    /// the ordering is covered by `handle_connection`'s accept-task emission.
     #[test]
     fn malformed_base_cookie_closes_with_internal_error() {
         for bad_cookie in ["!!notlexi!!", "00:b100000000000"] {
@@ -7929,6 +8224,16 @@ mod tests {
             let mut params = test_params("c1", "ws1");
             params.base_cookie = Some(bad_cookie.to_string());
             rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+            assert!(
+                drain_sends(&mut rx).iter().all(|f| f[0] != "error"),
+                "[{bad_cookie}] the cookie is parsed at initConnection, not at accept"
+            );
+            rt.block_on(state.handle_desired_queries(
+                "c1",
+                &serde_json::json!({"clientSchema": {"tables": {}}}),
+                ConfigPassOrigin::InitConnection,
+                CustomQueryTransformMode::All,
+            ));
 
             let mut saw_connected = false;
             let mut error = None;
@@ -7992,6 +8297,9 @@ mod tests {
             cell.borrow_mut()
                 .on_new_connection(test_params("c1", "ws1"), sink),
         );
+        // `inspect` runs inside `#runInLockForClient` (view-syncer.ts:2640):
+        // the socket must have sent initConnection.
+        assert!(cell.borrow_mut().init_connection("c1", "ws1"));
 
         let drain =
             |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
@@ -8081,6 +8389,9 @@ mod tests {
             cell.borrow_mut()
                 .on_new_connection(test_params("c1", "ws1"), sink),
         );
+        // `inspect` runs inside `#runInLockForClient` (view-syncer.ts:2640):
+        // the socket must have sent initConnection.
+        assert!(cell.borrow_mut().init_connection("c1", "ws1"));
         (cell, rt, drx)
     }
 
@@ -8344,6 +8655,135 @@ mod tests {
     }
 
     const INIT_CONNECTION_HASH1: &str = r#"["initConnection",{"clientSchema":{"tables":{}},"desiredQueriesPatch":[{"op":"put","hash":"query-hash1","ast":{"table":"issue"}}]}]"#;
+    const CHANGE_DESIRED_HASH1: &str = r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"query-hash1","ast":{"table":"issue"}}]}]"#;
+
+    /// TS puts the poke-target `ClientHandler` in `#clients` when the
+    /// initConnection MESSAGE arrives (`initConnection`, view-syncer.ts:903-914)
+    /// and bumps `#activeClients` there (:888) — never at socket accept. Until
+    /// then the socket is not a client: `#getClients()` cannot return it, and
+    /// every other message from it is dropped by `#runInLockForClient`'s wsID
+    /// gate (:1216-1221, `mismatched wsID`) because it has no handler. Rust
+    /// registered the handler in `on_new_connection`, so an accepted socket whose
+    /// baseCookie matched the CVR version was an advance-poke target before its
+    /// initConnection, and its pre-init changeDesiredQueries ran a full config
+    /// pass. Non-vacuous: on the pre-fix code the first assertion fails.
+    #[test]
+    fn socket_becomes_a_client_only_on_init_connection() {
+        use super::engine_tests::{capture_logs, captured};
+        let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
+        {
+            let state = cell.borrow();
+            assert!(
+                state.get_clients(&["ws1".to_string()]).is_empty(),
+                "an accepted socket is not in #clients until initConnection (view-syncer.ts:914)"
+            );
+            assert!(
+                !state.active_client_pv.contains_key("ws1"),
+                "#activeClients moves at initConnection (view-syncer.ts:888)"
+            );
+        }
+        // A changeDesiredQueries BEFORE initConnection: dropped — no poke, no
+        // CVR change (TS `#runInLockForClient` returns on the wsID mismatch).
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            CHANGE_DESIRED_HASH1.to_string(),
+        ));
+        let frames = drain_sends(&mut rx);
+        assert!(
+            frames.iter().all(|f| f[0] != "pokeStart"),
+            "a pre-init changeDesiredQueries must not poke: {frames:?}"
+        );
+        assert!(
+            captured(&buf).contains("mismatched wsID"),
+            "TS view-syncer.ts:1217; got:\n{}",
+            captured(&buf)
+        );
+        assert!(
+            cell.borrow()
+                .cvr
+                .as_ref()
+                .is_none_or(|c| !c.clients.contains_key("c1")),
+            "a dropped message must not record the client in the CVR"
+        );
+        // initConnection: the handler exists, the gauge moved, pokes flow.
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
+        let frames = drain_sends(&mut rx);
+        assert!(
+            frames.iter().any(|f| f[0] == "pokeStart"),
+            "initConnection must poke: {frames:?}"
+        );
+        let state = cell.borrow();
+        assert_eq!(state.get_clients(&["ws1".to_string()]).len(), 1);
+        assert!(state.active_client_pv.contains_key("ws1"));
+        assert!(
+            state
+                .cvr
+                .as_ref()
+                .is_some_and(|c| c.clients.contains_key("c1"))
+        );
+    }
+
+    /// TS `initConnection` re-bases the TTL clock when the first client joins an
+    /// idle ViewSyncer (`if (this.#clients.size === 0) this.#ttlClockBase = now`,
+    /// view-syncer.ts:893-899): TTLs count CONNECTED time only, so the idle gap
+    /// between the last disconnect and the next initConnection must not advance
+    /// the clock. Rust re-based only on CVR load, so a reconnect inside the
+    /// keepalive window (CVR still loaded) charged the whole idle gap to every
+    /// query's TTL. Non-vacuous: on the pre-fix code the clock jumps by the
+    /// simulated 100 s gap.
+    #[test]
+    fn idle_gap_before_the_next_init_connection_does_not_advance_the_ttl_clock() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
+        drain_sends(&mut rx);
+        cell.borrow_mut()
+            .delete_client_due_to_disconnect("c1", "ws1");
+        // The last disconnect flushed the clock at `now`; pretend that was 100 s
+        // ago.
+        let ttl_before = {
+            let mut state = cell.borrow_mut();
+            assert!(
+                state.cvr.is_some(),
+                "the CVR stays loaded through the keepalive window"
+            );
+            state.ttl_clock_base -= 100_000;
+            state.ttl_clock
+        };
+        let (tx, mut rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let _ = rt.block_on(
+            cell.borrow_mut()
+                .on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx)),
+        );
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws2".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
+        drain_sends(&mut rx2);
+        let advanced = cell.borrow().ttl_clock - ttl_before;
+        assert!(
+            advanced < 50_000,
+            "the idle gap must not be charged to the TTL clock (view-syncer.ts:893-899); advanced {advanced} ms"
+        );
+    }
 
     /// Port of TS connection.ts `#handleMessage` ping fast-path, driven through
     /// the CG dispatch (`on_inbound` → Connection): `["ping",{}]` answers
@@ -9092,7 +9532,147 @@ impl ViewSyncerService {
         Ok(())
     }
 
-    /// Register a client for poke delivery. `sink` is typically a
+    /// Port of TS `initConnection`'s SYNCHRONOUS prefix (view-syncer.ts:864-914),
+    /// run when the initConnection MESSAGE arrives — not at socket accept:
+    /// `#activeClients.add(1)` (:888), the first-client `#ttlClockBase` reset
+    /// (:893-899), `new ClientHandler(...)` whose constructor parses the base
+    /// cookie (:903-910), the `replaced by wsID` close of a prior handler
+    /// (:911-913) and `#clients.set` (:914). The locked body TS then runs
+    /// (`#runInLockForClient(... #handleConfigUpdate)`, :922-961) is the rest of
+    /// `handle_desired_queries`. Returns `false` when the connection was failed.
+    fn init_connection(&mut self, client_id: &str, ws_id: &str) -> bool {
+        tracing::debug!("viewSyncer.initConnection");
+        let Some(conn) = self.connections.get(client_id).cloned() else {
+            return false;
+        };
+        // Active-clients gauge +1; remembered per socket so the matching
+        // disconnect decrements the same protocol-version tag (:884-890).
+        if !self.active_client_pv.contains_key(ws_id) {
+            let protocol_version = conn.protocol_version();
+            self.active_client_pv
+                .insert(ws_id.to_string(), protocol_version);
+            crate::metrics::record_active_client_delta(1, protocol_version);
+        }
+        // "First connection to this ViewSyncerService": TTLs count CONNECTED
+        // time, so the idle gap since the last client left is dropped.
+        if self.clients.is_empty() {
+            self.ttl_clock_base = now_ms();
+        }
+        // `connCtx.baseCookie` (:909) — read back from the
+        // ConnectionContextManager, as TS does.
+        let base_cookie: Option<String> = lock_unpoisoned(&self.ccm)
+            .get_connection_context(&CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id: ws_id.to_string(),
+            })
+            .and_then(|c| c.base_cookie);
+        // A malformed baseCookie throws in the ClientHandler constructor
+        // (client-handler.ts `cookieToVersion` → `versionFromString`,
+        // schema/types.ts); the throw escapes to `Connection.#handleMessage` and
+        // is wrapped as a fatal `Internal` error (`wrapWithProtocolError`,
+        // types/error-with-level.ts). Rust's constructor is lenient (CG-task
+        // panic safety), so reproduce the TS-visible outcome here:
+        // ["error",{kind:"Internal"}] then close.
+        if let Some(c) = base_cookie.as_deref()
+            && let Err(e) = rust_cvr::schema::types::maybe_version_string(c)
+        {
+            conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
+            self.delete_client_due_to_disconnect(client_id, ws_id);
+            return false;
+        }
+        // `this.#clients.get(connCtx.clientID)?.close(`replaced by wsID: ${wsID}`)`.
+        let prior: Vec<String> = self
+            .clients
+            .values()
+            .filter(|c| c.client_id == client_id && c.ws_id != ws_id)
+            .map(|c| c.ws_id.clone())
+            .collect();
+        for prev_ws_id in prior {
+            if let Some(c) = self.clients.get(&prev_ws_id) {
+                c.close(&format!("replaced by wsID: {ws_id}"));
+            }
+            self.unregister_client(&prev_ws_id);
+            self.decrement_active_client(&prev_ws_id);
+        }
+        // `this.#clients.set(connCtx.clientID, newClient)`.
+        let shard = self.shard.clone();
+        let client_group_id = self.cg_id.clone();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(conn.sink().clone());
+        self.register_client(
+            client_id,
+            ws_id,
+            &client_group_id,
+            &shard,
+            base_cookie.as_deref(),
+            sink,
+        );
+        true
+    }
+
+    /// TS `#clients.has(clientID)`.
+    fn has_client(&self, client_id: &str) -> bool {
+        self.clients.values().any(|c| c.client_id == client_id)
+    }
+
+    /// TS `this.#clients.get(clientID)` (a Map keyed by clientID). Rust keys
+    /// handlers by ws_id: the current socket for a clientID is the registered
+    /// one, else any handler carrying that clientID (fixtures register
+    /// handlers without the router's ws registration).
+    fn client_handler_for(&self, client_id: &str) -> Option<Arc<ClientHandler>> {
+        self.registered_ws
+            .get(client_id)
+            .and_then(|ws_id| self.clients.get(ws_id))
+            .or_else(|| self.clients.values().find(|c| c.client_id == client_id))
+            .cloned()
+    }
+
+    /// Port of TS `#runInLockForClient` (view-syncer.ts:1180-1250) up to the
+    /// locked body. The lock itself is the serial CG thread (I-1), so what is
+    /// ported is its bookkeeping and its client gate: a message is honored only
+    /// when the clientID's CURRENT handler in `clients` — set by
+    /// `init_connection` — carries the sender's wsID; otherwise `mismatched
+    /// wsID` and the message is dropped (:1216-1221). That gate is how TS
+    /// ignores every non-initConnection message from a socket that has not sent
+    /// `initConnection` (no handler yet) and every frame from a superseded
+    /// socket. Returns the resolved handler.
+    fn run_in_lock_for_client(
+        &mut self,
+        client_id: &str,
+        ws_id: &str,
+        cmd: &str,
+        new_client: bool,
+    ) -> Option<Arc<ClientHandler>> {
+        tracing::debug!("viewSyncer.#runInLockForClient");
+        // :1194-1196.
+        if new_client || !self.has_client(client_id) {
+            self.last_connect_time = now_ms();
+        }
+        // :1213 — entering the CG thread's handling IS acquiring the lock.
+        tracing::debug!("acquired lock for cvr");
+        let client = self.client_handler_for(client_id);
+        if client.as_ref().map(|c| c.ws_id.as_str()) != Some(ws_id) {
+            // TS passes both ids as extra args, not in the message text.
+            tracing::debug!(
+                client_ws_id = client.as_ref().map(|c| c.ws_id.as_str()),
+                ws_id,
+                "mismatched wsID"
+            );
+            return None;
+        }
+        // `checkClientAndCVRVersions(client.version(), cvr.version)` (:1230)
+        // for a new client needs the loaded CVR; `handle_desired_queries` runs
+        // it right after `ensure_cvr`, at the same point of the init flow. The
+        // `else if` is unreachable in TS as well — a missing handler already
+        // failed the wsID match above — and kept for the 1:1 branch (:1231-1233).
+        if !new_client && !self.has_client(client_id) {
+            tracing::warn!("Processing {cmd} before initConnection was received");
+        }
+        client
+    }
+
+    /// Register a client for poke delivery — TS `#clients.set(clientID,
+    /// newClient)` (view-syncer.ts:914), called from `init_connection` when the
+    /// initConnection message arrives. `sink` is typically a
     /// `DirectWebSocketSink`. Port of napi `register_client`.
     pub fn register_client(
         &mut self,
@@ -9173,17 +9753,8 @@ impl ViewSyncerService {
             }
             client_ids
         };
-        // TS `this.#clients.get(clientId)` (a Map keyed by clientID). Rust keys
-        // sockets by ws_id: the current socket for a clientID is the registered
-        // one, else any handler carrying that clientID (fixtures register
-        // handlers without the router's ws registration).
-        let client_handler = |client_id: &str| -> Option<Arc<ClientHandler>> {
-            self.registered_ws
-                .get(client_id)
-                .and_then(|ws_id| self.clients.get(ws_id))
-                .or_else(|| self.clients.values().find(|c| c.client_id == client_id))
-                .cloned()
-        };
+        // TS `this.#clients.get(clientId)`.
+        let client_handler = |client_id: &str| self.client_handler_for(client_id);
         match error_or_errors {
             QueryTransformErrors::Failed(failed) => {
                 let query_ids: Vec<&str> = failed
@@ -10019,7 +10590,7 @@ impl ViewSyncerService {
             {
                 self.hydrate_unchanged_runs += 1;
             }
-            self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version)
+            self.hydrate_unchanged_queries(&cfg_cvr, &executed, &errored_query_ids, &state_version)
                 .await?
         };
 
@@ -10035,6 +10606,9 @@ impl ViewSyncerService {
             .filter(|q| q.inactivated_at + q.ttl <= ttl_clock)
             .map(|q| q.hash)
             .collect();
+        // Counted before the loop moves the Vec — TS reads
+        // `erroredQueryIDs?.length ?? 0` for its summary line below.
+        let errored_count = errored_query_ids.len();
         for id in errored_query_ids {
             if !remove_queries.contains(&id) {
                 remove_queries.push(id);
@@ -10077,7 +10651,13 @@ impl ViewSyncerService {
                 }
                 // Running with a DIFFERENT transform → drift: tear the old
                 // pipeline down before re-hydrating with the new transform.
-                Some(_) => {
+                Some(old_hash) => {
+                    // TS `lc.info?.(`Query ${queryID} transformation changed:
+                    // ${oldHash} -> ${newHash}`)` (view-syncer.ts:2048-2050),
+                    // logged BEFORE the thrash check.
+                    tracing::info!(
+                        "Query {qid} transformation changed: {old_hash} -> {transformation_hash}"
+                    );
                     if is_custom {
                         // TS order: `#checkForThrashing(queryID)` THEN
                         // `#queryTransformationHashChanges.add(1)`.
@@ -10099,6 +10679,18 @@ impl ViewSyncerService {
             add_queries.push((qid.clone(), transformation_hash));
             queries.push((qid, transformed_ast.to_string()));
         }
+        // TS `lc.info?.(`syncQueryPipelineSet: ${cvrQueryEntires.length} CVR
+        // queries, ${customQueriesToTransform.length} custom re-transformed,
+        // ${erroredQueryIDs?.length ?? 0} errored, ${removeQueriesQueryIds.size}
+        // to remove, ${addQueries.length} to add`)` (view-syncer.ts:2082-2088).
+        tracing::info!(
+            "syncQueryPipelineSet: {} CVR queries, {} custom re-transformed, \
+             {errored_count} errored, {} to remove, {} to add",
+            cfg_cvr.queries.len(),
+            custom_queries_to_transform.len(),
+            remove_queries.len(),
+            add_queries.len()
+        );
         // Tear down drifted pipelines directly (no CVR removal — the query is
         // still desired; only its compiled pipeline is rebuilt). TS does this
         // inside `addQuery` as `removeQuery(queryID, 'replace-query')`
@@ -10594,24 +11186,46 @@ impl ViewSyncerService {
         &mut self,
         cfg_cvr: &CVR,
         executed: &[(String, serde_json::Value, String)],
+        errored_query_ids: &[String],
         state_version: &str,
     ) -> Result<std::collections::HashSet<String>, String> {
         let mut drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // TS view-syncer.ts:1458 — when the CVR is behind the db, hydration must
         // run through the updater path, so skip the proactive re-check.
         if cfg_cvr.version.state_version != state_version {
+            // TS `lc.info?.(`CVR (${versionToCookie(cvrVersion)}) is behind db
+            // ${dbVersion}`)` (view-syncer.ts:1459-1461).
+            tracing::info!(
+                "CVR ({}) is behind db {state_version}",
+                version_to_cookie(&cfg_cvr.version)
+            );
             return Ok(drifted);
         }
-        for (qid, transformed_ast, new_hash) in executed {
-            let Some(record) = cfg_cvr.queries.get(qid) else {
-                continue;
-            };
-            // Only already-gotten, SAME-transformation-hash queries (TS
-            // `gotQueries` + the `transformationHash === q.transformationHash`
-            // keep, view-syncer.ts:1465/1538/1561).
-            if record.base().transformation_hash.as_deref() != Some(new_hash.as_str()) {
-                continue;
-            }
+        // TS `gotQueries` (view-syncer.ts:1465-1467): every CVR query with a
+        // transformationHash, whatever its type.
+        let got_queries: Vec<(&String, &QueryRecord)> = cfg_cvr
+            .queries
+            .iter()
+            .filter(|(_, q)| q.base().transformation_hash.is_some())
+            .collect();
+        // TS transforms the got queries INSIDE this method (custom :1503-1512,
+        // other :1547-1556) and classifies each result. Rust's caller
+        // (`sync_query_pipeline_set`) ran that one transform over the same CVR
+        // query set and hands the result down — `executed` holds every success,
+        // `errored_query_ids` every custom transform error — so the
+        // classification below is TS's, applied to the same result.
+        let executed_by_id: HashMap<&str, (&serde_json::Value, &String)> = executed
+            .iter()
+            .map(|(id, ast, hash)| (id.as_str(), (ast, hash)))
+            .collect();
+        let mut inactivated_count = 0usize;
+        let mut custom_error_count = 0usize;
+        let mut custom_hash_mismatch_count = 0usize;
+        let mut other_hash_mismatch_count = 0usize;
+        // TS `transformedQueries` (:1471): the same-hash survivors, hydrated below.
+        let mut transformed_queries: Vec<(&String, &QueryRecord, &serde_json::Value, &String)> =
+            Vec::new();
+        for &(qid, record) in &got_queries {
             // No-longer-desired: every client state inactivated (TS
             // view-syncer.ts:1474-1482). Internal queries are always desired.
             // NOTE: TS uses `Array.every`, which is VACUOUSLY TRUE for an empty
@@ -10621,8 +11235,40 @@ impl ViewSyncerService {
                 && let Some(cs) = record.client_state()
                 && cs.values().all(|s| s.inactivated_at.is_some())
             {
+                inactivated_count += 1;
                 continue;
             }
+            let stored_hash = record.base().transformation_hash.as_deref();
+            let is_custom = matches!(record, QueryRecord::Custom(_));
+            match executed_by_id.get(qid.as_str()) {
+                // Only SAME-transformation-hash results are hydrated here (TS
+                // :1538-1541 custom, :1561-1566 other); a changed hash is left to
+                // `#syncQueryPipelineSet`, which re-executes it.
+                Some((ast, new_hash)) if Some(new_hash.as_str()) == stored_hash => {
+                    transformed_queries.push((qid, record, ast, new_hash));
+                }
+                Some(_) if is_custom => custom_hash_mismatch_count += 1,
+                Some(_) => other_hash_mismatch_count += 1,
+                // TS :1536-1537 `'error' in q` → customErrorCount.
+                None if is_custom && errored_query_ids.iter().any(|e| e == qid) => {
+                    custom_error_count += 1;
+                }
+                // A custom query this pass did not transform (no transformer
+                // configured — TS :1496-1500 warns and transforms nothing — or
+                // outside its transform set): TS neither counts nor hydrates it.
+                None => {}
+            }
+        }
+        // TS view-syncer.ts:1570-1577, verbatim.
+        tracing::info!(
+            "hydrateUnchangedQueries: {} got queries, {inactivated_count} inactivated, \
+             {custom_error_count} custom transform errors, \
+             {custom_hash_mismatch_count} custom hash mismatches, \
+             {other_hash_mismatch_count} other hash mismatches, {} hydrated",
+            got_queries.len(),
+            transformed_queries.len()
+        );
+        for (qid, record, transformed_ast, new_hash) in transformed_queries {
             // Re-hydrate (TS `#pipelines.addQuery(..., 'unchanged-query-rehydrate')`),
             // folding the candidate row-set signature caller-side — rust's
             // streaming `hydrate` does not maintain `engine.row_set_signature`, so
@@ -10630,7 +11276,15 @@ impl ViewSyncerService {
             // discarded: the CVR already holds them; this pass only rebuilds the
             // pipeline and checks drift.
             let mut sig_acc: HashMap<String, u64> = HashMap::new();
-            let one = [(qid.clone(), transformed_ast.to_string())];
+            // TS `addQuery(transformationHash, queryID, ast, timer, queryName,
+            // 'unchanged-query-rehydrate')` (view-syncer.ts:1620-1626).
+            let one = [HydrateQuery {
+                query_id: qid.clone(),
+                ast_json: transformed_ast.to_string(),
+                transformation_hash: new_hash.clone(),
+                query_name: query_name_of(cfg_cvr, qid),
+                hydration_reason: PipelineHydrationReason::UnchangedQueryRehydrate,
+            }];
             // TS view-syncer.ts:1608-1637: a fresh `TimeSliceTimer` per query,
             // `await timer.start()`, and `timer.yieldProcess('yield in
             // hydrateUnchangedQueries')` on every `'yield'`.
@@ -10688,9 +11342,13 @@ impl ViewSyncerService {
                 && let Ok(stored) = rust_cvr::row_set_signature::parse_signature(Some(hex))
                 && stored != candidate
             {
+                // Text is 1:1 with TS (view-syncer.ts:1664-1667), `({count}
+                // rows)` and the sentence punctuation included — the row count
+                // is the field that says how big the drifted set was.
                 tracing::warn!(
-                    "rowSetSignature drift for query {qid}: prior={stored:x} new={candidate:x}; \
-                     removing from pipelines for full re-execution"
+                    "rowSetSignature drift for query {qid}: \
+                     prior={stored:x} new={candidate:x} \
+                     ({count} rows). Removing from pipelines for full re-execution."
                 );
                 rust_cvr::otel_metrics::record_row_set_signature_drift();
                 self.pipelines.remove_query(qid, "remove-query");
@@ -10772,6 +11430,13 @@ impl ViewSyncerService {
         // `drifted_query_ids` (from `hydrate_unchanged_queries`) selects the reason
         // label — `row-set-signature-drift`/`mixed` when the re-added query drifted,
         // `missing-pipeline` when it was merely reaped.
+        // TS `lc.info?.(`hydrating ${addQueries.length} queries`)`
+        // (view-syncer.ts:2172), immediately before the updater is built.
+        tracing::info!(
+            state_version = %state_version,
+            "hydrating {} queries",
+            add_queries.len()
+        );
         let bump_reason = same_hash_rehydration_bump_reason(
             &cvr,
             add_queries,
@@ -10779,6 +11444,27 @@ impl ViewSyncerService {
             &state_version,
             drifted_query_ids,
         );
+        // The TS `addQuery` identity of each query in this batch
+        // (view-syncer.ts:2286-2293: `q.transformationHash`, `q.id`, `q.ast`,
+        // `q.name`, `'query-set-sync'`): hash from `add_queries`, custom-query
+        // name from the CVR record. Built before `cvr` moves into the updater.
+        let add_hash: HashMap<&str, &str> = add_queries
+            .iter()
+            .map(|(q, h)| (q.as_str(), h.as_str()))
+            .collect();
+        let hydrate_queries: Vec<HydrateQuery> = queries
+            .iter()
+            .map(|(qid, ast_json)| HydrateQuery {
+                query_id: qid.clone(),
+                ast_json: ast_json.clone(),
+                transformation_hash: add_hash
+                    .get(qid.as_str())
+                    .map(|h| h.to_string())
+                    .unwrap_or_default(),
+                query_name: query_name_of(&cvr, qid),
+                hydration_reason: PipelineHydrationReason::QuerySetSync,
+            })
+            .collect();
         let mut updater =
             CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, Some(provider));
         if let Some(reason) = bump_reason {
@@ -10863,7 +11549,7 @@ impl ViewSyncerService {
         {
             let mut changes = self
                 .pipelines
-                .hydrate(queries, Rc::clone(&timer) as Rc<dyn Timer>)?;
+                .hydrate(&hydrate_queries, Rc::clone(&timer) as Rc<dyn Timer>)?;
             for item in changes.by_ref() {
                 match item {
                     StreamItem::Yield => {
@@ -10927,15 +11613,34 @@ impl ViewSyncerService {
         // (`hydration_time_ms`, set during the batched hydrate above) rather than a
         // TS wall-clock `timer`, so a query the engine did not register (e.g.
         // cancel-during-hydrate) simply records no metric.
-        for (qid, ast_json) in queries {
+        for q in &hydrate_queries {
+            let qid = &q.query_id;
             if let Some(ms) = self.pipelines.hydration_time_ms(qid) {
                 self.inspector_delegate.borrow_mut().add_metric(
                     rust_ivm::query::metrics_delegate::Metric::QueryMaterializationServer,
                     ms,
                     qid,
                 );
+                // TS view-syncer.ts:2305-2307, per query on the SAME process-time
+                // `elapsed` the metric above records:
+                //   if (elapsed > slowHydrateThreshold)
+                //     queryLC.warn?.('Slow query materialization', elapsed, q.ast);
+                // `queryLC` = lc + `hash` / `queryHash` / `transformationHash`
+                // (+ `queryName` when defined) (:2265-2271); `ast` is the
+                // transformed AST TS attaches as the log payload.
+                if ms > slow_hydrate_threshold_ms() {
+                    tracing::warn!(
+                        hash = %qid,
+                        query_hash = %qid,
+                        transformation_hash = %q.transformation_hash,
+                        query_name = q.query_name.as_deref(),
+                        elapsed_ms = ms,
+                        ast = %q.ast_json,
+                        "Slow query materialization"
+                    );
+                }
             }
-            if let Ok(ast) = serde_json::from_str::<serde_json::Value>(ast_json) {
+            if let Ok(ast) = serde_json::from_str::<serde_json::Value>(&q.ast_json) {
                 self.inspector_delegate.borrow_mut().add_query(qid, ast);
             }
         }
@@ -10979,10 +11684,20 @@ impl ViewSyncerService {
             // `base == final` and CLOSES the client. Logging the delta names
             // whichever path bumped — the same-hash rehydration path was ruled
             // OUT by production data (244 errors, ZERO such bumps).
-            if rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
-                != std::cmp::Ordering::Equal
+            //
+            // Gated on `any_started()` (2026-09-08): a discarded bump is only
+            // dangerous when a patch actually WENT OUT, because TS raises
+            // `Patches were sent but finalVersion ...` only on the `pokeStarted`
+            // branch (client-handler.ts:327-334) — an unstarted poke no-ops or
+            // opens a fresh `pokeStart` and cannot raise. Ungated, this line
+            // fired on the benign case too: 54 times in 3.5 min of GKE sandbox
+            // traffic with ZERO started pokes, zero closes, and 2 of 187 poke
+            // frames ever ending off their opening cookie.
+            if pokers.any_started()
+                && rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
+                    != std::cmp::Ordering::Equal
             {
-                tracing::info!(
+                tracing::warn!(
                     cg_id = %self.cg_id,
                     "hydrate quiet commit discarded a version bump: {} -> {}",
                     rust_cvr::schema::types::version_string(&attempted_version),
@@ -11200,10 +11915,14 @@ impl ViewSyncerService {
             // `base == final`. The same-hash rehydration path was ruled OUT by
             // production data (244 errors, ZERO of those bumps), so log the
             // delta here to name whichever path actually bumped.
-            if rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
-                != std::cmp::Ordering::Equal
+            //
+            // Gated on `any_started()` — see the twin note in `hydrate_and_sync`
+            // for why an unstarted poke makes the discard benign.
+            if pokers.any_started()
+                && rust_cvr::schema::types::cmp_cvr(&attempted_version, &orig.version)
+                    != std::cmp::Ordering::Equal
             {
-                tracing::info!(
+                tracing::warn!(
                     cg_id = %self.cg_id,
                     "quiet commit discarded a version bump: {} -> {}",
                     rust_cvr::schema::types::version_string(&attempted_version),
@@ -11947,6 +12666,107 @@ mod engine_tests {
     /// signature to the CVR-stored one — a MISMATCH drifts (record the drift +
     /// remove the pipeline so it re-executes), a MATCH does not. Reverting the
     /// drift branch (never insert into `drifted`) fails the first assertion.
+    /// TS view-syncer.ts:1570-1577: the `hydrateUnchangedQueries:` summary
+    /// classifies EVERY got query — hydrated (same hash), other / custom hash
+    /// mismatch, custom transform error, inactivated. Non-vacuous: without the
+    /// line, or with a query in the wrong bucket, the exact-string assertion
+    /// fails (the pre-fix code logged nothing here).
+    #[tokio::test]
+    async fn hydrate_unchanged_queries_logs_the_ts_summary_line() {
+        use rust_cvr::schema::types::{ClientState, CustomQueryRecord};
+        let (buf, _guard) = capture_logs(tracing::Level::INFO);
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let live = || {
+            let mut cs = BTreeMap::new();
+            cs.insert(
+                "client1".to_string(),
+                ClientState {
+                    inactivated_at: None,
+                    ttl: 1000,
+                    version: CVRVersion {
+                        state_version: "00".to_string(),
+                        config_version: None,
+                    },
+                },
+            );
+            cs
+        };
+        let base = |id: &str, hash: &str| BaseQueryRecord {
+            id: id.to_string(),
+            transformation_hash: Some(hash.to_string()),
+            transformation_version: None,
+            row_set_signature: None,
+        };
+        let client = |id: &str, hash: &str, cs: BTreeMap<String, ClientState>| {
+            QueryRecord::Client(ClientQueryRecord {
+                base: base(id, hash),
+                ast: serde_json::json!({"table": "users"}),
+                client_state: cs,
+                patch_version: None,
+            })
+        };
+        let custom = |id: &str, hash: &str| {
+            QueryRecord::Custom(CustomQueryRecord {
+                base: base(id, hash),
+                name: id.to_string(),
+                args: vec![],
+                client_state: live(),
+                patch_version: None,
+            })
+        };
+        let mut cvr = make_cvr();
+        cvr.queries.clear();
+        // q1: same hash → hydrated.
+        cvr.queries.insert("q1".into(), client("q1", "H1", live()));
+        // q2: hash changed → other hash mismatch.
+        cvr.queries.insert("q2".into(), client("q2", "OLD", live()));
+        // q3: every client state inactivated → inactivated.
+        let mut gone = live();
+        gone.get_mut("client1").unwrap().inactivated_at = Some(5);
+        cvr.queries.insert("q3".into(), client("q3", "H3", gone));
+        // q4: custom, errored in this pass → custom transform error.
+        cvr.queries.insert("q4".into(), custom("q4", "C4"));
+        // q5: custom, transformed to a different hash → custom hash mismatch.
+        cvr.queries.insert("q5".into(), custom("q5", "C5"));
+        // q6: no transformationHash → not a got query at all.
+        let mut never = client("q6", "X", live());
+        never.base_mut().transformation_hash = None;
+        cvr.queries.insert("q6".into(), never);
+        let ast = serde_json::json!({"table": "users"});
+        let executed = vec![
+            ("q1".to_string(), ast.clone(), "H1".to_string()),
+            ("q2".to_string(), ast.clone(), "NEW".to_string()),
+            ("q3".to_string(), ast.clone(), "H3".to_string()),
+            ("q5".to_string(), ast.clone(), "C5x".to_string()),
+            ("q6".to_string(), ast.clone(), "X".to_string()),
+        ];
+        let drifted = engine
+            .hydrate_unchanged_queries(&cvr, &executed, &["q4".to_string()], "00")
+            .await
+            .unwrap();
+        assert!(drifted.is_empty(), "{drifted:?}");
+        let logged = captured(&buf);
+        assert!(
+            logged.contains(
+                "hydrateUnchangedQueries: 5 got queries, 1 inactivated, \
+                 1 custom transform errors, 1 custom hash mismatches, \
+                 1 other hash mismatches, 1 hydrated"
+            ),
+            "TS view-syncer.ts:1570-1577 summary, verbatim; got:\n{logged}"
+        );
+        assert_eq!(
+            engine.pipelines.query_transformation_hash("q1"),
+            Some("H1"),
+            "only the same-hash query is hydrated here"
+        );
+        assert!(
+            engine.pipelines.query_transformation_hash("q2").is_none(),
+            "a changed-hash query is left to #syncQueryPipelineSet"
+        );
+    }
+
     #[tokio::test]
     async fn hydrate_unchanged_queries_detects_drift() {
         // Build a fresh engine over an EMPTY users source (so the re-hydrated
@@ -11985,7 +12805,7 @@ mod engine_tests {
         // Drift: stored (999) != candidate (0) → q1 drifts + pipeline removed.
         let (mut engine, cvr) = build(999);
         let drifted = engine
-            .hydrate_unchanged_queries(&cvr, &executed, "00")
+            .hydrate_unchanged_queries(&cvr, &executed, &[], "00")
             .await
             .unwrap();
         assert!(
@@ -12000,7 +12820,7 @@ mod engine_tests {
         // No drift: stored (0) == candidate (0) → q1 kept, not drifted.
         let (mut engine, cvr) = build(0);
         let drifted = engine
-            .hydrate_unchanged_queries(&cvr, &executed, "00")
+            .hydrate_unchanged_queries(&cvr, &executed, &[], "00")
             .await
             .unwrap();
         assert!(
@@ -12011,6 +12831,101 @@ mod engine_tests {
             engine.pipelines.query_transformation_hash("q1"),
             Some("H"),
             "a non-drifted query keeps its rebuilt pipeline"
+        );
+    }
+
+    /// NON-VACUOUS (log precision, 2026-09-08): the
+    /// `quiet commit discarded a version bump` diagnostic exists to name the
+    /// path that closes a client with `Patches were sent but finalVersion ...
+    /// is not greater than baseVersion`. TS raises that ONLY on the
+    /// `pokeStarted` branch (client-handler.ts:327-334), so a discarded bump
+    /// with nothing sent cannot close anyone. Ungated, the line fired on that
+    /// benign case: 54 times in 3.5 min of GKE sandbox traffic, against ZERO
+    /// started pokes and ZERO closes (2 of 187 poke frames ever ended off their
+    /// opening cookie, both on a different path).
+    ///
+    /// Both arms below take the SAME quiet-commit branch with the SAME discarded
+    /// bump; only whether a patch went out differs. Drop the `pokers
+    /// .any_started() &&` guard → the silent arm logs and FAILS.
+    #[tokio::test]
+    async fn quiet_commit_bump_discard_logs_only_when_patches_were_sent() {
+        // `sent`: register a poke target, so the got-query patch opens its poke
+        // (pokeStart) before the flush is forced to report a quiet commit.
+        async fn run(sent: bool) -> (String, bool) {
+            let mut pipelines = IvmPipelines::new();
+            pipelines.init(vec![users_spec()], None, "zero").unwrap();
+            let mut engine = SyncEngine::new(pipelines);
+            let mut ws_ids: Vec<String> = Vec::new();
+            // Held for the whole call: dropping the receiver closes the sink, and
+            // `add_patch` then fails the poker instead of starting it.
+            let _rx_keepalive;
+            if sent {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+                _rx_keepalive = rx;
+                let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+                engine.register_client(
+                    "client1",
+                    "ws1",
+                    "cg1",
+                    &ShardID {
+                        app_id: "app".to_string(),
+                        shard_num: 0,
+                    },
+                    None,
+                    sink,
+                );
+                ws_ids.push("ws1".to_string());
+            }
+            // Force the store flush to report the QUIET-COMMIT outcome, so the
+            // updater's bumped version is discarded and `orig` is restored.
+            engine.forced_flush_outcomes.borrow_mut().push_back(false);
+
+            let (buf, guard) = capture_logs(tracing::Level::WARN);
+            let (_result, pokers) = engine
+                .hydrate_and_sync(
+                    make_cvr(),
+                    "00".to_string(),
+                    "v1".to_string(),
+                    &[("q1".to_string(), "hash1".to_string())],
+                    &[],
+                    &ws_ids,
+                    &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                    0,
+                    0,
+                    0,
+                    &std::collections::HashSet::new(),
+                )
+                .await
+                .unwrap();
+            let started = pokers.any_started();
+            drop(guard);
+            (captured(&buf), started)
+        }
+
+        let (silent, started_none) = run(false).await;
+        assert!(
+            !started_none,
+            "control: with no poke target nothing is sent, so TS `pokeStarted` stays false"
+        );
+        assert!(
+            !silent.contains("quiet commit discarded a version bump"),
+            "a discarded bump with NOTHING sent cannot close a client — TS raises only on \
+             the pokeStarted branch — so it must not be logged; got:\n{silent}"
+        );
+
+        let (loud, started_some) = run(true).await;
+        assert!(
+            started_some,
+            "control: the got-query patch must open the poke, or the arms are not comparable"
+        );
+        assert!(
+            loud.contains("hydrate quiet commit discarded a version bump"),
+            "a discarded bump AFTER patches went out is the dangerous shape and must be \
+             logged; got:\n{loud}"
+        );
+        assert!(
+            loud.contains("WARN"),
+            "it predicts a client close, so it is a warning, not info; got:\n{loud}"
         );
     }
 
@@ -12561,6 +13476,200 @@ mod engine_tests {
         assert!(
             starts >= 1 && ends >= 1,
             "expected poke frames: {starts} starts, {ends} ends"
+        );
+    }
+
+    /// Capture the `tracing` output emitted on THIS thread while the returned
+    /// guard lives. `set_default` (thread-local dispatcher) rather than
+    /// `with_default` so an `async` test can hold it across `.await`s on the
+    /// current-thread runtime `#[tokio::test]` provides.
+    pub(super) fn capture_logs(
+        level: tracing::Level,
+    ) -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        #[derive(Clone)]
+        struct CapWriter(Arc<Mutex<Vec<u8>>>);
+        struct CapGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+            type Writer = CapGuard;
+            fn make_writer(&'a self) -> CapGuard {
+                CapGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for CapGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(level)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (buf, guard)
+    }
+
+    pub(super) fn captured(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    fn desired(hash: &str) -> DesiredQuerySpec {
+        DesiredQuerySpec {
+            hash: hash.to_string(),
+            ast: Some(serde_json::json!({"table": "users"})),
+            name: None,
+            args: None,
+            ttl: None,
+        }
+    }
+
+    /// NON-VACUOUS (log parity, 2026-09-08): TS's slow-hydrate warning is PER
+    /// QUERY — `if (elapsed > slowHydrateThreshold) queryLC.warn?.('Slow query
+    /// materialization', elapsed, q.ast)` on the query's own process time, with
+    /// `hash`/`queryHash`/`transformationHash` contexts and the transformed AST
+    /// as payload (view-syncer.ts:2265-2271, 2305-2307). Rust used to warn ONCE
+    /// per `config_and_hydrate` pass on the whole pass's wall time (flush
+    /// included), so a 250 ms query inside a fast pass never got a line and a
+    /// fast query inside a slow pass did. With the threshold pinned below any
+    /// hydration time: revert to the aggregate warn → no per-query line (fails);
+    /// re-add the aggregate → the `config_and_hydrate took` assert fails.
+    #[tokio::test]
+    async fn slow_query_materialization_warns_per_query_with_its_ast() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+        set_slow_hydrate_threshold_for_test(Some(-1.0));
+        let (buf, guard) = capture_logs(tracing::Level::WARN);
+        let result = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![desired("q1"), desired("q2")],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await;
+        drop(guard);
+        set_slow_hydrate_threshold_for_test(None);
+        result.unwrap();
+        let logged = captured(&buf);
+        let lines: Vec<&str> = logged
+            .lines()
+            .filter(|l| l.contains("Slow query materialization"))
+            .collect();
+        // TS's loop covers every query in `addQueries` — the internal `lmids` /
+        // `mutationResults` queries (view-syncer.ts:1206-1208) included — so an
+        // initConnection carrying q1 + q2 yields four per-query lines.
+        assert_eq!(
+            lines.len(),
+            4,
+            "one WARN per slow query (TS view-syncer.ts:2305); got:\n{logged}"
+        );
+        let mut hashes: Vec<&str> = lines
+            .iter()
+            .map(|l| {
+                let start = l.find("query_hash=").unwrap() + "query_hash=".len();
+                l[start..].split(' ').next().unwrap()
+            })
+            .collect();
+        hashes.sort_unstable();
+        assert_eq!(hashes, ["lmids", "mutationResults", "q1", "q2"]);
+        for line in &lines {
+            let hash = {
+                let start = line.find("query_hash=").unwrap() + "query_hash=".len();
+                line[start..].split(' ').next().unwrap()
+            };
+            assert!(line.contains("WARN"), "TS `queryLC.warn`; got: {line}");
+            assert!(
+                line.contains(&format!("query_hash={hash}")),
+                "TS `queryHash` context; got: {line}"
+            );
+            assert!(
+                line.contains("transformation_hash="),
+                "TS `transformationHash` context; got: {line}"
+            );
+            assert!(
+                line.contains(r#"ast={""#),
+                "TS attaches `q.ast` as the payload; got: {line}"
+            );
+            if hash == "q1" || hash == "q2" {
+                assert!(
+                    line.contains(r#""table":"users""#),
+                    "the payload is the query's transformed AST; got: {line}"
+                );
+            }
+            assert!(
+                !line.contains("query_name="),
+                "TS adds `queryName` only when defined; got: {line}"
+            );
+        }
+        assert!(
+            !logged.contains("config_and_hydrate took"),
+            "no rust-only whole-pass warn (TS has none); got:\n{logged}"
+        );
+    }
+
+    /// NON-VACUOUS (config parity, 2026-09-08): the threshold is TS's
+    /// `log.slowHydrateThreshold` — env `ZERO_LOG_SLOW_HYDRATE_THRESHOLD`,
+    /// default 100 (otel/src/log-options.ts:24-29). Rust read a rust-only name
+    /// with a 10x default (1000), so a bare rust binary warned on almost nothing
+    /// while the TS process beside it warned at 100 ms. Revert the default → the
+    /// first assert fails; drop the TS name → the second fails.
+    #[test]
+    fn slow_hydrate_threshold_resolves_the_ts_env_name_and_default() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(slow_hydrate_threshold_from_env(env(&[])), 100.0);
+        assert_eq!(
+            slow_hydrate_threshold_from_env(env(&[("ZERO_LOG_SLOW_HYDRATE_THRESHOLD", "50")])),
+            50.0
+        );
+        // The pre-2026-09-08 bridge name still applies (deprecated alias)…
+        assert_eq!(
+            slow_hydrate_threshold_from_env(env(&[("ZERO_SLOW_HYDRATE_THRESHOLD_MS", "250")])),
+            250.0
+        );
+        // …but the TS name wins when both are present.
+        assert_eq!(
+            slow_hydrate_threshold_from_env(env(&[
+                ("ZERO_SLOW_HYDRATE_THRESHOLD_MS", "250"),
+                ("ZERO_LOG_SLOW_HYDRATE_THRESHOLD", "50"),
+            ])),
+            50.0
+        );
+        assert_eq!(
+            slow_hydrate_threshold_from_env(env(&[("ZERO_LOG_SLOW_HYDRATE_THRESHOLD", "abc")])),
+            100.0
         );
     }
 

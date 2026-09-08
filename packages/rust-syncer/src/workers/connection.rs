@@ -307,6 +307,22 @@ impl Connection {
     pub fn ws_id(&self) -> &str {
         &self.ws_id
     }
+
+    /// The negotiated protocol version. Rust-only accessor (rule 5): TS reads
+    /// `connCtx.protocolVersion` at `initConnection` for the `#activeClients`
+    /// gauge (view-syncer.ts:888-890); rust reads it back off the socket
+    /// accepted earlier.
+    pub fn protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+
+    /// The downstream sink. Rust-only accessor (rule 5): the CG service builds
+    /// the poke-target `ClientHandler` when the initConnection message arrives
+    /// (TS view-syncer.ts:903-910, `downstream`), from the socket accepted
+    /// earlier.
+    pub fn sink(&self) -> &DirectWebSocketSink {
+        &self.sink
+    }
 }
 
 // ─── Error log level classification ────────────────────────────────────────

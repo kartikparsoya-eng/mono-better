@@ -425,6 +425,16 @@ impl PokeHandler {
         result
     }
 
+    /// Whether this poke has emitted `pokeStart` — i.e. at least one patch was
+    /// admitted and sent downstream. The 1:1 read of TS `pokeStarted`
+    /// (client-handler.ts:280), which is the flag `end()` branches on: only a
+    /// STARTED poke can raise `Patches were sent but finalVersion ... is not
+    /// greater than baseVersion` (:327-334). An unstarted poke either no-ops or
+    /// opens a fresh `pokeStart`, and can never raise it.
+    pub fn started(&self) -> bool {
+        !self.noop && self.state.lock().unwrap().started
+    }
+
     pub fn cancel(&self) -> Result<(), String> {
         if self.noop {
             return Ok(());
@@ -625,9 +635,16 @@ impl PokeHandler {
                 .ok_or("clients row: lastMutationID must be a number")?;
 
             if cg != self.client_group_id {
-                eprintln!(
-                    "Received clients row for wrong clientGroupID. Ignoring. {}",
-                    cg
+                // TS `this.#lc.error?.('Received clients row for wrong
+                // clientGroupID. Ignoring.', clientGroupID)`
+                // (client-handler.ts:385-388). Must go through `tracing`, not
+                // `eprintln!`: a raw stderr write has no level, so it ignores
+                // ZERO_LOG_LEVEL and is invisible to every error-count alert and
+                // to G13's error-volume watch, while TS's twin is a countable
+                // ERROR (M14 log differential, 2026-09-08).
+                tracing::error!(
+                    client_group_id = %cg,
+                    "Received clients row for wrong clientGroupID. Ignoring."
                 );
             } else {
                 let body = state.body.as_mut().unwrap();
@@ -873,7 +890,10 @@ impl ClientHandler {
     }
 
     pub fn close(&self, reason: &str) {
-        eprintln!("view-syncer closing connection: {}", reason);
+        // TS `this.#lc.debug?.(`view-syncer closing connection: ${reason}`)`
+        // (client-handler.ts:184) — DEBUG, so it must be suppressible by
+        // ZERO_LOG_LEVEL. As an `eprintln!` it printed unconditionally.
+        tracing::debug!("view-syncer closing connection: {}", reason);
         self.downstream.cancel();
     }
 
@@ -1041,12 +1061,34 @@ impl MultiPoker {
                 // terminally. Mark dead so the remaining patches skip this
                 // poker (no re-push, no re-log) — TS-faithful terminal state.
                 dead.store(true, AtomicOrdering::Relaxed);
-                eprintln!(
+                // DEBUG, not stderr: TS logs NOTHING here. Its fan-out is
+                // `Promise.allSettled(pokers.map(p => p.addPatch(patch)))`
+                // (client-handler.ts:96) and the per-poker `addPatch` catch
+                // calls `this.#downstream.fail(...)` (:306-308) — the failure
+                // reaches the operator through `sendError`, which IS ported.
+                // Keeping it visible at default level would invent an
+                // operator-facing event TS does not have (M14, 2026-09-08).
+                tracing::debug!(
                     "Poke add_patch failed for client, dropping from poke: {}",
                     e
                 );
             }
         }
+    }
+
+    /// Whether ANY of this group's pokes has emitted `pokeStart` (patches were
+    /// admitted). Dead pokers are INCLUDED on purpose: `dead` means "already
+    /// failed terminally, push nothing more", which does not un-send the frames
+    /// that were already delivered — and this predicate asks what went out, not
+    /// what may still go out.
+    ///
+    /// Rust-only accessor (HARD RULE 5) over the rust-only `MultiPoker` fan-out;
+    /// the flag it reads is the 1:1 port of TS `pokeStarted`. It exists so the
+    /// view-syncer can tell a DANGEROUS discarded version bump (patches already
+    /// sent → the next `end()` raises `Patches were sent but finalVersion ...`)
+    /// from the benign one (nothing sent → `end()` cannot raise).
+    pub fn any_started(&self) -> bool {
+        self.pokers.iter().any(|p| p.started())
     }
 
     pub fn cancel(&self) {
@@ -1056,7 +1098,9 @@ impl MultiPoker {
             }
             if let Err(e) = poker.cancel() {
                 dead.store(true, AtomicOrdering::Relaxed);
-                eprintln!("Poke cancel failed: {}", e);
+                // TS `Promise.allSettled(pokers.map(p => p.cancel()))` swallows
+                // this (client-handler.ts:99); see the `add_patch` note above.
+                tracing::debug!("Poke cancel failed: {}", e);
             }
         }
     }
@@ -1075,7 +1119,10 @@ impl MultiPoker {
                 // handling in `add_patch` (TS Promise.allSettled semantics: the
                 // other clients' pokes proceed).
                 dead.store(true, AtomicOrdering::Relaxed);
-                eprintln!("Poke end failed: {}", e);
+                // TS `Promise.allSettled(pokers.map(p => p.end(v)))` swallows
+                // this (client-handler.ts:102); the `fail` below is the ported,
+                // operator-visible half. See the `add_patch` note above.
+                tracing::debug!("Poke end failed: {}", e);
                 poker.downstream.fail(e);
             }
         }
@@ -1961,6 +2008,35 @@ mod tests {
         assert!(
             !healthy_msgs.lock().unwrap().is_empty(),
             "healthy client keeps receiving patches after the other dies"
+        );
+    }
+
+    /// NON-VACUOUS (2026-09-08): `any_started()` must report whether a patch was
+    /// actually SENT, because that is the only condition under which TS's `end()`
+    /// can raise `Patches were sent but finalVersion ... is not greater than
+    /// baseVersion` (client-handler.ts:327-334) — the view-syncer gates its
+    /// discarded-version-bump diagnostic on it. Hard-coding `true` fails the
+    /// before-patch assertion (the benign case that fired 54x/3.5min in the GKE
+    /// sandbox); hard-coding `false` fails the after-patch one.
+    #[test]
+    fn any_started_tracks_whether_a_patch_was_actually_sent() {
+        let (c1, _m1) = make_handler();
+        let (c2, _m2) = make_handler();
+        let tentative = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        };
+        let poker = MultiPoker::new(&[&c1, &c2], tentative, "test");
+
+        assert!(
+            !poker.any_started(),
+            "no patch admitted yet → no pokeStart went out → TS `pokeStarted` is false"
+        );
+
+        poker.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})));
+        assert!(
+            poker.any_started(),
+            "a patch opened the poke (pokeStart emitted) → TS `pokeStarted` is true"
         );
     }
 

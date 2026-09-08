@@ -922,9 +922,10 @@ impl TableSource {
             self.write_change(&change)
         };
         if let Err(e) = write_result {
-            eprintln!(
+            tracing::error!(
                 "[rust-ivm] write_change error for {}: {}",
-                self.table_name, e
+                self.table_name,
+                e
             );
         }
         self.applied_changes.borrow_mut().push(change);

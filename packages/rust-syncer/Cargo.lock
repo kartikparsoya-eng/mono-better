@@ -2041,6 +2041,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
+ "tracing",
 ]
 
 [[package]]
@@ -2062,6 +2063,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pprof",
+ "rand 0.8.7",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",

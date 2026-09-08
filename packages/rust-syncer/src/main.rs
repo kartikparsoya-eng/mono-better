@@ -16,7 +16,11 @@
 //! - `MUTAGEN_URL` — Mutagen service URL (optional)
 //! - `PUSHER_URL` — Pusher service URL (optional)
 //! - `MAX_CLIENT_GROUPS` — Client-group memory backstop (default 1000)
-//! - `ZERO_SLOW_HYDRATE_THRESHOLD_MS` — Slow-query warn threshold (default 1000)
+//! - `ZERO_LOG_SLOW_HYDRATE_THRESHOLD` — Slow-query warn threshold in ms (TS
+//!   `log.slowHydrateThreshold`, default 100); `ZERO_SLOW_HYDRATE_THRESHOLD_MS`
+//!   is the deprecated pre-2026-09-08 alias
+//! - `RUST_IVM_PLAN_DEBUG` — dump planner cost-model events per production plan
+//!   (`[rust-ivm][PLANDBG]`, ~300 lines/query; never enabled by `RUST_IVM_PERF_TRACE`)
 //! - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_METRICS_EXPORTER` — enable OTLP metrics
 //!   push (standard OpenTelemetry env; mirrors the TS syncer)
 //! - `ZERO_APP_ID` / `APP_ID` — Application id (schema prefix); default `zero`

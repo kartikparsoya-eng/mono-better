@@ -930,6 +930,23 @@ impl CVRQueryDrivenUpdater {
             })
             .collect();
 
+        // TS `lc.info?.(`trackQueries: ${executed.length} executed,
+        // ${removed.length} removed, version ${versionBumped ? 'bumped' :
+        // 'unchanged'}`)` (cvr.ts:637-640).
+        let version_bumped =
+            crate::schema::types::cmp_cvr(&self.base.orig.version, &self.base.cvr.version)
+                == std::cmp::Ordering::Less;
+        tracing::info!(
+            "trackQueries: {} executed, {} removed, version {}",
+            executed.len(),
+            removed.len(),
+            if version_bumped {
+                "bumped"
+            } else {
+                "unchanged"
+            }
+        );
+
         (self.base.cvr.version.clone(), patches)
     }
 

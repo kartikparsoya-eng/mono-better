@@ -888,9 +888,14 @@ impl Syncer {
             {
                 Ok(()) => {}
                 Err(error_body) => {
+                    // TS passes the ids as a SEPARATE context object
+                    // (syncer.ts:598-603), so they belong in structured fields,
+                    // not the message — the text must match TS exactly.
                     tracing::warn!(
-                        "Rejecting sync connection during initial auth resolution: \
-                             cg={client_group_id}, client={client_id}, user={user_id:?}"
+                        client_group_id = %client_group_id,
+                        client_id = %client_id,
+                        user_id = ?user_id,
+                        "Rejecting sync connection during initial auth resolution"
                     );
                     crate::metrics::record_ws_connection_failure(pv, "auth");
                     // Send error and close 3000 (TS syncer.ts:610 `ws.close(3000, ...)`).
@@ -1270,7 +1275,10 @@ impl Syncer {
         let start = std::time::Instant::now();
         let deadline = start + std::time::Duration::from_millis(MAX_DRAIN_MS);
         let total = self.cg_handles.len() as u64;
-        tracing::info!("draining {total} client groups");
+        // 1:1 with TS `lc.info?.(`draining ${this.#viewSyncers.size} view-syncers`)`
+        // (workers/syncer.ts:734) — a client group IS a view-syncer, and the
+        // operator greps the TS wording.
+        tracing::info!("draining {total} view-syncers");
 
         if total > 0 {
             let coordinator =

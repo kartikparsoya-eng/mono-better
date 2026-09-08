@@ -102,7 +102,7 @@ impl SQLiteStatFanout {
     fn conn(&self) -> Option<Rc<RefCell<rusqlite::Connection>>> {
         let up = self.conn.upgrade();
         if up.is_none() && !self.warned_dead_conn.replace(true) {
-            eprintln!(
+            tracing::warn!(
                 "[rust-ivm] SQLiteStatFanout: snapshot connection dropped while \
                  estimating fanout; degrading to default fanout"
             );
