@@ -774,6 +774,32 @@ fn cvr_store_error_body(error: &CVRStoreError) -> crate::protocol::ErrorBody {
     }
 }
 
+/// The LEVEL TS attaches to the same failure. Each store error is thrown as a
+/// `ProtocolErrorWithLevel` subclass (cvr-store.ts:1354-1415), so
+/// `#cleanup(err)` → `client.fail(err)` logs at `getLogLevel(err)` and
+/// `sendError` sees that level too: `ClientNotFoundError` 'warn' (:1362),
+/// `ConcurrentModificationException` 'warn' (:1377), `OwnershipError` **'info'**
+/// (:1400), `InvalidClientSchemaError` 'warn' (:1415). Anything else —
+/// `RowsVersionBehindError` is a plain `Error` (:1437), as is a PG failure — is
+/// the raw-throw branch: `getLogLevel` → 'error', and `sendError` runs its
+/// errno / transient-socket checks against the thrown, so it travels as
+/// `Thrown::Other` carrying its message.
+///
+/// Sibling of [`cvr_store_error_body`], in the consumer for the same reason.
+/// Until 2026-09-08 (d11e0f171) every caller passed `None` → 'warn' for all of
+/// them, which logged an ownership transfer at WARN where TS logs INFO and a
+/// PG outage at WARN where TS logs ERROR.
+fn cvr_store_error_thrown<'a>(error: &CVRStoreError, message: &'a str) -> Thrown<'a> {
+    use crate::workers::connection::LogLevel;
+    match error {
+        CVRStoreError::ClientNotFound(_)
+        | CVRStoreError::ConcurrentModification { .. }
+        | CVRStoreError::InvalidClientSchema(_) => Thrown::WithLevel(LogLevel::Warn),
+        CVRStoreError::OwnershipError { .. } => Thrown::WithLevel(LogLevel::Info),
+        _ => Thrown::Other(message),
+    }
+}
+
 /// Rust-only adapter for the TS union parameter of
 /// `#sendQueryTransformErrorToClients` (`ErroredQuery[] | TransformFailedBody`,
 /// view-syncer.ts:1730): `Failed` = the whole-batch `TransformFailedBody`
@@ -2471,7 +2497,14 @@ impl ViewSyncerService {
                 match rust_cvr::schema::types::maybe_version_string(c) {
                     Ok(v) => Some(v),
                     Err(e) => {
-                        tracing::warn!(
+                        // DEBUG, not warn: TS parses the cookie only at the
+                        // initConnection message (`new ClientHandler`,
+                        // view-syncer.ts:903-910) and THROWS there; the 1:1
+                        // rejection is `init_connection`'s. This accept-time
+                        // fallback exists only so a malformed cookie cannot
+                        // panic the CG task, so it must not add a rust-only
+                        // WARN with no TS twin (M14, 2026-09-08).
+                        tracing::debug!(
                             "CG {}: ignoring malformed base cookie {c:?}: {e}",
                             self.cg_id
                         );
@@ -2805,7 +2838,11 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(error)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {error}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&error), None);
+                let message = error.to_string();
+                self.fail_group_with_error(
+                    cvr_store_error_body(&error),
+                    Some(cvr_store_error_thrown(&error, &message)),
+                );
                 return false;
             }
         }
@@ -3422,7 +3459,11 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(e)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&e), None);
+                let message = e.to_string();
+                self.fail_group_with_error(
+                    cvr_store_error_body(&e),
+                    Some(cvr_store_error_thrown(&e, &message)),
+                );
                 return;
             }
         }
@@ -3673,7 +3714,11 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(e)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&e), None);
+                let message = e.to_string();
+                self.fail_group_with_error(
+                    cvr_store_error_body(&e),
+                    Some(cvr_store_error_thrown(&e, &message)),
+                );
                 return;
             }
         }
@@ -5659,7 +5704,32 @@ mod tests {
         // The replication notification runs `ensure_cvr` → `load_cvr` through
         // the store (TS `#runInLockWithCVR` → `#cvrStore.load()` in the
         // #stateChanges loop) — the first PG round trip, which fails here.
-        rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
+        let logs = {
+            use super::engine_tests::{capture_logs, captured};
+            let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+            rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
+            captured(&buf)
+        };
+        // LEVEL: a PG failure is a plain `Error` in TS — the raw-throw branch of
+        // `getLogLevel` — so `#cleanup(err)` → `client.fail(err)` logs at ERROR
+        // and `sendError` classifies the wrapped-ProtocolError frame line at
+        // WARN (`cvr_store_error_thrown`). NON-VACUOUS (2026-09-08): with the
+        // `None` every caller passed before, both came out WARN.
+        let at = |level: &str, msg: &str| {
+            logs.lines()
+                .filter(|l| l.contains(level) && l.contains(msg))
+                .count()
+        };
+        assert_eq!(
+            at("ERROR", "view-syncer closing connection with error"),
+            1,
+            "TS `ClientHandler.fail` logs a raw store error at ERROR; got:\n{logs}"
+        );
+        assert_eq!(
+            at("WARN", "Sending error on WebSocket"),
+            1,
+            "the frame line reads the WRAPPED ProtocolError → WARN; got:\n{logs}"
+        );
         let mut errors: Vec<serde_json::Value> = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
@@ -5686,6 +5756,78 @@ mod tests {
                 && msg != "Unable to load the client view state"
                 && msg != "Client view synchronization failed",
             "TS sends getErrorMessage(e) — the underlying error text, not a fixed label; got {msg:?}"
+        );
+    }
+
+    /// TS `OwnershipError` is a `ProtocolErrorWithLevel(.., 'info')`
+    /// (cvr-store.ts:1382-1400): when another instance takes the CVR,
+    /// `#cleanup(err)` → `client.fail(err)` logs
+    /// `view-syncer closing connection with error` at INFO and `sendError`
+    /// (the `thrown instanceof ProtocolErrorWithLevel` branch) logs
+    /// `Sending error on WebSocket` at INFO. An ownership hand-off is routine,
+    /// not a pager event.
+    ///
+    /// NON-VACUOUS (2026-09-08): `cvr_store_error_thrown` returning
+    /// `WithLevel(Warn)` — or the `None` every caller passed before it existed —
+    /// makes both counts 0 and the WARN count 2.
+    #[test]
+    fn ownership_transfer_fails_clients_at_info_like_ts_ownership_error() {
+        use super::engine_tests::{capture_logs, captured};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        while rx.try_recv().is_ok() {}
+
+        let error = CVRStoreError::OwnershipError {
+            owner: Some("other-task".to_string()),
+            granted_at: 1_000.0,
+            last_connect_time: 0.0,
+        };
+        let message = error.to_string();
+        let logs = {
+            let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+            state.fail_group_with_error(
+                cvr_store_error_body(&error),
+                Some(cvr_store_error_thrown(&error, &message)),
+            );
+            captured(&buf)
+        };
+        let at = |level: &str, msg: &str| {
+            logs.lines()
+                .filter(|l| l.contains(level) && l.contains(msg))
+                .count()
+        };
+        assert_eq!(
+            at("INFO", "view-syncer closing connection with error"),
+            1,
+            "OwnershipError is level 'info' in TS (cvr-store.ts:1400); got:\n{logs}"
+        );
+        assert_eq!(
+            at("INFO", "Sending error on WebSocket"),
+            1,
+            "sendError takes the ProtocolErrorWithLevel branch → its own 'info'; got:\n{logs}"
+        );
+        assert_eq!(
+            at("WARN", "closing connection with error") + at("WARN", "Sending error on WebSocket"),
+            0,
+            "nothing about an ownership hand-off is WARN in TS; got:\n{logs}"
+        );
+        let frame = loop {
+            match rx.try_recv() {
+                Ok(WsCommand::Send { msg, .. }) if msg[0] == "error" => break msg[1].clone(),
+                Ok(_) => continue,
+                Err(_) => panic!("the client must receive the Rehome frame"),
+            }
+        };
+        assert_eq!(frame["kind"], "Rehome");
+        assert_eq!(
+            frame["maxBackoffMs"], 0,
+            "TS OwnershipError sets maxBackoffMs: 0"
         );
     }
 
@@ -8719,17 +8861,48 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
             let mut params = test_params("c1", "ws1");
             params.base_cookie = Some(bad_cookie.to_string());
-            rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+            let accept_logs = {
+                use super::engine_tests::{capture_logs, captured};
+                let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+                rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+                captured(&buf)
+            };
             assert!(
                 drain_sends(&mut rx).iter().all(|f| f[0] != "error"),
                 "[{bad_cookie}] the cookie is parsed at initConnection, not at accept"
             );
-            rt.block_on(state.handle_desired_queries(
-                "c1",
-                &serde_json::json!({"clientSchema": {"tables": {}}}),
-                ConfigPassOrigin::InitConnection,
-                CustomQueryTransformMode::All,
-            ));
+            // TS emits NOTHING at accept for a bad cookie (it is not parsed
+            // until `new ClientHandler` at initConnection); rust's accept-time
+            // fallback is bookkeeping and must not be a WARN with no TS twin.
+            assert!(
+                !accept_logs
+                    .lines()
+                    .any(|l| l.contains("WARN") && l.contains("malformed base cookie")),
+                "[{bad_cookie}] rust-only WARN at accept; got:\n{accept_logs}"
+            );
+            let logs = {
+                use super::engine_tests::{capture_logs, captured};
+                let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+                rt.block_on(state.handle_desired_queries(
+                    "c1",
+                    &serde_json::json!({"clientSchema": {"tables": {}}}),
+                    ConfigPassOrigin::InitConnection,
+                    CustomQueryTransformMode::All,
+                ));
+                captured(&buf)
+            };
+            // LEVEL: TS throws a RAW `TypeError`/`Error` from `versionFromString`
+            // (schema/types.ts:333/338) → `Connection.#closeWithThrown(e)` →
+            // `sendError(.., thrown=e)` → `getLogLevel(plain Error)` = 'error'.
+            // NON-VACUOUS (2026-09-08): the bodiless `close_with_error` this site
+            // used classified `Internal` with no thrown → 'info'.
+            assert_eq!(
+                logs.lines()
+                    .filter(|l| l.contains("ERROR") && l.contains("Sending error on WebSocket"))
+                    .count(),
+                1,
+                "[{bad_cookie}] a malformed cookie is a raw throw in TS → ERROR; got:\n{logs}"
+            );
 
             let mut saw_connected = false;
             let mut error = None;
@@ -10072,7 +10245,15 @@ impl ViewSyncerService {
         if let Some(c) = base_cookie.as_deref()
             && let Err(e) = rust_cvr::schema::types::maybe_version_string(c)
         {
-            conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
+            // What TS throws here is a RAW `TypeError` / `Error`
+            // (schema/types.ts:333/338), so `#closeWithThrown(e)` hands
+            // `sendError` the raw value and `getLogLevel` yields 'error' — not
+            // the 'info' a bodiless `close_with_error` classified this as.
+            let message = e.to_string();
+            conn.close_with_error_thrown(
+                crate::protocol::ErrorBody::internal(message.clone()),
+                Some(Thrown::Other(&message)),
+            );
             self.delete_client_due_to_disconnect(client_id, ws_id);
             return false;
         }

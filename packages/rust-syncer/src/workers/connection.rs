@@ -294,10 +294,20 @@ impl Connection {
                 "view-syncer closing connection with error: {message}"
             ),
         }
-        // TS `#downstream.fail(wrapWithProtocolError(e))` — what reaches the
-        // connection is the WRAPPED ProtocolError, so the frame classifies at
-        // `warn` regardless of the raw level above.
-        self.close_with_error_thrown(error, Some(Thrown::Protocol(&message)));
+        // TS `#downstream.fail(wrapWithProtocolError(e))`. `wrapWithProtocolError`
+        // wraps a RAW value into a new `ProtocolError` (→ `sendError` classifies
+        // it at `warn`), but returns a value that already IS a ProtocolError
+        // UNCHANGED (types/error-with-level.ts:33-35) — so a
+        // `ProtocolErrorWithLevel` reaches `sendError` still carrying its own
+        // level and takes the `instanceof ProtocolErrorWithLevel` branch. Until
+        // 2026-09-08 this re-wrapped everything as a plain `Protocol`, which
+        // logged an OwnershipError's frame at WARN where TS logs INFO
+        // (`ownership_transfer_fails_clients_at_info_like_ts_ownership_error`).
+        let wrapped = match thrown {
+            Some(Thrown::WithLevel(level)) => Thrown::WithLevel(level),
+            _ => Thrown::Protocol(&message),
+        };
+        self.close_with_error_thrown(error, Some(wrapped));
     }
 
     /// Port of TS `#closeWithError(errorBody, thrown?)` (connection.ts:331-337).
