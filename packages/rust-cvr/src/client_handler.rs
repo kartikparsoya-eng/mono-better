@@ -885,7 +885,28 @@ impl ClientHandler {
         self.base_version.lock().unwrap().clone()
     }
 
+    /// Port of TS `ClientHandler.fail` (client-handler.ts:175-181):
+    ///
+    /// ```ts
+    /// fail(e: unknown) {
+    ///   this.#lc[getLogLevel(e)]?.(
+    ///     `view-syncer closing connection with error: ${String(e)}`, e);
+    ///   this.#downstream.fail(wrapWithProtocolError(e));
+    /// }
+    /// ```
+    ///
+    /// WARN is `getLogLevel(e)` for this function's only caller,
+    /// [`ClientHandler::send_query_transform_failed_error`]: TS passes
+    /// `new ProtocolError(error)` (client-handler.ts:368), which takes
+    /// `getLogLevel`'s `isProtocolError` branch (types/error-with-level.ts:24-30).
+    /// A caller that passes a RAW thrown value would be `error` in TS and must
+    /// carry its level here rather than reuse this one.
+    ///
+    /// The view-syncer's own client failures do NOT come through here — rust
+    /// routes them through `Connection::fail`, which owns the `ErrorBody` the
+    /// wire needs; see that function's structural note.
     pub fn fail(&self, e: &str) {
+        tracing::warn!("view-syncer closing connection with error: {}", e);
         self.downstream.fail(e.to_string());
     }
 
@@ -1272,12 +1293,59 @@ mod tests {
         (handler, failed, cancelled)
     }
 
-    // Port of TS client-handler.ts:175 `fail`: forwards to downstream.fail and
-    // does NOT cancel.
+    /// Port of TS `ClientHandler.fail` (client-handler.ts:175-181): LOGS
+    /// `view-syncer closing connection with error: ${String(e)}` at
+    /// `getLogLevel(e)`, then forwards to `downstream.fail` — and does NOT
+    /// cancel.
+    ///
+    /// NON-VACUOUS (2026-09-08): the forwarding half passed both before and
+    /// after — rust's `fail` had the `downstream.fail` call and no log at all,
+    /// so this test could not have caught the missing line. The level is WARN
+    /// because the only caller, `send_query_transform_failed_error`, passes
+    /// `new ProtocolError(error)` in TS (client-handler.ts:368), which takes
+    /// `getLogLevel`'s `isProtocolError` branch. Drop the `tracing::warn!` and
+    /// the log assertions fail; move it to `error!` and the level assertion
+    /// fails.
     #[test]
-    fn fail_forwards_to_downstream_fail_only() {
+    fn fail_logs_at_the_ts_level_then_forwards_to_downstream_fail_only() {
+        use std::sync::{Arc as StdArc, Mutex as CapMutex};
+
+        #[derive(Clone)]
+        struct Cap(StdArc<CapMutex<Vec<u8>>>);
+        impl std::io::Write for Cap {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Cap {
+            type Writer = Cap;
+            fn make_writer(&'a self) -> Cap {
+                self.clone()
+            }
+        }
+
         let (handler, failed, cancelled) = make_handler_observing_lifecycle();
-        handler.fail("boom");
+        let buf = StdArc::new(CapMutex::new(Vec::<u8>::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(Cap(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        tracing::subscriber::with_default(sub, || handler.fail("boom"));
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+        assert!(
+            logged.contains("view-syncer closing connection with error: boom"),
+            "TS logs `String(e)` verbatim (client-handler.ts:176); got: {logged}"
+        );
+        assert!(
+            logged.contains("WARN"),
+            "a ProtocolError is `getLogLevel` -> warn, not error; got: {logged}"
+        );
         assert_eq!(*failed.lock().unwrap(), Some("boom".to_string()));
         assert!(!*cancelled.lock().unwrap(), "fail must not cancel");
     }

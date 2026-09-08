@@ -42,7 +42,7 @@ use crate::services::view_syncer::query_covering::{
 use crate::workers::cg_executor::CGHandle;
 use crate::workers::cg_executor::{CGMessage, CgTaskContext};
 use crate::workers::connect_params::ConnectParams;
-use crate::workers::connection::Connection;
+use crate::workers::connection::{Connection, Thrown};
 use crate::workers::syncer::ConnectionInfo;
 #[cfg(test)]
 use crate::workers::syncer::check_and_pin_user;
@@ -1745,9 +1745,10 @@ impl ViewSyncerService {
                     // TS view-syncer.ts:564 `lc.info?.(`resetting CVR: ${message}`)`.
                     tracing::info!(cg_id = %self.cg_id, "resetting CVR: {message}");
                     self.cvr = None;
-                    self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(
-                        message,
-                    ));
+                    self.fail_group_with_error(
+                        crate::protocol::ErrorBody::client_not_found(message),
+                        None,
+                    );
                     return Ok(false);
                 }
                 self.ttl_clock = cvr.ttl_clock;
@@ -1998,7 +1999,7 @@ impl ViewSyncerService {
                     // the socket.
                     lock_unpoisoned(&self.ccm).fail_connection(&selector, due_ctx.revision);
                     if let Some(conn) = self.connections.get(&client_id) {
-                        conn.close_with_error(error_body);
+                        conn.fail(error_body, None);
                     }
                     if let Some(ws_id) = self.registered_ws.get(&client_id).cloned() {
                         self.delete_client_due_to_disconnect(&client_id, &ws_id);
@@ -2256,7 +2257,7 @@ impl ViewSyncerService {
         // socket that is still the client's current one.
         if self.registered_ws.get(conn_ctx.client_id.as_str()) == Some(&conn_ctx.ws_id) {
             if let Some(conn) = self.connections.get(conn_ctx.client_id.as_str()) {
-                conn.close_with_error(error);
+                conn.fail(error, None);
             }
             self.delete_client_due_to_disconnect(&conn_ctx.client_id, &conn_ctx.ws_id);
         }
@@ -2749,7 +2750,7 @@ impl ViewSyncerService {
                 body.message()
             );
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(body);
+                conn.fail(body, None);
             }
             self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
@@ -2796,7 +2797,7 @@ impl ViewSyncerService {
                 message,
             ))) => {
                 if let Some(conn) = self.connections.get(client_id) {
-                    conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                    conn.fail(crate::protocol::ErrorBody::client_not_found(message), None);
                 }
                 self.delete_client_due_to_disconnect(client_id, &ws_id);
                 return false;
@@ -2804,7 +2805,7 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(error)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {error}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&error));
+                self.fail_group_with_error(cvr_store_error_body(&error), None);
                 return false;
             }
         }
@@ -2818,18 +2819,18 @@ impl ViewSyncerService {
         if is_init && let Err(error) = check_client_and_cvr_versions(&client_version, &cvr.version)
         {
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(*error);
+                conn.fail(*error, None);
             }
             self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
         }
         if is_init && cvr.client_schema.is_none() && client_schema.is_none() {
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(crate::protocol::ErrorBody::basic(
+                conn.fail(crate::protocol::ErrorBody::basic(
                     crate::protocol::ErrorKind::InvalidConnectionRequest,
                     "The initConnection message for a new client group must include client schema."
                         .to_string(),
-                ));
+                ), None);
             }
             self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
@@ -3069,12 +3070,18 @@ impl ViewSyncerService {
                             lock_unpoisoned(&self.ccm).fail_connection(&selector, revision);
                         }
                         if let Some(conn) = self.connections.get(client_id) {
-                            // TS reaches this via `client.fail(e)` -> the
-                            // downstream's error -> `#closeWithThrown(e)`
-                            // (connection.ts:319/324): the CAUGHT error decides
-                            // the level, so a hydrate failure stays `error`
-                            // rather than falling back to `info`.
-                            conn.close_with_thrown(&e.to_string());
+                            // TS `client.fail(e)` (view-syncer.ts:1249). The
+                            // ClientHandler logs `view-syncer closing connection
+                            // with error` at `getLogLevel(e)` — `error` for a raw
+                            // hydrate throw, matching the `closing connection
+                            // with error` line above — and then fails the
+                            // downstream with `wrapWithProtocolError(e)`, which
+                            // is what decides the FRAME's level (`warn`).
+                            let message = e.to_string();
+                            conn.fail(
+                                wrap_with_protocol_error(&message),
+                                Some(Thrown::Other(&message)),
+                            );
                         }
                         self.delete_client_due_to_disconnect(client_id, &ws_id);
                     }
@@ -3142,10 +3149,13 @@ impl ViewSyncerService {
             );
             crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(crate::protocol::ErrorBody::unauthorized(
-                    "The user id in the new token does not match the previous token. \
+                conn.fail(
+                    crate::protocol::ErrorBody::unauthorized(
+                        "The user id in the new token does not match the previous token. \
                      Client groups are pinned to a single user.",
-                ));
+                    ),
+                    None,
+                );
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
                 self.delete_client_due_to_disconnect(client_id, &ws_id);
@@ -3168,7 +3178,7 @@ impl ViewSyncerService {
                 self.cg_id
             );
             if let Some(conn) = self.connections.get(client_id) {
-                conn.close_with_error(error_body);
+                conn.fail(error_body, None);
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
                 self.delete_client_due_to_disconnect(client_id, &ws_id);
@@ -3412,7 +3422,7 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(e)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&e));
+                self.fail_group_with_error(cvr_store_error_body(&e), None);
                 return;
             }
         }
@@ -3654,13 +3664,16 @@ impl ViewSyncerService {
             Err(LoadCvrError::Store(rust_cvr::cvr_store::CVRStoreError::ClientNotFound(
                 message,
             ))) => {
-                self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(message));
+                self.fail_group_with_error(
+                    crate::protocol::ErrorBody::client_not_found(message),
+                    None,
+                );
                 return;
             }
             Err(LoadCvrError::Store(e)) => {
                 // Level lives on the `send_error` line (see `ensure_cvr`).
                 tracing::debug!("CG {}: unable to load CVR: {e}", self.cg_id);
-                self.fail_group_with_error(cvr_store_error_body(&e));
+                self.fail_group_with_error(cvr_store_error_body(&e), None);
                 return;
             }
         }
@@ -3759,7 +3772,7 @@ impl ViewSyncerService {
                 self.cg_id,
                 body.message()
             );
-            self.fail_group_with_error(body);
+            self.fail_group_with_error(body, None);
             return;
         }
         // Re-init the engine against a fresh snapshot; this clears every hydrated
@@ -3969,14 +3982,24 @@ impl ViewSyncerService {
     /// would let the next notification skip that batch. The error the
     /// requesting client sees is identical to TS.
     fn fail_group(&mut self, message: &str) {
-        self.fail_group_with_error(wrap_with_protocol_error(message));
+        // TS `#cleanup(err)` calls `client.fail(err)` with the RAW value that
+        // escaped the `#stateChanges` loop, so `getLogLevel` yields `error`,
+        // not the `warn` a bare ProtocolError would get.
+        self.fail_group_with_error(
+            wrap_with_protocol_error(message),
+            Some(Thrown::Other(message)),
+        );
     }
 
     /// Like [`fail_group`], but closes every connection with a specific
     /// `ErrorBody` instead of the default `Rehome`. Used for the older-replica
     /// case, where TS fails clients with a `ClientNotFound` (so the client wipes
     /// local state and re-syncs fresh) rather than a reconnect-elsewhere Rehome.
-    fn fail_group_with_error(&mut self, error: crate::protocol::ErrorBody) {
+    fn fail_group_with_error(
+        &mut self,
+        error: crate::protocol::ErrorBody,
+        thrown: Option<Thrown<'_>>,
+    ) {
         if self.terminal {
             return;
         }
@@ -3984,7 +4007,7 @@ impl ViewSyncerService {
         crate::metrics::record_fail_group("sync");
         self.accepting.store(false, Ordering::SeqCst);
         for (_, conn) in self.connections.drain() {
-            conn.close_with_error(error.clone());
+            conn.fail(error.clone(), thrown);
         }
         // Drain into a local first: `drain()` holds `&mut self.registered_ws`
         // while `unregister_client` needs `&mut self` (dissolved engine method).
@@ -6329,19 +6352,62 @@ mod tests {
         force_hydrate_error(
             "probe SQL contains NUL byte: SELECT \"_0_version\",\"boardId\" FROM \"stages\"",
         );
-        let accepted = rt.block_on(state.handle_desired_queries(
-            "c1",
-            &serde_json::json!({
-                "desiredQueriesPatch": [
-                    {"op": "put", "hash": "q-unhydratable", "ast": {"table": "issue"}}
-                ]
-            }),
-            ConfigPassOrigin::ChangeDesiredQueries,
-            CustomQueryTransformMode::Missing,
-        ));
+        use super::engine_tests::{capture_logs, captured};
+        let (logs, accepted) = {
+            let (buf, _guard) = capture_logs(tracing::Level::DEBUG);
+            let accepted = rt.block_on(state.handle_desired_queries(
+                "c1",
+                &serde_json::json!({
+                    "desiredQueriesPatch": [
+                        {"op": "put", "hash": "q-unhydratable", "ast": {"table": "issue"}}
+                    ]
+                }),
+                ConfigPassOrigin::ChangeDesiredQueries,
+                CustomQueryTransformMode::Missing,
+            ));
+            (captured(&buf), accepted)
+        };
         assert!(
             !accepted,
             "a failed hydrate must not report an accepted pass"
+        );
+
+        // TS emits THREE lines for one failed client op, at two different levels,
+        // and the split is the point (see `Connection::fail`):
+        //   1. `closing connection with error`  @ getLogLevel(e)      = ERROR
+        //      (`#runInLockForClient`'s catch, view-syncer.ts:1243)
+        //   2. `view-syncer closing connection with error: <e>` @ same = ERROR
+        //      (`ClientHandler.fail`, client-handler.ts:176)
+        //   3. `Sending error on WebSocket`     @ the WRAPPED level   = WARN
+        //      (`sendError`, connection.ts:429 — `#closeWithThrown` receives
+        //      `wrapWithProtocolError(e)`, so `isProtocolError` → warn)
+        // Rust emitted only 1 and 3: measured 47 against TS's 92 on the
+        // 2026-09-08 G44 runtime log differential.
+        let line_at = |level: &str, msg: &str| {
+            logs.lines()
+                .filter(|l| l.contains(level) && l.contains(msg))
+                .count()
+        };
+        assert_eq!(
+            line_at("ERROR", "closing connection with error"),
+            2,
+            "both TS `closing connection with error` lines must be ERROR \
+             (view-syncer.ts:1243 and client-handler.ts:176); got:\n{logs}"
+        );
+        assert_eq!(
+            line_at(
+                "ERROR",
+                "view-syncer closing connection with error: probe SQL contains NUL byte"
+            ),
+            1,
+            "TS `ClientHandler.fail` logs `String(e)` — the RAW hydrate error, not \
+             the wrapped body; got:\n{logs}"
+        );
+        assert_eq!(
+            line_at("WARN", "Sending error on WebSocket"),
+            1,
+            "the frame's level comes from the WRAPPED ProtocolError, so it stays \
+             WARN while the two lines above are ERROR; got:\n{logs}"
         );
 
         // The requesting connection is failed, exactly as `client.fail(e)` does.

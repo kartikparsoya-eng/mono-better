@@ -219,30 +219,85 @@ impl Connection {
         );
     }
 
-    /// Close the connection with an error (TS `Connection.#closeWithError` /
-    /// `client.fail`): send the error downstream, then close.
+    /// Close the connection with an error (TS `Connection.#closeWithError`):
+    /// send the error downstream, then close.
+    ///
+    /// This is the CONNECTION-level close, for a failure TS raises without a
+    /// `ClientHandler` in hand (a message-parse throw, a rejected initConnection
+    /// before the handler exists). When TS instead fails a REGISTERED client —
+    /// `client.fail(e)` — the ported entry point is [`Connection::fail`], which
+    /// logs the line TS's `ClientHandler.fail` logs before closing.
     pub fn close_with_error(&self, error: ErrorBody) {
         self.close_with_error_thrown(error, None);
     }
 
-    /// Port of TS `#closeWithThrown(e)` (connection.ts:324-329): derive the body
-    /// from the CAUGHT error and pass it along, so the level comes from what was
-    /// thrown rather than defaulting to `info`.
-    pub fn close_with_thrown(&self, message: &str) {
-        // The value that reaches TS's `#closeWithThrown` on this path is ALREADY
-        // a ProtocolError: `ClientHandler.fail(e)` does
-        // `this.#downstream.fail(wrapWithProtocolError(e))` (client-handler.ts:175),
-        // and it is that wrapped error the downstream pipeline hands to
-        // `#closeWithThrown` (connection.ts:319). So `getLogLevel(thrown)` takes
-        // the `isProtocolError` branch and yields `warn`, NOT the plain-error
-        // `error`. Rust wraps with the same `wrap_with_protocol_error`, so it
-        // classifies the same way. Measured: TS logged these 47 Internal bodies
-        // at WARN while rust logged ERROR (G44 runtime log differential,
-        // 2026-09-08, level x error_kind breakdown).
-        self.close_with_error_thrown(
-            crate::services::view_syncer::view_syncer::wrap_with_protocol_error(message),
-            Some(Thrown::Protocol(message)),
-        );
+    /// Port of TS `ClientHandler.fail(e)` (client-handler.ts:175-181):
+    ///
+    /// ```ts
+    /// fail(e: unknown) {
+    ///   this.#lc[getLogLevel(e)]?.(
+    ///     `view-syncer closing connection with error: ${String(e)}`, e);
+    ///   this.#downstream.fail(wrapWithProtocolError(e));
+    /// }
+    /// ```
+    ///
+    /// STRUCTURAL NOTE (HARD RULES 3 + 5). TS fails one client through its
+    /// `ClientHandler`, and the wrapped error travels that client's subscription
+    /// down to `Connection`, which sends the frame and closes. Rust's view-syncer
+    /// holds the `Connection` directly on the failure path, because rust-cvr's
+    /// `WebSocketSink::fail` takes a message `String` and cannot carry the error
+    /// KIND — a `Rehome` / `ClientNotFound` / `Unauthorized` routed through it
+    /// would reach the client as `Internal` and change what the client DOES. So
+    /// the ported `fail` lives with the type that owns the `ErrorBody`, and TS's
+    /// single `e: unknown` becomes the (`error`, `thrown`) pair this file already
+    /// uses for `sendError` / `#closeWithError`: `error` is
+    /// `wrapWithProtocolError(e)`, `thrown` is `e` itself — the value
+    /// `getLogLevel` reads. `thrown: None` is the common case where `e` ALREADY
+    /// is the ProtocolError carrying `error`: `wrapWithProtocolError` returns it
+    /// unchanged and `getLogLevel` yields `warn`.
+    ///
+    /// The two levels this emits differ ON PURPOSE, matching TS. This line reads
+    /// the RAW `e`; the `Sending error on WebSocket` line below it reads the
+    /// WRAPPED ProtocolError, because `#closeWithThrown` receives the wrapped
+    /// value (connection.ts:319) and so takes `isProtocolError` → `warn`. That is
+    /// why a hydrate throw logs `error` here and `warn` there.
+    ///
+    /// Why it exists: rust emitted ONE operator-visible line per client failure
+    /// where TS emits two — TS logs in `#runInLockForClient`'s catch
+    /// (view-syncer.ts:1243) and again here. Measured 2026-09-08 on the G44
+    /// runtime log differential: rust 47 `closing connection with error` against
+    /// TS 92, plus 22 TS-only INFO lines from the shutdown-race `Rehome`.
+    pub fn fail(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {
+        // TS `getLogLevel(e)` over the RAW caught value; a bare ProtocolError
+        // (`thrown: None`) is the `isProtocolError` → `warn` branch.
+        let level = thrown.map_or(LogLevel::Warn, Thrown::get_log_level);
+        // TS `String(e)`: the caught value's own text when there is one, else the
+        // ProtocolError body's message.
+        let message = thrown
+            .and_then(Thrown::message)
+            .map(str::to_string)
+            .unwrap_or_else(|| error.message().to_string());
+        match level {
+            LogLevel::Warn => tracing::warn!(
+                client_id = %self.client_id,
+                ws_id = %self.ws_id,
+                "view-syncer closing connection with error: {message}"
+            ),
+            LogLevel::Error => tracing::error!(
+                client_id = %self.client_id,
+                ws_id = %self.ws_id,
+                "view-syncer closing connection with error: {message}"
+            ),
+            LogLevel::Info => tracing::info!(
+                client_id = %self.client_id,
+                ws_id = %self.ws_id,
+                "view-syncer closing connection with error: {message}"
+            ),
+        }
+        // TS `#downstream.fail(wrapWithProtocolError(e))` — what reaches the
+        // connection is the WRAPPED ProtocolError, so the frame classifies at
+        // `warn` regardless of the raw level above.
+        self.close_with_error_thrown(error, Some(Thrown::Protocol(&message)));
     }
 
     /// Port of TS `#closeWithError(errorBody, thrown?)` (connection.ts:331-337).

@@ -837,3 +837,191 @@ async fn custom_query_args_with_nul_survive_the_flush() {
         "queryArgs must round-trip byte-for-byte"
     );
 }
+
+/// I-6 write-behind coalescing — the END STATE must equal TS's.
+///
+/// TS writes each CVR transaction's `rowUpdates` to Postgres in that
+/// transaction (row-record-cache.ts:440-481), so a row touched in five
+/// consecutive versions is five physical writes. Rust's write-behind holds
+/// `pending: HashMap<rowIdString, ..>` and drains it in batches, so those five
+/// collapse to ONE write. That is the whole reason the two engines' `flushing N
+/// rows` volumes differ (measured 2026-09-08 over one prod-trace replay: rust
+/// 26,992 rows in 14 flushes against TS 145,669 in 494) — a SCHEDULING
+/// difference, which I-6 is allowed to make.
+///
+/// What it is NOT allowed to change is what the CVR ends up holding. This pins
+/// that: the same row applied twice before the write-back drains must persist as
+/// ONE row carrying the SECOND apply's rowVersion/patchVersion/refCounts, and
+/// `rowsVersion` must reach the LAST applied version — byte-identical to the
+/// state TS's two separate writes would have left.
+///
+/// NON-VACUOUS: make `pending` insert-if-absent (`entry().or_insert`) instead of
+/// `insert`, i.e. first-write-wins, and the assertions fail with r2/03/{"q1":2}
+/// — the v04 apply is swallowed by the v03 entry already sitting in the batch.
+/// The two later applies MUST land in the same batch for this to bite, which is
+/// what parking the first write-back on the `rowsVersion` lock arranges; a
+/// version of this test that parked BETWEEN them passed against the revert.
+/// The `rowsVersion` assertion is NOT enough on its own: version bookkeeping is
+/// independent of row content, so `rowsVersion` reaches 04 under first-write-wins
+/// too — the rowVersion/patchVersion/refCounts triple is what bites.
+///
+/// Gated on `TEST_CVR_PG_URI`; skips (passes) when unset.
+#[tokio::test]
+async fn write_back_coalescing_persists_the_last_write_for_a_repeated_row() {
+    use rust_cvr::row_record_cache::RowRecordCache;
+    use rust_cvr::schema::types::RowRecord;
+
+    let _schema_guard = PG_SCHEMA.lock().await;
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("SKIP write_back_coalescing_persists_the_last_write: TEST_CVR_PG_URI unset");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+        .execute(&pool)
+        .await
+        .expect("drop schema");
+    sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    sqlx::query(&format!(
+        r#"INSERT INTO "{SCHEMA}"."rowsVersion" ("clientGroupID", "version") VALUES ($1, '01')"#
+    ))
+    .bind(CVR_ID)
+    .execute(&pool)
+    .await
+    .expect("seed rowsVersion");
+
+    let cache = RowRecordCache::new(
+        pool.clone(),
+        SCHEMA.to_string(),
+        CVR_ID.to_string(),
+        rust_cvr::row_record_cache::DEFAULT_DEFERRED_THRESHOLD,
+        Arc::new(|e: String| panic!("fail_service: {e}")),
+        None,
+    );
+    cache.load().await.expect("load empty cache");
+
+    let version = |s: &str| CVRVersion {
+        state_version: s.to_string(),
+        config_version: None,
+    };
+    // The SAME row id, twice, with everything else different.
+    let touch = |row_version: &str, patch: &str, refs: Value| {
+        let row_id = RowID {
+            schema: String::new(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": "a"}).as_object().unwrap().clone(),
+        };
+        let rec = RowRecord {
+            id: row_id.clone(),
+            row_version: row_version.to_string(),
+            patch_version: version(patch),
+            ref_counts: Some(serde_json::from_value(refs).unwrap()),
+        };
+        (row_id, Some(rec))
+    };
+
+    // Park the write-back on the rowsVersion row lock so the second apply
+    // provably lands while the first batch is still un-drained.
+    let mut side = pool.begin().await.expect("side tx");
+    sqlx::query(&format!(
+        r#"SELECT 1 FROM "{SCHEMA}"."rowsVersion" WHERE "clientGroupID" = $1 FOR UPDATE"#
+    ))
+    .bind(CVR_ID)
+    .execute(&mut *side)
+    .await
+    .expect("lock rowsVersion row");
+
+    // Apply #1 spawns the write-back, which parks on the lock holding batch 1.
+    cache
+        .apply(
+            vec![touch("r1", "02", serde_json::json!({"q1": 1}))],
+            version("02"),
+            false,
+        )
+        .await
+        .expect("apply v02");
+
+    let parked_sql = r#"SELECT count(*) FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND state = 'active' AND query ILIKE '%rowsVersion%'"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let parked: i64 = sqlx::query_scalar(parked_sql)
+            .fetch_one(&pool)
+            .await
+            .expect("pg_stat_activity");
+        if parked >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "write-back never parked on the rowsVersion lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    // Batch 1 is already snapshotted and parked, so these TWO applies of the
+    // SAME row both land in the NEXT pending batch — the coalescing case. This
+    // is the shape the replay produces thousands of times: a row re-touched
+    // across consecutive versions while a write-back is in flight.
+    cache
+        .apply(
+            vec![touch("r2", "03", serde_json::json!({"q1": 2}))],
+            version("03"),
+            false,
+        )
+        .await
+        .expect("apply v03");
+    cache
+        .apply(
+            vec![touch("r3", "04", serde_json::json!({"q1": 3}))],
+            version("04"),
+            false,
+        )
+        .await
+        .expect("apply v04");
+
+    side.rollback().await.expect("release lock");
+    cache.flushed().await.expect("write-back completes");
+
+    let rows: Vec<(String, String, Value)> = sqlx::query_as(&format!(
+        r#"SELECT "rowVersion", "patchVersion", "refCounts"
+             FROM "{SCHEMA}".rows WHERE "clientGroupID" = $1"#
+    ))
+    .bind(CVR_ID)
+    .fetch_all(&pool)
+    .await
+    .expect("select rows");
+    assert_eq!(rows.len(), 1, "one row key, one persisted row");
+    let (row_version, patch_version, ref_counts) = &rows[0];
+    assert_eq!(row_version, "r3", "the LAST apply's rowVersion must win");
+    assert_eq!(
+        patch_version, "04",
+        "the LAST apply's patchVersion must win"
+    );
+    assert_eq!(
+        ref_counts,
+        &serde_json::json!({"q1": 3}),
+        "the LAST apply's refCounts must win — a coalesced write must not \
+         resurrect the earlier count"
+    );
+
+    let rv: String = sqlx::query_scalar(&format!(
+        r#"SELECT version FROM "{SCHEMA}"."rowsVersion" WHERE "clientGroupID" = $1"#
+    ))
+    .bind(CVR_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("select rowsVersion");
+    assert_eq!(rv, "04", "rowsVersion reaches the last applied version");
+}

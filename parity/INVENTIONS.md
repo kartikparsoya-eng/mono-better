@@ -238,6 +238,15 @@ guarantees, error semantics) versus TS.
      client's `deleteClients` on a purged CVR wiped every other client of the
      group. Pinned by
      `client_not_found_at_load_fails_only_the_requesting_client`.
+     **BOUNDED AGAIN 2026-09-08 (dec8ff61a):** a HYDRATE throw is outside the
+     deviation too. `#addQueryImpl` rethrows (pipeline-driver.ts:794-812), so TS
+     lands in `#runInLockForClient`'s catch and fails only the requesting
+     connection; nothing was served out of a batch the store had not recorded,
+     so no write-behind durability argument applies. Rust matches — the hydrate
+     arm of `handle_desired_queries` calls `Connection::fail` (the ported
+     `client.fail(e)`), not `fail_group`. What REMAINS inside the deviation is
+     store WRITE failure only. Pinned by
+     `hydrate_failure_fails_only_the_requesting_connection_like_ts`.
   3. ~~The store does not OWN the `RowRecordCache`~~ — **CLOSED 2026-09-02.**
      `CVRStoreHandle` now holds `row_cache` like TS's `CVRStore.#rowCache`
      (cvr-store.ts:246), builds it in `new()` with TS's default arguments, and
