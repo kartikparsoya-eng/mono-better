@@ -1390,14 +1390,14 @@ impl CVRStoreHandle {
         // `rows_flushed`, so skipping it on an empty map leaves the cache's
         // recorded version behind the CVR's for every config-only pass. Do not
         // reintroduce an `is_empty()` guard here.
-        match self
+        // TS `this.#rowCount = await this.#rowCache.apply(...)` (cvr-store.ts:1218):
+        // the await is NOT guarded, so an apply failure rejects `#flush` and the
+        // flush fails. Rust warned and carried on, which reported a successful
+        // flush while `row_count` stayed stale and the records were never queued.
+        self.row_count = self
             .row_cache
             .apply(row_updates, cvr.version.clone(), stats.rows_flushed)
-            .await
-        {
-            Ok(count) => self.row_count = count,
-            Err(e) => tracing::warn!("[cvr] row cache apply failed: {e}"),
-        }
+            .await?;
 
         // (`self.pending` was consumed by the mem::take above — nothing to clear.)
         stats.statements =

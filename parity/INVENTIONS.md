@@ -768,6 +768,14 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   Known gap: a custom query whose transform fails transiently is retried by
   TS's second (`'missing'`) transform in the same pass; rust reports the first
   result. Test: `hydrate_unchanged_queries_logs_the_ts_summary_line`.
+- **Observable (registered 2026-09-08, NOT a bug):** the `init pipelines@<sv>
+  (cvr@<version>)` line reports a CVR version WITHOUT the config component on
+  rust (`cvr@00`, `cvr@783qkkx5k`) where TS always has one (`cvr@00:01`). Same
+  line, same count (342 vs 340 in one replay), same 1:1 formatter
+  (`version_string` / `versionString`) — the VALUE differs because rust runs
+  the first sync inside the config pass, i.e. BEFORE `trackQueries` bumps the
+  config version, while TS runs it in the state loop after that bump. It is
+  this invention's timing, visible in a log; do not "fix" the line.
 - **Tests:** xyne-art `tools/frameseq_gate.py` counts this exact shape as
   `known(K1)` and fails on anything else; `hydrate_real_rows_produces_row_pokes`
   (stage_e) pins (c)'s poke contents.

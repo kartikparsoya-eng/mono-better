@@ -277,7 +277,11 @@ TS_CALL = re.compile(r"\b[\w.#]*[lL][cC]\s*\.\s*(%s)\s*\?\.\s*\(" % "|".join(TS_
 # thrown error's class (`sendError`, connection.ts:428). The message still has a
 # rust twin, so it must be paired; its level is `dynamic` and is exempt from the
 # level check (rust derives the same level in `classify_error_log_level`).
-TS_CALL_DYNAMIC = re.compile(r"\b[\w.#]*[lL][cC]\s*\[\s*[\w.#]+\s*\]\s*\?\.\s*\(")
+# The subscript is an EXPRESSION, commonly a call: `lc[getLogLevel(e)]?.(...)`
+# (view-syncer.ts:1241). Restricting it to `[\w.#]+` missed every such site, so
+# TS lines rust DOES emit looked rust-only (caught 2026-09-08 on
+# `closing connection with error`).
+TS_CALL_DYNAMIC = re.compile(r"\b[\w.#]*[lL][cC]\s*\[\s*[^\]\n]{1,120}\]\s*\?\.\s*\(")
 
 
 def test_regions(src: str) -> list[tuple[int, int]]:

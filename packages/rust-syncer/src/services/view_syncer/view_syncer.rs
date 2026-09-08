@@ -2957,7 +2957,7 @@ impl ViewSyncerService {
             let shard = self.shard.clone();
             let profile_id = self.client_profile_ids.get(client_id).cloned();
             let permissions = self.permissions.clone();
-            match self
+            let hydrated = self
                 .config_and_hydrate_with_profile(
                     cvr,
                     client_id,
@@ -2978,8 +2978,16 @@ impl ViewSyncerService {
                     now,
                     ttl_clock,
                 )
-                .await
-            {
+                .await;
+            // TEST SEAM: arm the next pass to answer `Err`, exactly as an
+            // unhydratable query does in production (a planner probe SQL that
+            // will not prepare — TS `db.prepare(sql)` throwing a SqliteError).
+            #[cfg(test)]
+            let hydrated = match force_hydrate_error_take() {
+                Some(message) => Err(message),
+                None => hydrated,
+            };
+            match hydrated {
                 Ok(cvr) => {
                     // TS marks the version served at the end of
                     // `#syncQueryPipelineSet` (initConnection /
@@ -3008,8 +3016,64 @@ impl ViewSyncerService {
                     // (view-syncer.ts:2305-2307) — emitted from `hydrate_and_sync`.
                 }
                 Err(e) => {
-                    tracing::error!("CG {}: config_and_hydrate failed: {e}", self.cg_id);
-                    self.fail_group(&e.to_string());
+                    // TS `#runInLockForClient`'s catch (view-syncer.ts:1236-1249):
+                    //   lc[getLogLevel(e)]?.(`closing connection with error`, e);
+                    //   if (connCtx) this.connContextManager.failConnection(...);
+                    //   if (client) client.fail(e); else throw e;
+                    // A hydrate throw therefore fails the REQUESTING CONNECTION
+                    // only — sibling connections of the same group keep serving
+                    // and the view-syncer keeps running. `#addQueryImpl` logs
+                    // `query-pipeline-hydrate-failed` and RETHROWS
+                    // (pipeline-driver.ts:794-812); that rethrow lands in this
+                    // catch, NOT in the run loop's `#cleanup(err)`, which is the
+                    // only path that fails every client.
+                    //
+                    // Rust called `fail_group` here, so ONE client's unhydratable
+                    // query evicted every client of the group and terminated the
+                    // CG thread. Caught by the G44 runtime log differential
+                    // (2026-09-08): for the same replay rust logged 47
+                    // `terminating after fatal synchronization error` where TS
+                    // logged 47 per-query `query hydration failed` and kept every
+                    // group alive. The trigger was a filter value SQLite cannot
+                    // parse, reaching the planner's inlined probe SQL
+                    // (`rust-ivm/src/sqlite/sqlite_cost_model.rs`, whose TS twin
+                    // `db.prepare(sql)` simply throws a `SqliteError`).
+                    //
+                    // The background retransform has NO requesting connection
+                    // (TS `#runBackgroundRetransform` is a `#runInLockWithCVR`
+                    // that catches its own failure, view-syncer.ts:2670+), so it
+                    // must not fail a connection here either.
+                    // TS `lc[getLogLevel(e)]?.('closing connection with error', e)`
+                    // (view-syncer.ts:1241): the message is exactly
+                    // `closing connection with error` and the error rides as a
+                    // separate argument. Keep it out of the message text so the
+                    // line reads identically on both arms.
+                    tracing::error!(
+                        client_id,
+                        ws_id = %ws_id,
+                        cmd = origin.cmd(),
+                        error = %e,
+                        "closing connection with error"
+                    );
+                    if origin != ConfigPassOrigin::BackgroundRetransform {
+                        let selector = CcmConnectionSelector {
+                            client_id: client_id.to_string(),
+                            ws_id: ws_id.clone(),
+                        };
+                        // TS passes `connCtx.revision` — the revision the failed
+                        // operation ran under.
+                        let revision = lock_unpoisoned(&self.ccm)
+                            .get_connection_context(&selector)
+                            .map(|c| c.revision);
+                        if let Some(revision) = revision {
+                            lock_unpoisoned(&self.ccm).fail_connection(&selector, revision);
+                        }
+                        if let Some(conn) = self.connections.get(client_id) {
+                            conn.close_with_error(wrap_with_protocol_error(&e.to_string()));
+                        }
+                        self.delete_client_due_to_disconnect(client_id, &ws_id);
+                    }
+                    return false;
                 }
             }
         }
@@ -4339,6 +4403,26 @@ fn merge_notifications(prev: serde_json::Value, next: serde_json::Value) -> serd
 #[cfg(test)]
 thread_local! {
     static FORCE_LOAD_ERROR: RefCell<Option<CVRStoreError>> = const { RefCell::new(None) };
+}
+
+// TEST SEAM (rust-only, `#[cfg(test)]`, no TS twin). Arms the next config pass
+// so the hydrate answers `Err`, exactly as an unhydratable query does in
+// production. Injecting the RESULT the handler matches on — not an earlier
+// precondition — is what makes the failure arm, and its per-connection scope,
+// the code actually exercised.
+#[cfg(test)]
+thread_local! {
+    static FORCE_HYDRATE_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn force_hydrate_error(message: &str) {
+    FORCE_HYDRATE_ERROR.with(|c| *c.borrow_mut() = Some(message.to_string()));
+}
+
+#[cfg(test)]
+fn force_hydrate_error_take() -> Option<String> {
+    FORCE_HYDRATE_ERROR.with(|c| c.borrow_mut().take())
 }
 
 #[cfg(test)]
@@ -6193,6 +6277,95 @@ mod tests {
             logged.matches("init pipelines@").count(),
             1,
             "`init pipelines@` once per pipeline init (TS view-syncer.ts:590); got:\n{logged}"
+        );
+    }
+
+    /// TS `#runInLockForClient` catches a hydrate throw and fails the REQUESTING
+    /// CONNECTION only — `closing connection with error` + `failConnection` +
+    /// `client.fail(e)` (view-syncer.ts:1236-1249). `#addQueryImpl` logs
+    /// `query-pipeline-hydrate-failed` and RETHROWS (pipeline-driver.ts:794-812),
+    /// so the throw lands in that catch, never in the run loop's `#cleanup(err)`
+    /// — the only TS path that fails every client of a group.
+    ///
+    /// Rust called `fail_group`, so ONE client's unhydratable query evicted every
+    /// client of the group and terminated the CG thread. Found by the G44 runtime
+    /// log differential (2026-09-08): the same replay produced 47
+    /// `terminating after fatal synchronization error` on rust against 47 per-query
+    /// `query hydration failed` on TS, triggered by a filter value SQLite cannot
+    /// parse reaching the planner's inlined probe SQL.
+    ///
+    /// NON-VACUOUS: restore `self.fail_group(&e.to_string())` and the sibling
+    /// assertions fail — c2 receives an error frame and the group goes terminal.
+    #[test]
+    fn hydrate_failure_fails_only_the_requesting_connection_like_ts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        seed_test_client_schema(&mut state);
+
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx1),
+        ));
+        rt.block_on(state.on_new_connection(
+            pinned_params("c2", "ws2", "user-1"),
+            DirectWebSocketSink::new(tx2),
+        ));
+        // Both sockets complete initConnection (TS view-syncer.ts:914) so both are
+        // real clients of the group; only c1 then asks for the failing query.
+        assert!(state.init_connection("c1", "ws1"));
+        assert!(state.init_connection("c2", "ws2"));
+        let _ = error_bodies(&mut rx1);
+        let _ = error_bodies(&mut rx2);
+
+        // The next hydrate answers with the production failure text.
+        force_hydrate_error(
+            "probe SQL contains NUL byte: SELECT \"_0_version\",\"boardId\" FROM \"stages\"",
+        );
+        let accepted = rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({
+                "desiredQueriesPatch": [
+                    {"op": "put", "hash": "q-unhydratable", "ast": {"table": "issue"}}
+                ]
+            }),
+            ConfigPassOrigin::ChangeDesiredQueries,
+            CustomQueryTransformMode::Missing,
+        ));
+        assert!(
+            !accepted,
+            "a failed hydrate must not report an accepted pass"
+        );
+
+        // The requesting connection is failed, exactly as `client.fail(e)` does.
+        let c1_errors = error_bodies(&mut rx1);
+        assert!(
+            !c1_errors.is_empty(),
+            "the requesting connection must receive the error frame"
+        );
+        assert!(
+            !state.connections.contains_key("c1"),
+            "the requesting connection must be torn down"
+        );
+
+        // The sibling keeps serving: TS never touches it.
+        assert!(
+            error_bodies(&mut rx2).is_empty(),
+            "a sibling connection must NOT be failed by another client's bad query"
+        );
+        assert!(
+            state.connections.contains_key("c2"),
+            "the sibling connection must stay open"
+        );
+        assert!(
+            !state.terminal,
+            "the view-syncer must keep running (TS fails the client, not the group)"
+        );
+        assert!(
+            state.accepting.load(Ordering::SeqCst),
+            "the group must keep accepting new connections"
         );
     }
 

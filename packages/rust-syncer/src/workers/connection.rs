@@ -256,33 +256,46 @@ impl Connection {
     /// Port of `sendError()` — classifies log level and sends `["error", body]`.
     pub fn send_error(&self, error: ErrorBody) {
         let log_level = classify_error_log_level(&error);
+        let frame = error_message(&error);
+        // TS `lc[logLevel]?.('Sending error on WebSocket', errorBody, thrown ?? '')`
+        // (workers/connection.ts:429): the MESSAGE is exactly
+        // `Sending error on WebSocket` and the body rides as a separate argument,
+        // which the JSON formatter renders as the wire body. Interpolating rust's
+        // `{:?}` printed the Rust enum instead
+        // (`Basic(BasicErrorBody { kind: Internal, .. })`), so the same line read
+        // as a different one on each arm and no operator query matched both
+        // (G44 runtime log differential, 2026-09-08).
+        let error_body = frame
+            .get(1)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "null".to_string());
         match log_level {
             LogLevel::Warn => {
                 tracing::warn!(
                     client_id = %self.client_id,
                     error_kind = ?error.kind(),
-                    "Sending error on WebSocket: {:?}",
-                    error
+                    error_body = %error_body,
+                    "Sending error on WebSocket"
                 );
             }
             LogLevel::Error => {
                 tracing::error!(
                     client_id = %self.client_id,
                     error_kind = ?error.kind(),
-                    "Sending error on WebSocket: {:?}",
-                    error
+                    error_body = %error_body,
+                    "Sending error on WebSocket"
                 );
             }
             LogLevel::Info => {
                 tracing::info!(
                     client_id = %self.client_id,
                     error_kind = ?error.kind(),
-                    "Sending error on WebSocket: {:?}",
-                    error
+                    error_body = %error_body,
+                    "Sending error on WebSocket"
                 );
             }
         }
-        self.send(error_message(&error));
+        self.send(frame);
     }
 
     /// Handle an initConnection message that was piggybacked in the

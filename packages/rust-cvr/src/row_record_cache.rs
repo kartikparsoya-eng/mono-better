@@ -347,13 +347,22 @@ impl RowRecordCache {
         row_records: Vec<(RowID, Option<RowRecord>)>,
         rows_version: CVRVersion,
         flushed: bool,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, sqlx::Error> {
+        // Port of TS `apply`'s FIRST line: `const cache = await this.#ensureLoaded()`
+        // (row-record-cache.ts:239). `load()` is the `#ensureLoaded` twin — it is
+        // idempotent and returns immediately when the cache is already installed.
+        //
+        // Rust returned `Err("cache not loaded")` here instead, and
+        // `CVRStore::flush_internal` only WARNED on it, so an apply that arrived
+        // before the first `get_row_records()` silently: left `row_count` stale,
+        // never queued the records into `pending`, and never started the
+        // background flush — i.e. it DROPPED row records the CVR had already
+        // poked to clients. TS cannot reach that state because it loads here.
+        // (G44 runtime log differential, 2026-09-08: 342 `[cvr] row cache apply
+        // failed: cache not loaded` warnings on rust in one 6-minute replay,
+        // with no TS twin.)
+        self.load().await?;
         let mut state = self.state.lock().await;
-
-        // Ensure cache is loaded.
-        if state.cache.is_none() {
-            return Err("cache not loaded".to_string());
-        }
 
         // Update cache first (separate borrow scope). `make_mut` mutates in
         // place when no snapshot is outstanding (refcount 1); with a live
@@ -533,12 +542,19 @@ impl RowRecordCache {
         let total_count = deletes.len() + inserts.len();
         // TS `lc.info?.(`flushing ${rowUpdates.size} rows (${rowRecordRows.length}
         // inserts, ${rowUpdates.size - rowRecordRows.length} deletes)`)`
-        // (row-record-cache.ts:477-481).
-        tracing::info!(
-            "flushing {total_count} rows ({} inserts, {} deletes)",
-            inserts.len(),
-            deletes.len()
-        );
+        // (row-record-cache.ts:477-481) — emitted INSIDE `if (rowRecordRows.length)`
+        // (:464), i.e. only on a flush that actually upserts rows. Rust logged it
+        // unconditionally, so 6104 of its 6513 flush lines in one 6-minute replay
+        // were `flushing 0 rows (0 inserts, 0 deletes)` against ZERO such lines on
+        // TS — the 5.7x volume gap the G44 runtime log differential reported
+        // (2026-09-08).
+        if !inserts.is_empty() {
+            tracing::info!(
+                "flushing {total_count} rows ({} inserts, {} deletes)",
+                inserts.len(),
+                deletes.len()
+            );
+        }
         ExecuteResult::Execute(RowUpdateStatements {
             rows_version,
             deletes,
@@ -1212,6 +1228,68 @@ mod tests {
     fn test_flush_mode_equality() {
         assert_eq!(FlushMode::AllowDefer, FlushMode::AllowDefer);
         assert_ne!(FlushMode::AllowDefer, FlushMode::Force);
+    }
+
+    /// TS `apply` opens with `const cache = await this.#ensureLoaded()`
+    /// (row-record-cache.ts:239), so an apply on a cache that has not been read
+    /// yet LOADS it and proceeds. Rust returned `Err("cache not loaded")` and the
+    /// caller (`CVRStore::flush_internal`) only warned, so the records were never
+    /// queued into `pending`, the background flush never started, and `row_count`
+    /// stayed stale — row records silently dropped after the CVR had already
+    /// poked them to clients. Found by the G44 runtime log differential
+    /// (2026-09-08): 342 `[cvr] row cache apply failed: cache not loaded`
+    /// warnings on rust in one 6-minute replay, with no TS twin.
+    ///
+    /// NON-VACUOUS: restore the `if state.cache.is_none() { return Err(...) }`
+    /// guard and this fails — `apply` answers `Err` and queues nothing.
+    #[tokio::test]
+    async fn apply_ensures_the_cache_is_loaded_like_ts_rather_than_failing() {
+        // A cache that has NEVER been read: `cache` is None, exactly the state
+        // that produced the warning in production. The short acquire timeout
+        // keeps the test fast while still forcing a REAL connection attempt.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(400))
+            .connect_lazy("postgres://u:p@127.0.0.1:1/db")
+            .expect("lazy pool");
+        let cache = RowRecordCache::new(
+            pool,
+            "s".to_string(),
+            "cvr1".to_string(),
+            100,
+            Arc::new(|_| {}),
+            None,
+        );
+        assert!(
+            cache.state.lock().await.cache.is_none(),
+            "precondition: the cache must start unloaded"
+        );
+
+        // `load()` cannot reach the (unroutable) database, so TS's
+        // `#ensureLoaded()` rejection is what this must reproduce: an Err from
+        // the LOAD, which the caller propagates — never a silent skip.
+        //
+        // The assertion is that the DATABASE WAS ACTUALLY CONTACTED, not merely
+        // that some error came back: a refusal that never touches the pool
+        // returns instantly, while a real acquire burns the whole timeout. That
+        // is what makes this non-vacuous against any short-circuit revert —
+        // asserting on the error TEXT alone is not (an early
+        // `return Err(...)` can name any error it likes).
+        let started = std::time::Instant::now();
+        let err = cache
+            .apply(Vec::new(), CVRVersion::empty(), true)
+            .await
+            .expect_err("an unreachable database must surface the load failure");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(300),
+            "apply must run TS's `#ensureLoaded()` — a real acquire attempt that \
+             burns the pool timeout — not refuse without touching the database \
+             (returned in {elapsed:?} with {err:?})"
+        );
+        assert!(
+            matches!(err, sqlx::Error::PoolTimedOut | sqlx::Error::Io(_)),
+            "the failure must come from the load's connection attempt, got {err:?}"
+        );
     }
 
     /// Build a cache backed by a lazy (never-connecting) pool whose in-memory
