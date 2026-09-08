@@ -8,7 +8,9 @@
 
 use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin};
 use rust_syncer::services::view_syncer::drain_coordinator::DrainCoordinator;
-use rust_syncer::workers::connection::{LogLevel, MessageHandler, classify_error_log_level};
+use rust_syncer::workers::connection::{
+    LogLevel, MessageHandler, Thrown, classify_error_log_level,
+};
 use rust_syncer::workers::syncer_ws_message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
@@ -229,7 +231,7 @@ fn create_handler(
 #[test]
 fn test_client_not_found_logged_as_warn() {
     let error = ErrorBody::client_not_found("Client not found");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Warn);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Warn);
 }
 
 #[test]
@@ -239,50 +241,84 @@ fn test_transform_failed_logged_as_warn() {
         message: "bad transform config".to_string(),
         origin: Some(ErrorOrigin::ZeroCache),
     });
-    assert_eq!(classify_error_log_level(&error), LogLevel::Warn);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Warn);
 }
 
+/// TS `sendError`'s fallback is `thrown ? getLogLevel(thrown) : 'info'`
+/// (workers/connection.ts:426), so an Internal body the server SYNTHESIZED is
+/// `info` and only a CAUGHT plain error is `error`. Rust's old kind-based
+/// mapping made every Internal body page an operator.
 #[test]
-fn test_internal_error_logged_as_error() {
+fn test_internal_error_level_follows_the_thrown_value() {
     let error = ErrorBody::internal("unexpected failure");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Error);
+    assert_eq!(
+        classify_error_log_level(&error, None),
+        LogLevel::Info,
+        "no caught error -> TS `: 'info'`"
+    );
+    assert_eq!(
+        classify_error_log_level(&error, Some(Thrown::Other("unexpected failure"))),
+        LogLevel::Error,
+        "a caught plain error -> TS `getLogLevel(thrown)` = 'error'"
+    );
+    assert_eq!(
+        classify_error_log_level(&error, Some(Thrown::Protocol("unexpected failure"))),
+        LogLevel::Warn,
+        "a caught ProtocolError -> TS `getLogLevel(thrown)` = 'warn'"
+    );
+    assert_eq!(
+        classify_error_log_level(&error, Some(Thrown::WithLevel(LogLevel::Info))),
+        LogLevel::Info,
+        "ProtocolErrorWithLevel's explicit level wins over every branch"
+    );
 }
 
 #[test]
 fn test_socket_closed_while_compressing_logged_as_warn() {
     let error = ErrorBody::internal("The socket was closed while data was being compressed");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Warn);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Warn);
 }
 
 #[test]
 fn test_epipe_in_message_logged_as_warn() {
     // TS checks transient socket codes (EPIPE/ECONNRESET/ECANCELED) on the
-    // THROWN error's `code` property (`hasTransientSocketCode`). Rust has no
-    // thrown object at the classify boundary, so the errno spelling is scanned
-    // in the message instead (labeled Rust-only adaptation F-CON-3,
-    // connection.rs `has_transient_socket_code`). A real Node/socket EPIPE
-    // always carries "EPIPE" in its message, so the OUTCOME matches TS: Warn,
-    // not a paged Error, for a normal peer disconnect.
+    // THROWN error's `code` (`hasTransientSocketCode`), NOT on the error body —
+    // the body is only checked against `TRANSIENT_SOCKET_MESSAGE_PATTERNS`,
+    // which is the single compression pattern. Rust has no thrown object, so it
+    // scans the caught error's MESSAGE for the errno spelling (F-CON-3), which
+    // is where a real socket EPIPE carries it: a normal peer disconnect still
+    // warns instead of paging.
     let error = ErrorBody::internal("write EPIPE");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Warn);
+    assert_eq!(
+        classify_error_log_level(&error, Some(Thrown::Other("write EPIPE"))),
+        LogLevel::Warn,
+        "a caught EPIPE is transient -> warn"
+    );
+    // With nothing caught, TS has no `.code` to read and the body does not match
+    // the compression pattern, so the fallback is `info`.
+    assert_eq!(
+        classify_error_log_level(&error, None),
+        LogLevel::Info,
+        "TS `hasTransientSocketCode(undefined)` is false -> fallback `: 'info'`"
+    );
 }
 
 #[test]
 fn test_version_not_supported_logged_as_info() {
     let error = ErrorBody::version_not_supported("unsupported");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Info);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Info);
 }
 
 #[test]
 fn test_unauthorized_logged_as_info() {
     let error = ErrorBody::unauthorized("not authorized");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Info);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Info);
 }
 
 #[test]
 fn test_invalid_push_logged_as_info() {
     let error = ErrorBody::invalid_push("bad push");
-    assert_eq!(classify_error_log_level(&error), LogLevel::Info);
+    assert_eq!(classify_error_log_level(&error, None), LogLevel::Info);
 }
 
 // ─── syncer-ws-message-handler.test.ts: Message routing ────────────────────

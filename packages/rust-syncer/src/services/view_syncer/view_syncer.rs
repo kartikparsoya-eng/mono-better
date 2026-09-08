@@ -740,7 +740,7 @@ fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<s
 /// the message is the underlying error text, as TS's `getErrorMessage`
 /// yields for an `Error`.
 /// Lives in the consumer because the crate has no `types/` twin module.
-fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {
+pub(crate) fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {
     crate::protocol::ErrorBody::basic(crate::protocol::ErrorKind::Internal, message.to_string())
 }
 
@@ -3069,7 +3069,12 @@ impl ViewSyncerService {
                             lock_unpoisoned(&self.ccm).fail_connection(&selector, revision);
                         }
                         if let Some(conn) = self.connections.get(client_id) {
-                            conn.close_with_error(wrap_with_protocol_error(&e.to_string()));
+                            // TS reaches this via `client.fail(e)` -> the
+                            // downstream's error -> `#closeWithThrown(e)`
+                            // (connection.ts:319/324): the CAUGHT error decides
+                            // the level, so a hydrate failure stays `error`
+                            // rather than falling back to `info`.
+                            conn.close_with_thrown(&e.to_string());
                         }
                         self.delete_client_due_to_disconnect(client_id, &ws_id);
                     }

@@ -222,7 +222,22 @@ impl Connection {
     /// Close the connection with an error (TS `Connection.#closeWithError` /
     /// `client.fail`): send the error downstream, then close.
     pub fn close_with_error(&self, error: ErrorBody) {
-        self.send_error(error.clone());
+        self.close_with_error_thrown(error, None);
+    }
+
+    /// Port of TS `#closeWithThrown(e)` (connection.ts:324-329): derive the body
+    /// from the CAUGHT error and pass it along, so the level comes from what was
+    /// thrown rather than defaulting to `info`.
+    pub fn close_with_thrown(&self, message: &str) {
+        self.close_with_error_thrown(
+            crate::services::view_syncer::view_syncer::wrap_with_protocol_error(message),
+            Some(Thrown::Other(message)),
+        );
+    }
+
+    /// Port of TS `#closeWithError(errorBody, thrown?)` (connection.ts:331-337).
+    pub fn close_with_error_thrown(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {
+        self.send_error_with_thrown(error.clone(), thrown);
         self.close(&format!("{:?}: {}", error.kind(), error.message()));
     }
 
@@ -255,7 +270,13 @@ impl Connection {
     ///
     /// Port of `sendError()` — classifies log level and sends `["error", body]`.
     pub fn send_error(&self, error: ErrorBody) {
-        let log_level = classify_error_log_level(&error);
+        self.send_error_with_thrown(error, None);
+    }
+
+    /// Port of TS `sendError(errorBody, thrown)` (connection.ts:356/396) — the
+    /// full form. `send_error` is the `thrown === undefined` call.
+    pub fn send_error_with_thrown(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {
+        let log_level = classify_error_log_level(&error, thrown);
         let frame = error_message(&error);
         // TS `lc[logLevel]?.('Sending error on WebSocket', errorBody, thrown ?? '')`
         // (workers/connection.ts:429): the MESSAGE is exactly
@@ -352,18 +373,26 @@ pub enum LogLevel {
 
 /// System error codes that indicate transient socket conditions. Port of TS
 /// `TRANSIENT_SOCKET_ERROR_CODES` (`connection.ts`); lowercased for matching.
-const TRANSIENT_SOCKET_ERROR_CODES: [&str; 3] = ["epipe", "econnreset", "ecanceled"];
+const TRANSIENT_SOCKET_ERROR_CODES: [&str; 6] = [
+    "epipe",
+    "econnreset",
+    "ecanceled",
+    // `std::io::ErrorKind` Display forms — rust's stand-in for reading the
+    // thrown error's `.code`, which is what TS inspects (F-CON-3). They live
+    // HERE, on the thrown-side check, not in the message-pattern list: TS runs
+    // `hasTransientSocketCode` against the THROWN and only
+    // `isTransientSocketMessage` against the error body.
+    "connection reset",
+    "broken pipe",
+    "operation canceled",
+];
 
 /// Error-message fragments that indicate transient socket conditions without a
-/// standard code. Port of TS `TRANSIENT_SOCKET_MESSAGE_PATTERNS`, plus the
-/// `std::io::ErrorKind` Display forms that are the Rust stand-in for the errno
-/// codes above (TS reads them off a thrown object; see `has_transient_socket_code`).
-const TRANSIENT_SOCKET_MESSAGE_PATTERNS: [&str; 4] = [
-    "socket was closed while data was being compressed",
-    "connection reset", // std::io::ErrorKind::ConnectionReset Display (ECONNRESET)
-    "broken pipe",      // std::io::ErrorKind::BrokenPipe Display (EPIPE)
-    "operation canceled", // std::io Display (ECANCELED)
-];
+/// standard code. 1:1 with TS `TRANSIENT_SOCKET_MESSAGE_PATTERNS`
+/// (connection.ts:462-464) — a single pattern; the errno spellings live on
+/// `TRANSIENT_SOCKET_ERROR_CODES`, which is checked against the THROWN.
+const TRANSIENT_SOCKET_MESSAGE_PATTERNS: [&str; 1] =
+    ["socket was closed while data was being compressed"];
 
 /// Port of TS `hasTransientSocketCode`. TS reads the thrown error's `.code`;
 /// Rust has no thrown object at this boundary, so we scan the (lowercased) error
@@ -381,6 +410,55 @@ fn is_transient_socket_message(msg_lower: &str) -> bool {
         .any(|p| msg_lower.contains(p))
 }
 
+/// Port of TS `hasErrno` (connection.ts:443-450): whether the THROWN value
+/// carries an `errno` property. TS inspects the object; rust has only the
+/// caught error's message at this boundary, so it scans for the errno spelling
+/// — the same channel `has_transient_socket_code` uses (F-CON-3).
+fn has_errno(msg_lower: &str) -> bool {
+    msg_lower.contains("errno")
+        || msg_lower.contains("os error ")
+        || TRANSIENT_SOCKET_ERROR_CODES
+            .iter()
+            .any(|c| msg_lower.contains(c))
+}
+
+/// Port of TS `sendError`'s `thrown?: unknown` parameter (connection.ts:396).
+/// TS branches on what the CAUGHT value IS; rust models exactly the three
+/// properties the classification reads, so no call site has to carry a JS value.
+///
+/// `None` at a call site means TS's `thrown === undefined` — a body the server
+/// SYNTHESIZED rather than caught, which TS logs at `info`.
+#[derive(Clone, Copy, Debug)]
+pub enum Thrown<'a> {
+    /// TS `thrown instanceof ProtocolErrorWithLevel` — the explicit level wins
+    /// over every other branch.
+    WithLevel(LogLevel),
+    /// TS `isProtocolError(thrown)` — `getLogLevel` yields `warn`.
+    Protocol(&'a str),
+    /// Any other caught value (a plain `Error`) — `getLogLevel` yields `error`.
+    Other(&'a str),
+}
+
+impl<'a> Thrown<'a> {
+    /// The caught value's message, for the `hasErrno` / `hasTransientSocketCode`
+    /// checks TS runs against the THROWN (not against the error body).
+    fn message(self) -> Option<&'a str> {
+        match self {
+            Thrown::WithLevel(_) => None,
+            Thrown::Protocol(m) | Thrown::Other(m) => Some(m),
+        }
+    }
+
+    /// Port of TS `getLogLevel(error)` (types/error-with-level.ts:24-30).
+    fn get_log_level(self) -> LogLevel {
+        match self {
+            Thrown::WithLevel(level) => level,
+            Thrown::Protocol(_) => LogLevel::Warn,
+            Thrown::Other(_) => LogLevel::Error,
+        }
+    }
+}
+
 /// Classify the log level for an error body.
 ///
 /// Port of the `sendError()` logic:
@@ -388,23 +466,39 @@ fn is_transient_socket_message(msg_lower: &str) -> bool {
 /// - `TransformFailed` → warn
 /// - transient socket condition (EPIPE/ECONNRESET/ECANCELED, etc.) → warn
 /// - Otherwise → info (or error for `Internal`)
-pub fn classify_error_log_level(error: &ErrorBody) -> LogLevel {
+pub fn classify_error_log_level(error: &ErrorBody, thrown: Option<Thrown<'_>>) -> LogLevel {
+    // TS `sendError` (connection.ts:400-427), branch for branch and IN ORDER:
+    //
+    //   if (thrown instanceof ProtocolErrorWithLevel)          -> thrown.logLevel
+    //   else if (hasErrno(thrown) || hasTransientSocketCode(thrown)
+    //            || isTransientSocketMessage(errorBody.message)) -> 'warn'
+    //   else if (kind is ClientNotFound | TransformFailed)      -> 'warn'
+    //   else                                                    -> thrown ? getLogLevel(thrown) : 'info'
+    //
+    // Two things rust got wrong before the `thrown` parameter existed:
+    //   * it ran the errno / socket-code checks against the ERROR BODY, where TS
+    //     runs them against the THROWN and only `isTransientSocketMessage`
+    //     against the body; and
+    //   * its fallback mapped `Internal` to `error`, where TS's fallback is
+    //     `info` whenever nothing was caught. That made rust page an operator on
+    //     bodies the server synthesized itself — 47 rust `error` lines against
+    //     TS's `info`/`warn` for the same replay (G44 runtime log differential,
+    //     2026-09-08).
+    if let Some(Thrown::WithLevel(level)) = thrown {
+        return level;
+    }
+    let thrown_lower = thrown.and_then(|t| t.message()).map(str::to_lowercase);
+    if thrown_lower
+        .as_deref()
+        .is_some_and(|m| has_errno(m) || has_transient_socket_code(m))
+        || is_transient_socket_message(&error.message().to_lowercase())
+    {
+        return LogLevel::Warn;
+    }
     match error.kind() {
         ErrorKind::ClientNotFound | ErrorKind::TransformFailed => LogLevel::Warn,
-        _ => {
-            // Transient I/O (peer reset / broken pipe / canceled): TS downgrades
-            // these to `warn` so a normal disconnect doesn't page an operator.
-            // Mirrors TS `hasTransientSocketCode(thrown) || isTransientSocketMessage(msg)`.
-            let msg_lower = error.message().to_lowercase();
-            if has_transient_socket_code(&msg_lower) || is_transient_socket_message(&msg_lower) {
-                return LogLevel::Warn;
-            }
-            // Default: info for protocol errors, error for internal errors.
-            match error.kind() {
-                ErrorKind::Internal => LogLevel::Error,
-                _ => LogLevel::Info,
-            }
-        }
+        // TS `thrown ? getLogLevel(thrown) : 'info'`.
+        _ => thrown.map_or(LogLevel::Info, |t| t.get_log_level()),
     }
 }
 
@@ -422,7 +516,8 @@ pub fn send(sink: &DirectWebSocketSink, data: serde_json::Value) {
 ///
 /// Port of the exported `sendError()` function.
 pub fn send_error(sink: &DirectWebSocketSink, error: ErrorBody) {
-    let log_level = classify_error_log_level(&error);
+    // No caught error at this boundary — TS's `thrown === undefined` call.
+    let log_level = classify_error_log_level(&error, None);
     match log_level {
         LogLevel::Warn => tracing::warn!("Sending error: {:?}", error),
         LogLevel::Error => tracing::error!("Sending error: {:?}", error),
@@ -453,19 +548,30 @@ mod tests {
     #[test]
     fn client_not_found_and_transform_failed_are_warn() {
         assert_eq!(
-            classify_error_log_level(&ErrorBody::client_not_found("gone")),
+            classify_error_log_level(&ErrorBody::client_not_found("gone"), None),
             LogLevel::Warn
         );
         assert_eq!(
-            classify_error_log_level(&basic(ErrorKind::TransformFailed, "bad transform")),
+            classify_error_log_level(&basic(ErrorKind::TransformFailed, "bad transform"), None),
             LogLevel::Warn
         );
     }
 
     #[test]
-    fn internal_errors_are_error_level() {
+    fn internal_errors_take_their_level_from_the_thrown_value_like_ts() {
+        // TS `sendError`'s fallback is `thrown ? getLogLevel(thrown) : 'info'`
+        // (connection.ts:426). A SYNTHESIZED Internal body — nothing caught — is
+        // therefore `info`, NOT `error`: rust's old kind-based mapping paged an
+        // operator on bodies the server built itself (47 such lines in one
+        // replay where TS logged info/warn).
         assert_eq!(
-            classify_error_log_level(&ErrorBody::internal("boom")),
+            classify_error_log_level(&ErrorBody::internal("boom"), None),
+            LogLevel::Info,
+            "a synthesized Internal body is TS `: 'info'`"
+        );
+        // A CAUGHT plain error keeps `error` (TS `getLogLevel` default).
+        assert_eq!(
+            classify_error_log_level(&ErrorBody::internal("boom"), Some(Thrown::Other("boom"))),
             LogLevel::Error
         );
     }
@@ -473,11 +579,11 @@ mod tests {
     #[test]
     fn protocol_errors_default_to_info() {
         assert_eq!(
-            classify_error_log_level(&ErrorBody::invalid_message("nope")),
+            classify_error_log_level(&ErrorBody::invalid_message("nope"), None),
             LogLevel::Info
         );
         assert_eq!(
-            classify_error_log_level(&ErrorBody::version_not_supported("old")),
+            classify_error_log_level(&ErrorBody::version_not_supported("old"), None),
             LogLevel::Info
         );
     }
@@ -491,14 +597,21 @@ mod tests {
             ErrorKind::Internal,
             "The socket was closed while data was being compressed",
         );
-        assert_eq!(classify_error_log_level(&err), LogLevel::Warn);
+        assert_eq!(classify_error_log_level(&err, None), LogLevel::Warn);
     }
 
     #[test]
     fn transient_socket_errors_are_downgraded_to_warn() {
         // TS downgrades EPIPE/ECONNRESET/ECANCELED (transient peer disconnects)
-        // to warn. Rust matches on the message (carrying the io::Error Display),
-        // for both the raw errno spelling and the ErrorKind Display form.
+        // to warn by reading the THROWN error's `.code`
+        // (`hasTransientSocketCode`), never the error body — the body is only
+        // matched against the single compression pattern. Rust has no thrown
+        // object, so it scans the caught error's MESSAGE, which carries the
+        // io::Error Display (F-CON-3).
+        //
+        // (The real socket-failure path does not reach this classifier at all:
+        // `WsCommand::Fail` is logged by `ws_server` at warn, mirroring TS
+        // `closeWithError` in types/ws.ts.)
         for msg in [
             "write failed: Broken pipe (os error 32)",
             "Connection reset by peer (os error 54)",
@@ -507,14 +620,24 @@ mod tests {
         ] {
             let err = basic(ErrorKind::Internal, msg);
             assert_eq!(
-                classify_error_log_level(&err),
+                classify_error_log_level(&err, Some(Thrown::Other(msg))),
                 LogLevel::Warn,
-                "transient socket message should warn: {msg:?}"
+                "a CAUGHT transient socket error should warn: {msg:?}"
+            );
+            // Nothing caught: TS has no `.code` to read and the body matches no
+            // message pattern, so the fallback is `info`.
+            assert_eq!(
+                classify_error_log_level(&err, None),
+                LogLevel::Info,
+                "a synthesized body is TS `: 'info'`: {msg:?}"
             );
         }
-        // A genuine internal error still logs at error.
+        // A genuine CAUGHT internal error still logs at error.
         assert_eq!(
-            classify_error_log_level(&basic(ErrorKind::Internal, "assertion failed: x == y")),
+            classify_error_log_level(
+                &basic(ErrorKind::Internal, "assertion failed: x == y"),
+                Some(Thrown::Other("assertion failed: x == y"))
+            ),
             LogLevel::Error
         );
     }
