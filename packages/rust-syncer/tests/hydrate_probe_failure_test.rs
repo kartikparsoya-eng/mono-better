@@ -19,7 +19,9 @@
 //! outcome than TS for the same input (AGENTS.md rules 1 and 10).
 //!
 //! Measured on the 60-minute prod-replay of image 37c1908dd (20 cores / 50 GB):
-//! 160 `CG … task panicked: probe SQL contains NUL byte: SELECT …` lines, one
+//! 160 `CG … task panicked: probe SQL contains NUL byte: SELECT …` lines (the
+//! rust-only NUL-guard text of the time; SQLite's own `unrecognized token` is
+//! what TS and rust report now), one
 //! per client group killed. The TS arm of the same replay logged ~230
 //! `unrecognized token: "'￿ "` errors — the SAME queries, surfaced as error
 //! frames, with the groups still serving afterwards.
@@ -138,7 +140,7 @@ fn unpreparable_cost_probe_fails_the_hydrate_instead_of_unwinding() {
          its name is what `String(e)` prints on the fail line"
     );
     assert!(
-        err.message.contains("probe SQL contains NUL byte"),
+        err.message.contains("unrecognized token"),
         "the reported error must carry the probe failure so the client's \
          Internal error body is diagnostic, like TS's SqliteError message; got: {err}"
     );
@@ -221,7 +223,7 @@ fn unpreparable_cost_probe_fails_the_group_with_an_error_not_a_dead_task() {
              the client-group task",
         );
     assert!(
-        err.message.contains("probe SQL contains NUL byte"),
+        err.message.contains("unrecognized token"),
         "the group must be failed WITH the underlying error (it becomes the \
          Internal error body the client sees); got: {err}"
     );

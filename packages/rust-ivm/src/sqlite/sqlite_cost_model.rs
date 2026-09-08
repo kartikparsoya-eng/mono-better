@@ -119,7 +119,6 @@ pub fn get_scanstatus_loops(
     conn: &rusqlite::Connection,
     sql: &str,
 ) -> Result<Vec<ScanstatusLoop>, String> {
-    let c_sql = CString::new(sql).map_err(|_| format!("probe SQL contains NUL byte: {sql}"))?;
     let mut loops: Vec<ScanstatusLoop> = Vec::new();
 
     // SAFETY: `db` is the live connection handle owned by `conn` (kept alive
@@ -128,10 +127,18 @@ pub fn get_scanstatus_loops(
     unsafe {
         let db = conn.handle();
         let mut stmt: *mut rusqlite::ffi::sqlite3_stmt = std::ptr::null_mut();
+        // TS `db.prepare(sql)` hands better-sqlite3 the JS string WITH ITS
+        // LENGTH, so an embedded NUL is not an error on the caller's side:
+        // SQLite parses up to it and reports what it found — `unrecognized
+        // token: "'\uffff "` on the 2026-09-08 sandbox TS arm. Passing
+        // `nByte = len` (no C string) reproduces that byte-for-byte; a
+        // `CString` guard used to short-circuit with a rust-only
+        // `probe SQL contains NUL byte` message that paired with nothing in
+        // the TS log (G44).
         let rc = rusqlite::ffi::sqlite3_prepare_v2(
             db,
-            c_sql.as_ptr(),
-            -1,
+            sql.as_ptr() as *const c_char,
+            sql.len() as c_int,
             &mut stmt,
             std::ptr::null_mut(),
         );
@@ -151,7 +158,12 @@ pub fn get_scanstatus_loops(
                     "{INTERRUPT_ERR_PREFIX}cost-model probe prepare failed ({msg}): {sql}"
                 ));
             }
-            return Err(format!("cost-model probe prepare failed ({msg}): {sql}"));
+            // TS `Database#run` (zqlite/src/db.ts:127-135): a `SqliteError`
+            // leaves `prepare` with `e.message += `: ${sql}`` — the SQLite
+            // message, a colon, the SQL, nothing else. That text is what
+            // `ClientHandler.fail`'s `String(e)` prints and what the client's
+            // Internal body carries.
+            return Err(format!("{msg}: {sql}"));
         }
 
         let mut idx: c_int = 0;
@@ -651,6 +663,29 @@ pub fn create_sqlite_cost_model_prepared(
 
 #[cfg(test)]
 mod tests {
+    /// TS `db.prepare(sql)` (sqlite-cost-model.ts:78) passes the JS string by
+    /// LENGTH, so an embedded NUL reaches SQLite, which parses up to it and
+    /// fails on the unterminated literal; `Database#run` (db.ts:127-135) then
+    /// appends `: ${sql}`. The 2026-09-08 sandbox TS arm logged exactly
+    /// `unrecognized token: "'\uffff ": SELECT …`. rust used to refuse the NUL
+    /// itself with `probe SQL contains NUL byte: …`, a message TS never
+    /// produces. Non-vacuous: restore the `CString` guard and this fails.
+    #[test]
+    fn nul_in_probe_sql_reports_sqlites_tokenizer_error_like_ts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(a TEXT)").unwrap();
+        let sql = "SELECT \"a\" FROM \"t\" WHERE \"a\" = '\u{ffff} \0ab'";
+        let err = super::get_scanstatus_loops(&conn, sql).unwrap_err();
+        assert_eq!(
+            err,
+            format!("unrecognized token: \"'\u{ffff} \": {sql}"),
+            "SQLite's own tokenizer message, then `: <sql>` (TS Database#run)"
+        );
+        // A plain SQL error takes the same `<sqlite message>: <sql>` shape.
+        let err = super::get_scanstatus_loops(&conn, "SELECT nope FROM t").unwrap_err();
+        assert_eq!(err, "no such column: nope: SELECT nope FROM t");
+    }
+
     use super::*;
     use crate::builder::ast::{SimpleCondition, ValuePosition};
     use crate::ivm::data::Value;
