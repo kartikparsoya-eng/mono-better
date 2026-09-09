@@ -7,7 +7,10 @@
 #   rust-syncer  --no-default-features, SQLITE3_* must be UNSET
 #   rust-cvr     TEST_CVR_PG_URI required or the PG suites self-skip
 #                (their paths would then read as uncovered)
-#   rust-ivm     wal2 static SQLite env + --test-threads=1
+#   rust-ivm     wal2 static SQLite env + --test-threads=1 + --tests (NOT
+#                --all-targets: a criterion harness=false bench rejects the
+#                forwarded libtest --test-threads=1 with "unexpected argument",
+#                exit 2 — same reason rust-checks' test step uses --tests)
 #
 # Output: parity/coverage/<crate>/{summary.txt,uncovered-functions.txt,lcov.info}
 set -uo pipefail
@@ -21,7 +24,7 @@ run_cov() { # crate, extra cargo args...
   echo "══ $crate ══"
   mkdir -p "$OUT/$crate"
   # --summary-only must precede any `--` test-binary args in "$@".
-  (cd "$ROOT/packages/$crate" && cargo llvm-cov --all-targets --summary-only \
+  (cd "$ROOT/packages/$crate" && cargo llvm-cov ${COV_TARGETS:---all-targets} --summary-only \
       "$@" 2>&1 | tail -8 | tee "$OUT/$crate/summary.txt")
   local s1=${PIPESTATUS[0]}
   (cd "$ROOT/packages/$crate" && cargo llvm-cov report --lcov \
@@ -49,7 +52,7 @@ run_cov rust-cvr || fail=1
 
 SQLITE3_LIB_DIR="$ROOT/packages/rust-ivm/wal2-sqlite/build" \
 SQLITE3_INCLUDE_DIR="$ROOT/packages/rust-ivm/wal2-sqlite/build" \
-SQLITE3_STATIC=1 PKG_CONFIG_LIBDIR="" \
+SQLITE3_STATIC=1 PKG_CONFIG_LIBDIR="" COV_TARGETS=--tests \
   run_cov rust-ivm -- --test-threads=1 || fail=1
 
 echo

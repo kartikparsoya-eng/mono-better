@@ -53,22 +53,26 @@ step "parity — vendored SQLite compile DEFINES == zero-sqlite3 deps/defines.gy
 # rust's capacity knee was 110 vs TS 230. Skips (passes) when node_modules is absent.
 ZG=$(ls "$ROOT"/node_modules/.pnpm/@rocicorp+zero-sqlite3@*/node_modules/@rocicorp/zero-sqlite3/deps/defines.gypi 2>/dev/null | tail -1)
 if [ -n "$ZG" ]; then
-  python3 - "$ZG" "$ROOT/packages/rust-syncer/build.rs" "$ROOT/scripts/local-rust-ci.sh" "$ROOT/packages/rust-ivm/scripts/build-wal2-static-lib.sh" <<'PY'
+  python3 - "$ZG" "$ROOT/packages/rust-syncer/build.rs" "$ROOT/scripts/local-rust-ci.sh" "$ROOT/packages/rust-ivm/scripts/build-wal2-static-lib.sh" "$ROOT/parity/sanitize.sh" <<'PY'
 import re, sys
-gypi, build, ci, wal2 = (open(a).read() for a in sys.argv[1:5])
+gypi, build, ci, wal2, san = (open(a).read() for a in sys.argv[1:6])
 defs = re.findall(r"'(SQLITE_[A-Z0-9_]+)(?:=([^']+))?'", gypi)
 def dflags(text): return {m.group(1): m.group(2) for m in re.finditer(r'-D(SQLITE_[A-Z0-9_]+)(?:=(\S+))?', text)}
 places = {
     "rust-syncer/build.rs": {m.group(1): m.group(2) for m in re.finditer(r'\.define\("(SQLITE_[A-Z0-9_]+)",\s*(?:"([^"]*)"|None)\)', build)},
     "local-rust-ci.sh cc": dflags(ci[ci.index("cc -O2 -fPIC -c sqlite3.c"):ci.index("ar rcs libsqlite3.a")]),
     "rust-ivm/scripts/build-wal2-static-lib.sh": dflags(wal2),
+    # The sanitizer job's WAL2 build: 2026-09-09 a flag SUBSET here (no
+    # DEFAULT_CACHE_SIZE=-16000/MEMSTATUS=0) failed rust-ivm's
+    # page_cache_budget_tests define-parity assert under ASan only.
+    "parity/sanitize.sh": dflags(san),
 }
 bad = []
 for label, have in places.items():
     for name, val in defs:
         if name not in have: bad.append(f"{label}: {name} MISSING"); continue
         if (have[name] or "") != (val or ""): bad.append(f"{label}: {name}={have[name]!r} but defines.gypi says {val!r}")
-print(f"defines.gypi: {len(defs)} defines; " + ("mirrored in all 3 places" if not bad else f"{len(bad)} drift(s)"))
+print(f"defines.gypi: {len(defs)} defines; " + ("mirrored in all 4 places" if not bad else f"{len(bad)} drift(s)"))
 for b in bad: print("  ", b)
 sys.exit(1 if bad else 0)
 PY

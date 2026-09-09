@@ -77,7 +77,7 @@ impl ApiErrorAttrs {
 }
 
 /// `apiResponseErrorMetricAttrs` (custom/fetch.ts:528-547): `http_status_code`
-/// + `http_status_class` when there was a response, `error_kind` (+
+/// and `http_status_class` when there was a response, `error_kind` (plus
 /// `error_reason`) when there was an error body.
 fn push_response_error_attrs(
     attrs: &mut Vec<opentelemetry::KeyValue>,

@@ -1,7 +1,8 @@
 //! `zero.sync.ivm.advance-time` records the PROCESS time of one change — TS
-//! `#advanceTime.recordMs(elapsed, {table})` with `elapsed = timer.totalElapsed()
-//! - start` (pipeline-driver.ts:981/1034-1038): a delta of the view-syncer's
-//! TimeSliceTimer, which the engine reads through the advance gate's clock.
+//! `#advanceTime.recordMs(elapsed, {table})`, where `elapsed` is
+//! `timer.totalElapsed() - start` (pipeline-driver.ts:981/1034-1038): a delta
+//! of the view-syncer's TimeSliceTimer, which the engine reads through the
+//! advance gate's clock.
 //!
 //! NON-VACUOUS: the gate clock here is a constant, so the TS-parity value is
 //! exactly 0.0 for every change; the pre-2026-09-09 site recorded

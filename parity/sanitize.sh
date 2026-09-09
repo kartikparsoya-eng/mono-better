@@ -48,14 +48,17 @@ PREAMBLE='
   # runtime-only via ldconfig) — so a /usr/local/lib install links for crates
   # whose scanstatus refs get gc-sectioned away (rust-ivm) but fails for
   # rust-syncer, which keeps the ref. Multiarch dir fixes both link and runtime.
+  # Define set mirrors @rocicorp/zero-sqlite3 deps/defines.gypi 1:1 (like
+  # build-wal2-static-lib.sh; scripts/local-rust-ci.sh checks both): runtime-affecting
+  # defines change test outcomes — the pre-2026-09-09 subset lacked
+  # SQLITE_DEFAULT_CACHE_SIZE=-16000, so PRAGMA cache_size read back the stock
+  # -2000 and rust-ivm/sqlite::page_cache_budget_tests failed its define-parity
+  # assert under ASan only.
   ARCHLIB=/usr/lib/$(gcc -print-multiarch)
   gcc -O2 -ffp-contract=off -fPIC -shared rust-ivm/wal2-sqlite/sqlite3.c \
       -Wl,-soname,libsqlite3.so.0 -o "$ARCHLIB/libsqlite3.so.0" \
-      -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_COLUMN_METADATA \
-      -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 \
-      -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_STAT4 \
-      -DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT \
-      -DSQLITE_ENABLE_DESERIALIZE -lpthread -ldl -lm
+      -DSQLITE_DEFAULT_CACHE_SIZE=-16000 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_DESERIALIZE -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PERCENTILE -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_STAT4 -DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_SOUNDEX -DSQLITE_STAT4_SAMPLES=128 -DSQLITE_THREADSAFE=2 -DSQLITE_TRACE_SIZE_LIMIT=32 -DSQLITE_USE_URI=1 \
+      -lpthread -ldl -lm
   ln -sf libsqlite3.so.0 "$ARCHLIB/libsqlite3.so"
   cp rust-ivm/wal2-sqlite/sqlite3.h /usr/local/include/sqlite3.h
   cp rust-ivm/wal2-sqlite/sqlite3ext.h /usr/local/include/sqlite3ext.h

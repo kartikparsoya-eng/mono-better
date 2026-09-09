@@ -67,6 +67,23 @@ fn install_sqlite_hook_once() {
     });
 }
 
+/// libtest runs the tests below on PARALLEL threads (`cargo test`'s default;
+/// the CI coverage leg passes no `--test-threads=1`), and they share ONE
+/// process-global SQLite. If `sqlite_compile_options_...` wins the race to the
+/// first `Connection::open`, SQLite initializes WITHOUT the hook and the later
+/// `SQLITE_CONFIG_MALLOC` returns SQLITE_MISUSE (21) — the hook test panics,
+/// the poisoning Once takes the memstatus test down with it (observed 1/100
+/// locally, ~always under the instrumented coverage build). The mutex plus
+/// hook-before-connect in EVERY SQLite-touching test makes that ordering
+/// deterministic under any --test-threads count.
+static SQLITE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_sqlite_test() -> std::sync::MutexGuard<'static, ()> {
+    // A sibling test's panic must not turn the lock's poisoning into a
+    // cascade that masks the first failure's diagnostics.
+    SQLITE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// SQLite is C and never sees Rust's global allocator; I-13 also installs
 /// mimalloc as SQLite's `sqlite3_mem_methods`. This test runs in its own
 /// process (integration test binary) so the hook precedes SQLite's
@@ -74,6 +91,7 @@ fn install_sqlite_hook_once() {
 /// `sqlite3_malloc` returns a glibc/system pointer and the assertion fails.
 #[test]
 fn sqlite_allocations_come_from_mimalloc_after_the_config_hook() {
+    let _guard = lock_sqlite_test();
     install_sqlite_hook_once();
 
     // Initialize SQLite the way production does (first Connection::open) and
@@ -109,6 +127,7 @@ fn sqlite_allocations_come_from_mimalloc_after_the_config_hook() {
 /// counters are never maintained and both stay 0.
 #[test]
 fn sqlite_memory_statistics_are_off_like_zero_sqlite3() {
+    let _guard = lock_sqlite_test();
     install_sqlite_hook_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -148,6 +167,10 @@ fn sqlite_memory_statistics_are_off_like_zero_sqlite3() {
 /// against defines.gypi so it cannot rot independently.
 #[test]
 fn sqlite_compile_options_match_the_zero_sqlite3_build() {
+    // Hook first: this test opens a connection, so unguarded it could be the
+    // one to initialize SQLite and break the hook install (see SQLITE_TEST_LOCK).
+    let _guard = lock_sqlite_test();
+    install_sqlite_hook_once();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let mut stmt = conn.prepare("PRAGMA compile_options").unwrap();
     let opts: Vec<String> = stmt
