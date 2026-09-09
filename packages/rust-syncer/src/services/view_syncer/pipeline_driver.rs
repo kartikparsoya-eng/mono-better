@@ -857,32 +857,44 @@ impl IvmPipelines {
     /// holds — `initQuery` seeds one per fetched table). The non-empty VENDED
     /// lines and `Total rows considered` are identical; only all-zero,
     /// query-untouched tables are omitted (pure log noise, no diagnostic loss).
-    /// Tables are sorted so the log is deterministic (TS relies on `#tables`
-    /// insertion order; rust's `HashMap` is unordered).
+    /// `table_names` must be sorted so the log is deterministic (TS relies on
+    /// `#tables` insertion order; rust's `HashMap` is unordered).
     fn log_vended_row_counts(
         query_id: &str,
         hydration_time_ms: f64,
         vended: Option<&RowCountsBySource>,
+        table_names: &[String],
     ) {
         let mut total_rows_considered: u64 = 0;
-        if let Some(counts) = vended {
-            let mut tables: Vec<&String> = counts.keys().collect();
-            tables.sort();
-            for table_name in tables {
-                let by_query = &counts[table_name];
-                // TS: `totalRowsConsidered += entries.reduce((a, e) => a + e[1], 0)`.
-                let table_total: u64 = by_query.values().copied().sum();
-                total_rows_considered += table_total;
-                // TS: `lc.info?.(tableName + ' VENDED: ', entries)` — the entries
-                // are the [(sql, count)] pairs for this table.
-                tracing::info!(
-                    query_id,
-                    hydration_time_ms,
-                    table = %table_name,
-                    entries = ?by_query,
-                    "{table_name} VENDED"
-                );
-            }
+        // TS iterates `this.#tables.keys()` — EVERY table the driver has a
+        // source for — not the keys of the vended map, and reads
+        // `debugDelegate?.getVendedRowCounts()[tableName] ?? {}` per table
+        // (pipeline-driver.ts:710-718). So a table that vended nothing still
+        // logs `<table> VENDED: []`, and with `trackRowsVended` off (prod: only
+        // `trackRowCountsVended` is set, zero-config.ts:1214) EVERY table logs
+        // an empty entry list and the total is 0. Iterating the vended map's
+        // keys instead emitted no per-table line at all in that configuration.
+        //
+        // Known difference: TS fills `#tables` LAZILY in `#getSource`
+        // (pipeline-driver.ts:1073), so its set is the tables touched so far;
+        // rust builds every source up front in `build_engine`, so this logs the
+        // full table set. Same shape, wider set — a consequence of eager source
+        // construction, not of this diagnostic.
+        let empty: HashMap<String, u64> = HashMap::new();
+        for table_name in table_names {
+            let by_query = vended.and_then(|c| c.get(table_name)).unwrap_or(&empty);
+            // TS: `totalRowsConsidered += entries.reduce((a, e) => a + e[1], 0)`.
+            let table_total: u64 = by_query.values().copied().sum();
+            total_rows_considered += table_total;
+            // TS: `lc.info?.(tableName + ' VENDED: ', entries)` — the entries
+            // are the [(sql, count)] pairs for this table.
+            tracing::info!(
+                query_id,
+                hydration_time_ms,
+                table = %table_name,
+                entries = ?by_query,
+                "{table_name} VENDED"
+            );
         }
         // TS: `lc.info?.(`Total rows considered: ${totalRowsConsidered}`)`.
         tracing::info!(
@@ -1071,6 +1083,10 @@ impl IvmPipelines {
     /// `finally` (pipeline-driver.ts:723-810).
     fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[HydrateQuery]) {
         *self.hydrate_context.borrow_mut() = None;
+        // TS `#tables.keys()` (pipeline-driver.ts:710) — collected before the
+        // `&mut` engine borrow below, and sorted because rust's map is unordered.
+        let mut vended_table_names: Vec<String> = self.sources.keys().cloned().collect();
+        vended_table_names.sort();
         let Some(eng) = self.engine.as_mut() else {
             return;
         };
@@ -1098,6 +1114,7 @@ impl IvmPipelines {
                     &r.query_id,
                     r.hydration_time_ms,
                     r.vended_row_counts.as_ref(),
+                    &vended_table_names,
                 );
             }
         }
@@ -2048,14 +2065,27 @@ mod tests {
             .with_ansi(false)
             .with_max_level(tracing::Level::INFO)
             .finish();
+        // `users` has NO vended rows: TS still logs `users VENDED: []` because it
+        // iterates `#tables.keys()`, so the table list drives the loop.
+        let tables = [
+            "comment".to_string(),
+            "issue".to_string(),
+            "users".to_string(),
+        ];
         tracing::subscriber::with_default(subscriber, || {
-            IvmPipelines::log_vended_row_counts("q1", 1234.0, Some(&counts));
+            IvmPipelines::log_vended_row_counts("q1", 1234.0, Some(&counts), &tables);
         });
 
         let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
             logged.contains("issue VENDED"),
             "per-table VENDED line for `issue`; got: {logged}"
+        );
+        // The regression this pins: a table with no vended rows must STILL log a
+        // VENDED line (TS loops `#tables.keys()`, not the vended map's keys).
+        assert!(
+            logged.contains("users VENDED"),
+            "a table that vended nothing still logs a VENDED line; got: {logged}"
         );
         assert!(
             logged.contains("comment VENDED"),
