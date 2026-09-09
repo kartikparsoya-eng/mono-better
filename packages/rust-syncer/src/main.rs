@@ -126,33 +126,16 @@ fn main() {
         builder.build()
     };
 
-    // Initialize tracing. Filter precedence: RUST_LOG (rust-native, full
-    // targeting syntax) else ZERO_LOG_LEVEL (the zero-cache config's level,
-    // forwarded by rust-syncer-bridge) else info. ZERO_LOG_FORMAT=json emits
-    // one JSON object per line — REQUIRED in deployments whose log pipeline
-    // parses the container stream as JSON (the parent zero-cache forwards
-    // this binary's stdout verbatim; a plaintext tracing line there is
-    // unparseable and drops the very error lines operators alert on). ANSI
-    // is always off: stdout is a pipe to the parent, never a tty.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .or_else(|_| {
-            env::var("ZERO_LOG_LEVEL").map(|l| tracing_subscriber::EnvFilter::new(l.trim()))
-        })
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let json_logs =
-        env::var("ZERO_LOG_FORMAT").is_ok_and(|f| f.trim().eq_ignore_ascii_case("json"));
-    if json_logs {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .init();
-    }
+    // Initialize tracing — filter precedence, the JSON switch and the envelope
+    // live in `server::logging::create_log_context` (port of server/logging.ts).
+    // TS `createLogContext({log}, 'syncer', workerIndex)` (server/syncer.ts →
+    // server/logging.ts:20): this process is the syncer worker; `SHARD` is the
+    // index the bridge hands it (config/zero_config.rs:208 reads the same var).
+    let worker_index: u32 = env::var("SHARD")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    rust_syncer::server::logging::create_log_context("syncer", worker_index);
 
     #[cfg(feature = "dhat-heap")]
     tracing::warn!("dhat-heap profiling active: dhat-heap.json written on graceful shutdown");

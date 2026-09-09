@@ -85,12 +85,17 @@ source; maintainer citations are in HTML comments.
 
 ### Log precedence
 
-<!-- main.rs:359-384 -->
+<!-- server/logging.rs::create_log_context (port of zero-cache/src/server/logging.ts) -->
 `RUST_LOG` (full targeting syntax) → else `ZERO_LOG_LEVEL` → else `info`.
 `ZERO_LOG_FORMAT=json` emits one JSON object per line — **required** when your
 log pipeline parses the container stream as JSON, since the parent forwards
 rust stdout verbatim and a plaintext line there is unparseable (you would drop
-exactly the error lines you alert on). ANSI is always off.
+exactly the error lines you alert on). ANSI is always off. The JSON line is the
+TS envelope (`shared/src/logging.ts` `consoleJsonLogSink`):
+`{"level","pid","worker":"syncer","workerIndex",<event fields>,"target","message"}`
+— `message` at the top level and last, nothing nested under `fields`, so the
+same `.message`/`.worker` selectors work on rust and TS lines. `target` (the
+tracing module path) is the one rust-only key.
 
 ### Why the shard default is 2x HOST cores (and quota-sized pools are wrong)
 
