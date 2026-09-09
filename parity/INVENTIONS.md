@@ -931,3 +931,27 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   wall time is not charged);
   `advance_gate::the_budget_reads_the_time_slice_timer_not_wall_clock`
   (rust-ivm: the budget reads this timer, not wall clock).
+
+## I-19 — 2 MiB page cache per serving SQLite connection (`SERVING_CONNECTION_CACHE_SIZE_KIB`)
+- **Files:** `rust-ivm/src/sqlite/mod.rs` (`apply_serving_page_cache`),
+  `snapshotter/snapshotter.rs` (`Snapshot::create`, default when no operator
+  value), `ivm/memory_source.rs` (`set_db_path`, the per-TableSource
+  connection).
+- **No TS twin (connection topology):** the vendored SQLite carries
+  zero-sqlite3's `SQLITE_DEFAULT_CACHE_SIZE=-16000` (16325e611, part of the
+  planner-stats define parity). TS opens two better-sqlite3 Databases per
+  view-syncer and its TableSources share them; rust opens one connection per
+  TableSource (~136 per client group on the sandbox) plus the snapshot pair, so
+  the identical per-connection default is ~70x the memory per client group.
+- **Evidence (2026-09-09 bisect, full-catalog differential oracle at a 24g
+  cgroup cap, hog query excluded):** `095af74e6` PASS 0 mismatches;
+  `16325e611`, `fcef5d9a7`, `0976394ad` OOM-killed by the memory cgroup at
+  24.6-24.9 GB anon RSS (kernel log), which also failed the oracle's resume
+  phase and G8. `3623d1da3` (2026-09-07) passed the same run.
+- **Contract (TS-observable):** none — the page cache changes speed only;
+  rows, order, versions and frames are identical. What it preserves is that a
+  client group's memory stays at the pre-16325e611 level.
+- **Tests:** `page_cache_budget_tests::serving_connections_get_a_2mib_page_cache_over_the_16mib_compiled_default`
+  (pins the compiled default AND the override); the ART G8 differential at
+  24g is the integration pin.
+

@@ -522,10 +522,12 @@ impl Snapshot {
             .map_err(|e| format!("pragma synchronous: {}", e))?;
         conn.pragma_update(None, "case_sensitive_like", "ON")
             .map_err(|e| format!("pragma case_sensitive_like: {}", e))?;
-        if let Some(cache_kib) = page_cache_size_kib {
-            conn.pragma_update(None, "cache_size", -(cache_kib))
-                .map_err(|e| format!("pragma cache_size: {}", e))?;
-        }
+        // I-19: the per-client-group budget unless the operator set one.
+        // (`SERVING_CONNECTION_CACHE_SIZE_KIB`, sqlite/mod.rs.)
+        let cache_kib =
+            page_cache_size_kib.unwrap_or(crate::sqlite::SERVING_CONNECTION_CACHE_SIZE_KIB);
+        conn.pragma_update(None, "cache_size", -(cache_kib))
+            .map_err(|e| format!("pragma cache_size: {}", e))?;
 
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))

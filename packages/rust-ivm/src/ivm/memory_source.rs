@@ -139,6 +139,9 @@ impl MemorySource {
             Ok(c) => {
                 let _ = c.busy_timeout(std::time::Duration::from_millis(5000));
                 let _ = c.execute_batch("PRAGMA case_sensitive_like = ON; PRAGMA query_only = ON;");
+                // I-19: one connection per TableSource, so the 16 MiB compiled
+                // default (zero-sqlite3 parity) must not apply per connection.
+                let _ = crate::sqlite::apply_serving_page_cache(&c);
                 // Install a cross-thread interrupt handle so an in-flight fetch
                 // can be cancelled out-of-band.
                 let handle = crate::sqlite::install_interrupt(&c);
