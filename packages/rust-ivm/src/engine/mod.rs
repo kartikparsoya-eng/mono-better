@@ -2417,7 +2417,9 @@ impl AdvanceStream {
         // timer.totalElapsed()`). Recorded only on the successful tail
         // below — the inactive-source early return, like TS's `continue`,
         // does not record.
-        let change_timer = std::time::Instant::now();
+        // TS `const start = timer.totalElapsed()` before the change
+        // (pipeline-driver.ts:981): the advance gate's clock IS that timer.
+        let change_start_ms = advance_gate.elapsed_ms();
 
         // PipelineDriver creates TableSources lazily and skips a diff entry
         // when no live pipeline reads that table. Rust keeps schema sources
@@ -2581,10 +2583,12 @@ impl AdvanceStream {
         }
 
         // This change fully processed — record its advance time (TS
-        // `#advanceTime.recordMs(elapsed, {table})` at pipeline-driver.ts).
+        // `#advanceTime.recordMs(elapsed, {table})` with `elapsed =
+        // timer.totalElapsed() - start`, pipeline-driver.ts:1034-1038): a
+        // process-clock delta, so time spent yielded is not charged.
         crate::otel_metrics::record_ivm_advance(
             &sc.table,
-            change_timer.elapsed().as_secs_f64() * 1000.0,
+            advance_gate.elapsed_ms() - change_start_ms,
         );
         Ok(())
     }

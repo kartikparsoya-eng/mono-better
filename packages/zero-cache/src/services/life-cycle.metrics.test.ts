@@ -61,3 +61,10 @@ test('records startup_duration if OTel starts after module import', async () => 
     metrics.disable();
   }
 });
+
+test('worker_startup_duration labels the rust syncer worker as syncer', async () => {
+  const {workerStartupMetricName} = await import('./life-cycle.ts');
+  expect(workerStartupMetricName('syncer (0)')).toBe('syncer');
+  expect(workerStartupMetricName('rust-syncer (0)')).toBe('syncer');
+  expect(workerStartupMetricName('zero-cache')).toBeUndefined();
+});

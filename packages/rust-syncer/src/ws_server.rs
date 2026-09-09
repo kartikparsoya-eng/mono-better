@@ -187,7 +187,9 @@ pub async fn accept_connection_with_limit(
         Ok(ws) => ws,
         Err(e) => {
             tracing::warn!("WebSocket handshake failed: {e}");
-            crate::metrics::record_ws_connection_failure(0, "handshake");
+            // Not a `connection_failures` sample: a failed upgrade never reaches
+            // TS's `#createConnection`, whose `recordConnectionFailure` is the
+            // only writer of that counter.
             return None;
         }
     };
@@ -275,7 +277,10 @@ pub async fn accept_connection_with_limit(
         Ok(params) => params,
         Err(e) => {
             tracing::warn!("connect params error: {e}");
-            crate::metrics::record_ws_connection_failure(protocol_version, "configuration");
+            crate::metrics::record_ws_connection_failure(
+                protocol_version,
+                crate::metrics::ConnectionFailureReason::Configuration,
+            );
             let error = ErrorBody::invalid_message(e.to_string());
             send_error_and_close(ws_stream, error).await;
             return None;
@@ -289,7 +294,10 @@ pub async fn accept_connection_with_limit(
     // `VersionNotSupported` (server-vs-client phrasing by which bound was
     // crossed) so a rejected client sees the same wire error as under TS.
     if !(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL..=PROTOCOL_VERSION).contains(&protocol_version) {
-        crate::metrics::record_ws_connection_failure(protocol_version, "protocol_version");
+        crate::metrics::record_ws_connection_failure(
+            protocol_version,
+            crate::metrics::ConnectionFailureReason::ProtocolVersion,
+        );
         let error = ErrorBody::version_not_supported(format!(
             "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{protocol_version}. The {} must be updated to a newer release.",
             if protocol_version > PROTOCOL_VERSION {

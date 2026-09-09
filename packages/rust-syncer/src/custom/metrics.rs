@@ -56,44 +56,34 @@ fn api_otel() -> &'static ApiOtel {
     })
 }
 
-fn api_request_metric_attrs(result: &'static str) -> [opentelemetry::KeyValue; 2] {
-    [
-        opentelemetry::KeyValue::new("operation", "query"),
-        opentelemetry::KeyValue::new("result", result),
-    ]
+/// The error fields TS lifts from a non-2xx API body
+/// (`apiResponseErrorMetricAttrs`, custom/fetch.ts:528-547: `error_kind =
+/// errorBody.kind`, `error_reason = errorBody.reason` when present).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApiErrorAttrs {
+    pub kind: String,
+    pub reason: Option<String>,
 }
 
-/// One completed API request (all attempts) — TS `apiRequests().add(1, attrs)`.
-pub fn record_api_request(result: &'static str) {
-    api_otel()
-        .requests
-        .add(1, &api_request_metric_attrs(result));
+impl ApiErrorAttrs {
+    /// TS parses the error body as JSON and reads `kind`/`reason`; a body
+    /// that is not an object with a string `kind` contributes nothing.
+    pub fn from_body(body: &str) -> Option<ApiErrorAttrs> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        let kind = v.get("kind")?.as_str()?.to_string();
+        let reason = v.get("reason").and_then(|r| r.as_str()).map(str::to_string);
+        Some(ApiErrorAttrs { kind, reason })
+    }
 }
 
-/// End-to-end request duration in ms (including retry sleeps).
-pub fn record_api_request_duration(elapsed_ms: f64) {
-    api_otel().request_duration.record(
-        elapsed_ms / 1000.0,
-        &[opentelemetry::KeyValue::new("operation", "query")],
-    );
-}
-
-/// One HTTP fetch attempt — TS `recordApiAttempt`, with the same attempt
-/// number + HTTP status attributes TS records (custom/metrics.ts:40-48), so a
-/// dashboard can split retries-by-attempt and errors-by-status.
-pub fn record_api_attempt(
-    result: &'static str,
-    will_retry: bool,
-    elapsed_ms: f64,
-    attempt: u32,
+/// `apiResponseErrorMetricAttrs` (custom/fetch.ts:528-547): `http_status_code`
+/// + `http_status_class` when there was a response, `error_kind` (+
+/// `error_reason`) when there was an error body.
+fn push_response_error_attrs(
+    attrs: &mut Vec<opentelemetry::KeyValue>,
     http_status: Option<u16>,
+    error: Option<&ApiErrorAttrs>,
 ) {
-    let mut attrs = vec![
-        opentelemetry::KeyValue::new("operation", "query"),
-        opentelemetry::KeyValue::new("result", result),
-        opentelemetry::KeyValue::new("will_retry", will_retry),
-        opentelemetry::KeyValue::new("attempt", attempt as i64),
-    ];
     if let Some(code) = http_status {
         attrs.push(opentelemetry::KeyValue::new(
             "http_status_code",
@@ -104,11 +94,85 @@ pub fn record_api_attempt(
             format!("{}xx", code / 100),
         ));
     }
+    if let Some(e) = error {
+        attrs.push(opentelemetry::KeyValue::new("error_kind", e.kind.clone()));
+        if let Some(reason) = &e.reason {
+            attrs.push(opentelemetry::KeyValue::new("error_reason", reason.clone()));
+        }
+    }
+}
+
+/// `apiRequestMetricAttrs` (custom/fetch.ts:516-526): base `{operation}` +
+/// `result` + `attempt_count` + the response/error attrs. `operation` is
+/// always `query` here — the push relay's fetches are TS's own
+/// (`rust-push-relay.ts`).
+pub fn api_request_attrs(
+    result: &'static str,
+    attempt_count: u32,
+    http_status: Option<u16>,
+    error: Option<&ApiErrorAttrs>,
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attrs = vec![
+        opentelemetry::KeyValue::new("operation", "query"),
+        opentelemetry::KeyValue::new("result", result),
+        opentelemetry::KeyValue::new("attempt_count", attempt_count as i64),
+    ];
+    push_response_error_attrs(&mut attrs, http_status, error);
+    attrs
+}
+
+/// `recordApiAttempt`'s attrs (custom/fetch.ts:549-568): base + `attempt` +
+/// `result` + `will_retry` + the response/error attrs.
+pub fn api_attempt_attrs(
+    result: &'static str,
+    will_retry: bool,
+    attempt: u32,
+    http_status: Option<u16>,
+    error: Option<&ApiErrorAttrs>,
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attrs = vec![
+        opentelemetry::KeyValue::new("operation", "query"),
+        opentelemetry::KeyValue::new("attempt", attempt as i64),
+        opentelemetry::KeyValue::new("result", result),
+        opentelemetry::KeyValue::new("will_retry", will_retry),
+    ];
+    push_response_error_attrs(&mut attrs, http_status, error);
+    attrs
+}
+
+/// One completed API request (all attempts) — TS's `finally` in
+/// `fetchFromAPIServer` (custom/fetch.ts:365-372): `apiRequests().add(1,
+/// attrs)` AND `apiRequestDuration().recordMs(…, attrs)` with the SAME attrs.
+pub fn record_api_request(
+    result: &'static str,
+    attempt_count: u32,
+    elapsed_ms: f64,
+    http_status: Option<u16>,
+    error: Option<&ApiErrorAttrs>,
+) {
+    let attrs = api_request_attrs(result, attempt_count, http_status, error);
+    api_otel().requests.add(1, &attrs);
+    api_otel()
+        .request_duration
+        .record(elapsed_ms / 1000.0, &attrs);
+}
+
+/// One HTTP fetch attempt — TS `recordApiAttempt` (custom/fetch.ts:549-568):
+/// `apiAttempts().add(1, attrs)` AND `apiAttemptDuration().recordMs(…, attrs)`
+/// with the SAME attrs.
+pub fn record_api_attempt(
+    result: &'static str,
+    will_retry: bool,
+    elapsed_ms: f64,
+    attempt: u32,
+    http_status: Option<u16>,
+    error: Option<&ApiErrorAttrs>,
+) {
+    let attrs = api_attempt_attrs(result, will_retry, attempt, http_status, error);
     api_otel().attempts.add(1, &attrs);
-    api_otel().attempt_duration.record(
-        elapsed_ms / 1000.0,
-        &[opentelemetry::KeyValue::new("operation", "query")],
-    );
+    api_otel()
+        .attempt_duration
+        .record(elapsed_ms / 1000.0, &attrs);
 }
 
 /// In-flight request delta (+1 on start, -1 on completion) — TS labels this by
@@ -117,4 +181,63 @@ pub fn record_api_in_flight(delta: i64) {
     api_otel()
         .in_flight
         .add(delta, &[opentelemetry::KeyValue::new("operation", "query")]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(attrs: &[opentelemetry::KeyValue]) -> Vec<String> {
+        attrs.iter().map(|kv| kv.key.to_string()).collect()
+    }
+
+    /// TS `apiRequestMetricAttrs` (custom/fetch.ts:516-526) +
+    /// `apiResponseErrorMetricAttrs` (:528-547). NON-VACUOUS: until 2026-09-09
+    /// request attrs were `{operation, result}` only and `request_duration`
+    /// carried `{operation}` alone.
+    #[test]
+    fn api_request_attrs_carry_attempt_count_status_class_and_error_kind() {
+        let err = ApiErrorAttrs::from_body(r#"{"kind":"auth","reason":"expired"}"#).unwrap();
+        let attrs = api_request_attrs("http_error", 3, Some(401), Some(&err));
+        assert_eq!(
+            keys(&attrs),
+            [
+                "operation",
+                "result",
+                "attempt_count",
+                "http_status_code",
+                "http_status_class",
+                "error_kind",
+                "error_reason"
+            ]
+        );
+        assert_eq!(attrs[4].value.to_string(), "4xx");
+        assert_eq!(attrs[5].value.to_string(), "auth");
+        // No response, no error body: base + result + attempt_count only.
+        assert_eq!(
+            keys(&api_request_attrs("config_error", 0, None, None)),
+            ["operation", "result", "attempt_count"]
+        );
+    }
+
+    /// TS `recordApiAttempt` attrs (custom/fetch.ts:549-568).
+    #[test]
+    fn api_attempt_attrs_carry_will_retry_status_and_error_kind() {
+        let err = ApiErrorAttrs::from_body(r#"{"kind":"internal"}"#).unwrap();
+        let attrs = api_attempt_attrs("http_error", true, 2, Some(503), Some(&err));
+        assert_eq!(
+            keys(&attrs),
+            [
+                "operation",
+                "attempt",
+                "result",
+                "will_retry",
+                "http_status_code",
+                "http_status_class",
+                "error_kind"
+            ]
+        );
+        assert!(ApiErrorAttrs::from_body("not json").is_none());
+        assert!(ApiErrorAttrs::from_body(r#"{"message":"x"}"#).is_none());
+    }
 }

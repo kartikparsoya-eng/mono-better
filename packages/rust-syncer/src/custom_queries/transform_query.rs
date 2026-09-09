@@ -381,7 +381,7 @@ async fn request_transform(
         .iter()
         .any(|pattern| url_match(pattern, &ctx.url))
     {
-        crate::custom::metrics::record_api_request("url_not_allowed");
+        crate::custom::metrics::record_api_request("url_not_allowed", 0, 0.0, None, None);
         return Err(transform_failed(
             "internal",
             format!(
@@ -397,7 +397,7 @@ async fn request_transform(
     // already carry the params zero-cache appends.
     for reserved in RESERVED_PARAMS {
         if url.query_pairs().any(|(k, _)| k == reserved) {
-            crate::custom::metrics::record_api_request("config_error");
+            crate::custom::metrics::record_api_request("config_error", 0, 0.0, None, None);
             return Err(transform_failed(
                 "internal",
                 format!("The query URL cannot contain the reserved query param \"{reserved}\""),
@@ -466,6 +466,7 @@ async fn post_transform_attempts(
                     attempt_ms,
                     attempt,
                     None,
+                    None,
                 );
                 if will_retry {
                     tokio::time::sleep(Duration::from_millis(get_backoff_delay_ms(attempt))).await;
@@ -478,6 +479,8 @@ async fn post_transform_attempts(
                     // non-`http` variant — no `status`, so `reason: 'internal'`
                     // per TS `transformFailedBodySchema` (not an auth failure).
                     transform_failed("internal", format!("query transform request failed: {e}")),
+                    None,
+                    None,
                 ));
             }
             Ok(resp) => {
@@ -485,12 +488,18 @@ async fn post_transform_attempts(
                 if !status.is_success() {
                     // 5xx can be transient (TS retries them); 4xx fails now.
                     let will_retry = status.is_server_error() && attempt < FETCH_MAX_ATTEMPTS;
+                    // TS reads the error body BEFORE recording the attempt so
+                    // `error_kind`/`error_reason` label it (custom/fetch.ts:
+                    // 528-547); a retried attempt is labeled the same way.
+                    let preview = resp.text().await.unwrap_or_default();
+                    let error = crate::custom::metrics::ApiErrorAttrs::from_body(&preview);
                     crate::custom::metrics::record_api_attempt(
                         "http_error",
                         will_retry,
                         attempt_ms,
                         attempt,
                         Some(status.as_u16()),
+                        error.as_ref(),
                     );
                     if will_retry {
                         tokio::time::sleep(Duration::from_millis(get_backoff_delay_ms(attempt)))
@@ -498,7 +507,6 @@ async fn post_transform_attempts(
                         attempt += 1;
                         continue;
                     }
-                    let preview = resp.text().await.unwrap_or_default();
                     // TS fetch.ts:222 `lc.warn?.('fetch from API server returned non-OK status', {url, status, bodyPreview})`.
                     tracing::warn!(
                         url = %url,
@@ -519,7 +527,7 @@ async fn post_transform_attempts(
                         obj.insert("status".into(), serde_json::json!(status.as_u16()));
                         obj.insert("bodyPreview".into(), serde_json::json!(preview));
                     }
-                    break Err(("http_error", failure));
+                    break Err(("http_error", failure, Some(status.as_u16()), error));
                 }
                 match resp.json::<Value>().await {
                     Ok(v) => {
@@ -529,8 +537,9 @@ async fn post_transform_attempts(
                             attempt_ms,
                             attempt,
                             Some(status.as_u16()),
+                            None,
                         );
-                        break Ok(v);
+                        break Ok((v, status.as_u16()));
                     }
                     Err(e) => {
                         // TS fetch.ts:294 `lc.warn?.('failed to parse response', …)`.
@@ -541,6 +550,7 @@ async fn post_transform_attempts(
                             attempt_ms,
                             attempt,
                             Some(status.as_u16()),
+                            None,
                         );
                         break Err((
                             "parse_error",
@@ -548,6 +558,8 @@ async fn post_transform_attempts(
                                 "internal",
                                 format!("invalid transform response: {e}"),
                             ),
+                            Some(status.as_u16()),
+                            None,
                         ));
                     }
                 }
@@ -555,15 +567,28 @@ async fn post_transform_attempts(
         }
     };
     let request_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+    // TS `fetchFromAPIServer`'s `finally` (custom/fetch.ts:365-372): one
+    // `apiRequests` + `apiRequestDuration` sample carrying the attempt count,
+    // the last response's status and the error body's kind/reason.
     match outcome {
-        Ok(v) => {
-            crate::custom::metrics::record_api_request("success");
-            crate::custom::metrics::record_api_request_duration(request_ms);
+        Ok((v, status)) => {
+            crate::custom::metrics::record_api_request(
+                "success",
+                attempt,
+                request_ms,
+                Some(status),
+                None,
+            );
             Ok(v)
         }
-        Err((result, body)) => {
-            crate::custom::metrics::record_api_request(result);
-            crate::custom::metrics::record_api_request_duration(request_ms);
+        Err((result, body, status, error)) => {
+            crate::custom::metrics::record_api_request(
+                result,
+                attempt,
+                request_ms,
+                status,
+                error.as_ref(),
+            );
             Err(body)
         }
     }

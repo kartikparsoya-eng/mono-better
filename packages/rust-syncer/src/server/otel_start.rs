@@ -32,6 +32,16 @@ fn metrics_enabled() -> bool {
     .any(|k| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false))
 }
 
+/// The instruments exported as base2 exponential histograms — TS
+/// `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (server/otel-start.ts), verbatim.
+/// `zero.sync.e2e_serving_lag` is created with `getOrCreateNativeHistogram`
+/// in TS but is NOT in that list, so it is an explicit-bucket histogram on
+/// both arms.
+pub(crate) const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 2] = [
+    "zero.sync.view_syncer_hydration",
+    "zero.sync.view_syncer_lag",
+];
+
 /// Initialize OTLP metrics export and install the global meter provider. Returns
 /// the provider (keep it alive for the process lifetime; drop/`shutdown()` on
 /// exit flushes a final batch). Returns `None` when metrics are disabled, so the
@@ -126,11 +136,6 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
     // metric exists to expose) and the two implementations exported different
     // OTLP data types, so dashboards could not aggregate them together.
     // max_size 160 matches the JS SDK's exponential-histogram default.
-    const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 3] = [
-        "zero.sync.e2e_serving_lag",
-        "zero.sync.view_syncer_hydration",
-        "zero.sync.view_syncer_lag",
-    ];
     let native_histogram_view =
         |instrument: &opentelemetry_sdk::metrics::Instrument|
          -> Option<opentelemetry_sdk::metrics::Stream> {
@@ -158,4 +163,25 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
     global::set_meter_provider(provider.clone());
     tracing::info!("OTLP metrics export enabled (meter=zero)");
     Some(provider)
+}
+
+#[cfg(test)]
+mod tests {
+    /// TS `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (server/otel-start.ts) has exactly
+    /// these two. NON-VACUOUS: until 2026-09-09 rust also listed
+    /// `zero.sync.e2e_serving_lag`, exporting it as an exponential histogram
+    /// while TS exports explicit buckets.
+    #[test]
+    fn native_histogram_list_is_the_ts_list() {
+        // Compared as slices, not arrays: an added/removed instrument must fail the
+        // assertion at runtime rather than only failing to type-check.
+        assert_eq!(
+            super::NATIVE_HISTOGRAM_INSTRUMENTS.as_slice(),
+            [
+                "zero.sync.view_syncer_hydration",
+                "zero.sync.view_syncer_lag"
+            ]
+            .as_slice()
+        );
+    }
 }

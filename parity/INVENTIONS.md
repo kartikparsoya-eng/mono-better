@@ -51,6 +51,11 @@ guarantees, error semantics) versus TS.
     the CG thread — faithful, because TS also runs `handleMessage` before it can
     throw, and the throw only closes the SAME client's connection (per-client, not
     cross-client).
+- **Instruments (rust-only, no TS twin):** `zero.sync.failed-client-groups{reason}`
+  — a whole client group failed (`executor_exit`, `panic`, `sync`); TS has no
+  group-level failure counter because its group is a promise, not a thread.
+  `zero.sync.lock-wait-time` is NOT rust-only: it is TS's `#lockWaitTime`
+  recorded at this model's dequeue points (`dispatch_cg_message`).
 - **Tests:** `router::tests::connected_ack_is_decoupled_from_a_blocked_cg_hydrate`
   (ack independence), `on_inbound_ping_answers_pong` (pong reply),
   `slow_client_shed_closes_with_rehome_error_then_close_1011` (shed error frame),
@@ -206,6 +211,9 @@ guarantees, error semantics) versus TS.
   (2026-09-04: rust emitted `null` → client `InvalidMessage` disconnect instead
   of a backoff; `protocol/error.rs`, pinned by `error_body_wire_parity_against_ts`
   + `constructors_omit_unset_optional_fields`).
+- **Instruments (rust-only, no TS twin):** `zero.sync.websocket.sheds{reason}`,
+  `zero.sync.websocket.queued-frames`, `zero.sync.websocket.queued-bytes` — the
+  shed decision and the per-socket backlog it reads; TS has no writer queue.
 - **Tests:** `ws_server` frame-order tests +
   `ws_server::tests::slow_client_shed_closes_with_rehome_error_then_close_1011`
   (shed → Rehome error frame then close 3000; non-vacuous — a bare close fails it).
@@ -365,6 +373,10 @@ guarantees, error semantics) versus TS.
 - **Contract:** the plan chosen is identical to TS `planQuery(ast, costModel)` for
   the same replica state; the cache only avoids recomputation, never changes the
   plan.
+- **Instruments (rust-only, no TS twin):** `zero.sync.cvr.flush-failures`,
+  `zero.sync.cvr.pool-connections`, `zero.sync.cvr.pool-idle-connections` — the
+  write-behind's failure count and the sqlx pool it drains into; TS flushes
+  inline on its postgres.js connection and has neither.
 - **Tests:** `g8_mychannelparticipations_real_ast`, diff-oracle full-catalog.
 
 ## I-8 — Promote the ported ConnectionContextManager to single live owner

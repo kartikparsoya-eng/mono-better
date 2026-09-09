@@ -188,9 +188,13 @@ fn serving_lag_otel() -> &'static ServingLagOtel {
                      pipeline: the upstream transaction commit, replication to the replica, IVM \
                      advancement, CVR flush, and pokeEnd. Recorded once per served version.",
                 )
-                // No explicit boundaries: the SDK view in otel.rs exports this
-                // instrument as a base2 exponential histogram (TS native-
-                // histogram parity; fixed 30s-capped buckets truncated the tail).
+                // No explicit boundaries: SDK default buckets. TS creates this
+                // with `getOrCreateNativeHistogram` but does NOT list it in
+                // `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (server/otel-start.ts) —
+                // only view_syncer_hydration / view_syncer_lag get the
+                // exponential view — so it is exported as an explicit-bucket
+                // histogram there too (`server/otel_start.rs`
+                // `NATIVE_HISTOGRAM_INSTRUMENTS`).
                 .build(),
             e2e_serving_lag_clamps: m
                 .u64_counter("zero.sync.e2e_serving_lag_clamps")
@@ -378,6 +382,44 @@ fn view_syncer_hydration_otel() -> &'static OtelHistogram<f64> {
     })
 }
 
+/// `zero.sync.lock-wait-time` — TS view-syncer's `#lockWaitTime`
+/// (`getOrCreateLatencyHistogram('sync', 'lock-wait-time', 'Time spent waiting
+/// to acquire the ViewSyncer lock.')`, view-syncer.ts:366-370), recorded in
+/// `#runInLockWithCVR` the moment `#lock.withLock` grants the lock (:459-461).
+/// Rust's lock is the client group's serial message queue (INVENTIONS.md I-1):
+/// the wait is the time from enqueue to the CG task dequeuing the message —
+/// recorded in `dispatch_cg_message` for every message kind that carries an
+/// `enqueued_at` (new connection, inbound frame, change-streamer notification).
+fn lock_wait_time_otel() -> &'static OtelHistogram<f64> {
+    static INSTRUMENT: OnceLock<OtelHistogram<f64>> = OnceLock::new();
+    INSTRUMENT.get_or_init(|| {
+        global::meter("zero")
+            .f64_histogram("zero.sync.lock-wait-time")
+            .with_unit("s")
+            .with_description("Time spent waiting to acquire the ViewSyncer lock.")
+            .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+            .build()
+    })
+}
+
+/// Record one lock wait (ms) — TS `#lockWaitTime.recordMs(performance.now() -
+/// lockWaitStart)` (view-syncer.ts:461).
+pub fn record_lock_wait_ms(elapsed_ms: f64) {
+    #[cfg(test)]
+    {
+        *LAST_LOCK_WAIT_MS.lock().unwrap() = Some(elapsed_ms);
+    }
+    lock_wait_time_otel().record(elapsed_ms / 1000.0, &[]);
+}
+
+/// TEST SEAMS (rust-only): the last value handed to an instrument, so a unit
+/// test can pin WHAT a site records without an OTLP reader. The global meter
+/// is a no-op under `cargo test`, so this is the only observable.
+#[cfg(test)]
+pub(crate) static LAST_LOCK_WAIT_MS: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) static LAST_ADVANCE_MS: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
 /// Record one view-syncer hydration observation (ms) — TS
 /// `#viewSyncerHydration.recordMs(performance.now() - start)`.
 pub fn record_view_syncer_hydration(elapsed_ms: f64) {
@@ -455,31 +497,16 @@ pub fn record_client_protocol_version(protocol_version: u32) {
     MAX_PROTOCOL_VERSION.fetch_max(protocol_version as u64, Ordering::Relaxed);
 }
 
-/// `zero.server.startup_duration` — TS `startupDuration()`
-/// (services/life-cycle.ts:74-84), recorded once via `recordStartupDurationMs`
-/// with `{component: 'dispatcher'}` when zero-cache reaches its ready signal.
-/// Rust has no `life_cycle.rs` twin, so it folds into the startup path (main.rs)
-/// keeping the TS metric name 1:1.
-///
-/// TS's sibling `server.worker_startup_duration` has NO rust twin: it times a
-/// child WORKER process reaching ready, and rust is a single process whose
-/// shards are threads, so there is no worker start to time.
-pub fn record_startup_duration_ms(duration_ms: f64) {
-    static STARTUP: OnceLock<OtelHistogram<f64>> = OnceLock::new();
-    STARTUP
-        .get_or_init(|| {
-            global::meter("zero")
-                .f64_histogram("zero.server.startup_duration")
-                .with_unit("s")
-                .with_description("Duration from starting zero-cache to its ready signal.")
-                .build()
-        })
-        .record(
-            duration_ms / 1000.0,
-            &[KeyValue::new("component", "dispatcher")],
-        );
-}
-
+/// `zero.server.startup_duration` has NO rust twin: TS records it from the
+/// MAIN process only (`recordStartupDurationMs`, main.ts:426 → life-cycle.ts:82,
+/// `{component: 'dispatcher'}`), and in the rust image that main process is the
+/// node zero-cache that spawns this binary. The rust process is a WORKER —
+/// `processes.addWorker(emitter, 'user-facing', `rust-syncer (${id})`)`
+/// (main.ts:268) — whose startup the parent times as
+/// `zero.server.worker_startup_duration{worker: 'syncer', type: 'user-facing'}`
+/// (life-cycle.ts:227), exactly as it does for a TS syncer worker. Until
+/// 2026-09-09 rust also recorded `startup_duration{component: 'dispatcher'}`
+/// from here, double-counting the dispatcher's series.
 /// Register the two process-scoped dispatcher gauges. Called once from the
 /// serving bootstrap, after which the callbacks keep firing.
 pub fn register_process_gauges() {
@@ -579,14 +606,49 @@ pub fn record_ws_connection_success(protocol_version: u32) {
     ws_connection_successes().add(1, &[proto_attr(protocol_version)]);
 }
 
-/// `reason` follows the TS reason vocabulary (`auth`, `protocol_version`,
-/// `configuration`, `internal`, ...) plus rust-specific handshake stages.
-pub fn record_ws_connection_failure(protocol_version: u32, reason: &str) {
+/// The `reason` vocabulary of TS `recordConnectionFailure` (workers/syncer.ts:
+/// 571 `configuration`, 608 `auth`, 613/694 `internal`, 637 `user_mismatch`,
+/// 707 `protocol_version`) — every value TS can emit and nothing else, so the
+/// two arms' `zero.sync.websocket.connection_failures{reason}` series line up.
+/// A failed WebSocket upgrade never reaches TS's `#createConnection`, so it is
+/// not a connection failure there and is not counted here either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionFailureReason {
+    Auth,
+    Configuration,
+    /// Any exception while establishing the connection (TS's catch-all,
+    /// syncer.ts:613/694) — rust's capacity/executor-shutdown Rehome included.
+    Internal,
+    ProtocolVersion,
+    UserMismatch,
+}
+
+impl ConnectionFailureReason {
+    pub const ALL: [ConnectionFailureReason; 5] = [
+        ConnectionFailureReason::Auth,
+        ConnectionFailureReason::Configuration,
+        ConnectionFailureReason::Internal,
+        ConnectionFailureReason::ProtocolVersion,
+        ConnectionFailureReason::UserMismatch,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionFailureReason::Auth => "auth",
+            ConnectionFailureReason::Configuration => "configuration",
+            ConnectionFailureReason::Internal => "internal",
+            ConnectionFailureReason::ProtocolVersion => "protocol_version",
+            ConnectionFailureReason::UserMismatch => "user_mismatch",
+        }
+    }
+}
+
+pub fn record_ws_connection_failure(protocol_version: u32, reason: ConnectionFailureReason) {
     ws_connection_failures().add(
         1,
         &[
             proto_attr(protocol_version),
-            KeyValue::new("reason", reason.to_string()),
+            KeyValue::new("reason", reason.as_str()),
         ],
     );
 }
@@ -809,11 +871,20 @@ impl Metrics {
         self.otel.hydration_time.record(elapsed_ms / 1000.0, &[]);
     }
 
-    /// Record an advance and its wall-clock (ms). Mirrors TS
-    /// `zero.sync.advance-time` (seconds).
-    pub fn record_advance(&self, elapsed_ms: f64) {
+    /// Record a completed advance and its PROCESS time (ms) — TS
+    /// `#transactionAdvanceTime.recordMs(totalProcessTime)` with
+    /// `totalProcessTime = timer.totalElapsed()` (view-syncer.ts:2628-2632):
+    /// the TimeSliceTimer's yield-excluded time, not wall-clock, recorded once
+    /// per successful `#advancePipelines` after pokeEnd. A reset
+    /// (`ResetPipelinesSignal`) throws past the record, so a reset advance is
+    /// NOT counted.
+    pub fn record_advance(&self, process_time_ms: f64) {
+        #[cfg(test)]
+        {
+            *LAST_ADVANCE_MS.lock().unwrap() = Some(process_time_ms);
+        }
         self.advances.fetch_add(1, Ordering::Relaxed);
-        self.otel.advance_time.record(elapsed_ms / 1000.0, &[]);
+        self.otel.advance_time.record(process_time_ms / 1000.0, &[]);
     }
 
     /// Record a pipeline reset — TS `zero.sync.pipeline-resets`.
@@ -845,6 +916,27 @@ impl Metrics {
 
 #[cfg(test)]
 mod tests {
+    /// TS `recordConnectionFailure` reasons, verbatim (workers/syncer.ts:571,
+    /// 608, 613, 637, 694, 707). NON-VACUOUS: the pre-2026-09-09 sites emitted
+    /// `handshake` and `rehome`, which TS never does.
+    #[test]
+    fn connection_failure_reasons_are_the_ts_vocabulary() {
+        let got: Vec<&str> = super::ConnectionFailureReason::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "auth",
+                "configuration",
+                "internal",
+                "protocol_version",
+                "user_mismatch"
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

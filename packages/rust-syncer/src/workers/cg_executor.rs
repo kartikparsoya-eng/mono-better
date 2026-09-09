@@ -43,6 +43,9 @@ pub enum CGMessage {
     NewConnection {
         params: Box<ConnectParams>,
         sink: DirectWebSocketSink,
+        /// When the connection was queued for the CG task — the TS
+        /// `#runInLockWithCVR` lock wait (`zero.sync.lock-wait-time`).
+        enqueued_at: std::time::Instant,
     },
     /// An inbound WS text frame for a connection (forwarded from the WS reader).
     /// `client_id`/`ws_id` are `Arc<str>` so the per-frame forward is a refcount
@@ -67,7 +70,12 @@ pub enum CGMessage {
         ws_id: Arc<str>,
     },
     /// Change-streamer notification — new data is available; advance + poke.
-    Notification(serde_json::Value),
+    Notification {
+        value: serde_json::Value,
+        /// When the notification was queued — TS's advance also runs under
+        /// `#runInLockWithCVR`, so its wait is a lock wait too.
+        enqueued_at: std::time::Instant,
+    },
     /// The CG should shut down (no more connections).
     Shutdown,
 }

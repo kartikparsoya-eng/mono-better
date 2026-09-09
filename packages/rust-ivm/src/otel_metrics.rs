@@ -46,14 +46,25 @@ fn advance_time() -> &'static Histogram<f64> {
     })
 }
 
-/// Record the wall-clock of processing a single change during an advance,
-/// tagged by `table` — TS `#advanceTime.recordMs(elapsed, {table})`.
+/// Record the PROCESS time of one change during an advance, tagged by `table`
+/// — TS `#advanceTime.recordMs(elapsed, {table})` with `elapsed =
+/// timer.totalElapsed() - start` (pipeline-driver.ts:1034-1038): a delta of the
+/// view-syncer's TimeSliceTimer (yields excluded), which the engine reads
+/// through the advance gate's clock — not wall-clock.
 pub fn record_ivm_advance(table: &str, elapsed_ms: f64) {
+    *LAST_IVM_ADVANCE_MS.lock().unwrap() = Some(elapsed_ms);
     advance_time().record(
         elapsed_ms / 1000.0,
         &[KeyValue::new("table", table.to_string())],
     );
 }
+
+/// TEST SEAM (rust-only): the last value handed to `zero.sync.ivm.advance-time`,
+/// so an integration test can pin WHAT the engine records (the global meter is
+/// a no-op under `cargo test`, and integration tests cannot see `cfg(test)`
+/// items). Not part of the production contract.
+#[doc(hidden)]
+pub static LAST_IVM_ADVANCE_MS: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
 
 fn conflict_rows_deleted() -> &'static Counter<u64> {
     static CONFLICT_ROWS_DELETED: OnceLock<Counter<u64>> = OnceLock::new();

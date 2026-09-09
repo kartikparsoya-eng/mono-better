@@ -37,7 +37,7 @@ export const FORCEFUL_SHUTDOWN = ['SIGQUIT', 'SIGABRT'] as const;
 
 type GracefulShutdownSignal = (typeof GRACEFUL_SHUTDOWN)[number];
 
-function workerStartupMetricName(name: string) {
+export function workerStartupMetricName(name: string) {
   if (name === 'zero-cache') {
     return undefined;
   }
@@ -56,7 +56,9 @@ function workerStartupMetricName(name: string) {
     }
     return 'other';
   }
-  if (name.startsWith('syncer')) {
+  if (name.startsWith('syncer') || name.startsWith('rust-syncer')) {
+    // The rust syncer (`rust-syncer (${id})`, server/main.ts) IS the syncer
+    // worker: it replaces the TS syncer workers one for one.
     return 'syncer';
   }
   if (name.startsWith('reaper')) {

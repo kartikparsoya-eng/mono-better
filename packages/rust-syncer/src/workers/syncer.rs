@@ -897,7 +897,10 @@ impl Syncer {
                         user_id = ?user_id,
                         "Rejecting sync connection during initial auth resolution"
                     );
-                    crate::metrics::record_ws_connection_failure(pv, "auth");
+                    crate::metrics::record_ws_connection_failure(
+                        pv,
+                        crate::metrics::ConnectionFailureReason::Auth,
+                    );
                     // Send error and close 3000 (TS syncer.ts:610 `ws.close(3000, ...)`).
                     ctx.sink.fail_with_code(error_body, Some(3000));
                     return;
@@ -920,7 +923,12 @@ impl Syncer {
                 // spread-the-load signal. Covers both cap-overflow and
                 // executor-shutdown Errs from get_or_create_cg.
                 tracing::warn!("rehoming connection for {client_group_id}: {message}");
-                crate::metrics::record_ws_connection_failure(pv, "rehome");
+                // TS: an exception while establishing the connection is `internal`
+                // (syncer.ts:613/694); there is no `rehome` reason in TS.
+                crate::metrics::record_ws_connection_failure(
+                    pv,
+                    crate::metrics::ConnectionFailureReason::Internal,
+                );
                 ctx.sink
                     .fail_with_code(crate::protocol::ErrorBody::rehome(message), Some(3000));
                 return;
@@ -951,7 +959,10 @@ impl Syncer {
                     group.pinned_user_id
                 );
                 decrement_nonzero(&cg_handle.connection_count);
-                crate::metrics::record_ws_connection_failure(pv, "user_mismatch");
+                crate::metrics::record_ws_connection_failure(
+                    pv,
+                    crate::metrics::ConnectionFailureReason::UserMismatch,
+                );
                 // TS syncer.ts:639 `ws.close(3000, error.message)`.
                 ctx.sink.fail_with_code(error, Some(3000));
                 return;
@@ -1018,6 +1029,7 @@ impl Syncer {
         match cg_handle.send(CGMessage::NewConnection {
             params: Box::new(params),
             sink,
+            enqueued_at: std::time::Instant::now(),
         }) {
             Ok(()) => {
                 tokio::spawn(forward_inbound(
@@ -1332,7 +1344,12 @@ impl Syncer {
     /// Returns false if no CG thread exists for the given ID.
     pub fn send_notification(&self, cg_id: &str, notification: serde_json::Value) -> bool {
         if let Some(handle) = self.cg_handles.get(cg_id) {
-            handle.send(CGMessage::Notification(notification)).is_ok()
+            handle
+                .send(CGMessage::Notification {
+                    value: notification,
+                    enqueued_at: std::time::Instant::now(),
+                })
+                .is_ok()
         } else {
             false
         }
@@ -1363,7 +1380,10 @@ impl Syncer {
         for entry in self.cg_handles.iter() {
             if entry
                 .value()
-                .send(CGMessage::Notification(notification.clone()))
+                .send(CGMessage::Notification {
+                    value: notification.clone(),
+                    enqueued_at: std::time::Instant::now(),
+                })
                 .is_ok()
             {
                 sent += 1;

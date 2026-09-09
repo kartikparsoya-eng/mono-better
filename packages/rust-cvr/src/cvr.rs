@@ -508,16 +508,11 @@ impl CVRConfigDrivenUpdater {
         // Find new/changed desired queries.
         let mut needed: HashSet<String> = HashSet::new();
 
-        // Port of TS `recordQueryForTelemetry` (cvr.ts:335-342): count NEW and
-        // REACTIVATED desired queries as 'crud' (has an AST) or 'custom'
-        // (name + args) — F-CVR-3.
-        let record_query_for_telemetry = |q: &DesiredQuerySpec| {
-            if q.ast.is_some() {
-                crate::otel_metrics::record_query("crud");
-            } else if q.name.is_some() && q.args.is_some() {
-                crate::otel_metrics::record_query("custom");
-            }
-        };
+        // TS `recordQueryForTelemetry` (cvr.ts:335-342) feeds ONLY the
+        // anonymous-telemetry meter (anonymous-otel-start.ts:181-187, a separate
+        // MeterProvider with its own exporter) — nothing on the operator's OTLP
+        // pipeline. Rust has no anonymous-telemetry subsystem, so there is
+        // nothing to record here.
 
         for q in queries {
             let ttl = q.ttl.unwrap_or(DEFAULT_TTL_MS);
@@ -525,7 +520,6 @@ impl CVRConfigDrivenUpdater {
             match query {
                 None => {
                     // New query - record for telemetry
-                    record_query_for_telemetry(q);
                     needed.insert(q.hash.clone());
                     continue;
                 }
@@ -537,13 +531,11 @@ impl CVRConfigDrivenUpdater {
                     match old_client_state {
                         None => {
                             // Reactivated query - record for telemetry
-                            record_query_for_telemetry(q);
                             needed.insert(q.hash.clone());
                             continue;
                         }
                         Some(state) if state.inactivated_at.is_some() => {
                             // Reactivated query - record for telemetry
-                            record_query_for_telemetry(q);
                             needed.insert(q.hash.clone());
                             continue;
                         }

@@ -3820,7 +3820,9 @@ impl ViewSyncerService {
                         result.reset_reason.is_some()
                     ),
                 );
-                self.metrics.record_advance(advance_ms);
+                // `zero.sync.advance-time` is recorded inside `advance_and_sync`
+                // (TS `#advancePipelines`, view-syncer.ts:2631) from the process
+                // clock, and only on the success path — see `Metrics::record_advance`.
                 if let Some(reason) = result.reset_reason.clone() {
                     // The engine could not advance in place (snapshot/schema
                     // drift). Port of TS `ResetPipelinesSignal` handling: the
@@ -4241,7 +4243,13 @@ pub(crate) async fn cg_event_loop(
         // Surface initialization failure to the accepted socket instead of
         // dropping the queued connection silently.
         state_rc.borrow().accepting.store(false, Ordering::SeqCst);
-        if let Some(CGMessage::NewConnection { params, sink }) = rx.recv().await {
+        if let Some(CGMessage::NewConnection {
+            params,
+            sink,
+            enqueued_at,
+        }) = rx.recv().await
+        {
+            crate::metrics::record_lock_wait_ms(enqueued_at.elapsed().as_secs_f64() * 1000.0);
             let state = state_rc.borrow();
             let mut global = lock_unpoisoned(&state.global_connections);
             if global
@@ -4415,7 +4423,7 @@ pub(crate) async fn cg_event_loop(
     // fails at `tx.send` once `rx` drops and is rehomed there
     // (syncer.rs `Client-group worker restarted`).
     while let Ok(msg) = rx.try_recv() {
-        if let CGMessage::NewConnection { params, sink } = msg {
+        if let CGMessage::NewConnection { params, sink, .. } = msg {
             reject_queued_connection(&state_rc.borrow(), &params, sink);
         }
     }
@@ -4501,7 +4509,13 @@ async fn dispatch_cg_message(
     msg: CGMessage,
 ) -> bool {
     match msg {
-        CGMessage::NewConnection { params, sink } => {
+        CGMessage::NewConnection {
+            params,
+            sink,
+            enqueued_at,
+        } => {
+            // TS `#runInLockWithCVR` lock wait (view-syncer.ts:459-461).
+            crate::metrics::record_lock_wait_ms(enqueued_at.elapsed().as_secs_f64() * 1000.0);
             let accepted_at = std::time::Instant::now();
             let piggyback = state_rc.borrow_mut().on_new_connection(*params, sink).await;
             if crate::trace::enabled() {
@@ -4528,6 +4542,9 @@ async fn dispatch_cg_message(
             enqueued_at,
         } => {
             let queue_wait = enqueued_at.elapsed();
+            // TS `#runInLockWithCVR` lock wait (view-syncer.ts:459-461): the
+            // client message waited this long for the group's serial lock.
+            crate::metrics::record_lock_wait_ms(queue_wait.as_secs_f64() * 1000.0);
             let handled_at = std::time::Instant::now();
             let handled_cpu = crate::trace::thread_cpu_ms();
             // The frame's message kind (`["changeDesiredQueries", ...]` → the
@@ -4561,12 +4578,26 @@ async fn dispatch_cg_message(
         CGMessage::CloseConnection { client_id, ws_id } => {
             state_rc.borrow_mut().close_connection(&client_id, &ws_id)
         }
-        CGMessage::Notification(n) => {
+        CGMessage::Notification {
+            value: n,
+            enqueued_at,
+        } => {
+            // TS `#runInLockWithCVR` lock wait (view-syncer.ts:459-461): the
+            // advance waited this long behind the group's other work.
+            crate::metrics::record_lock_wait_ms(enqueued_at.elapsed().as_secs_f64() * 1000.0);
             let mut merged = n;
             let mut merged_count = 1u32;
             loop {
                 match rx.try_recv() {
-                    Ok(CGMessage::Notification(next)) => {
+                    Ok(CGMessage::Notification {
+                        value: next,
+                        enqueued_at,
+                    }) => {
+                        // Each coalesced notification was its own lock task in
+                        // TS and would have recorded its own wait.
+                        crate::metrics::record_lock_wait_ms(
+                            enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                        );
                         merged = merge_notifications(merged, next);
                         merged_count += 1;
                     }
@@ -6686,6 +6717,55 @@ mod tests {
         }
     }
 
+    /// TS `#runInLockWithCVR` records `zero.sync.lock-wait-time` when the lock
+    /// is granted (view-syncer.ts:459-461). Rust's lock is the CG message queue:
+    /// a frame enqueued 40 ms ago records a wait of at least 40 ms when
+    /// `dispatch_cg_message` picks it up. NON-VACUOUS: before 2026-09-09 no
+    /// site recorded the instrument — the seam stays `None`.
+    #[test]
+    fn lock_wait_time_is_recorded_when_the_cg_dequeues_a_frame() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(IssueTableFactory {
+            handle: rt.handle().clone(),
+        });
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(ToggleAuthValidator { valid }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        seed_test_client_schema(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let state_rc = Rc::new(RefCell::new(state));
+        let (_cg_tx, mut cg_rx) = tokio::sync::mpsc::unbounded_channel::<CGMessage>();
+        let mut stashed = std::collections::VecDeque::new();
+        *crate::metrics::LAST_LOCK_WAIT_MS.lock().unwrap() = None;
+        let enqueued_at = std::time::Instant::now() - std::time::Duration::from_millis(40);
+        rt.block_on(dispatch_cg_message(
+            &state_rc,
+            &mut cg_rx,
+            &mut stashed,
+            CGMessage::Inbound {
+                client_id: Arc::from("c1"),
+                ws_id: Arc::from("ws1"),
+                text: r#"["changeDesiredQueries",{"desiredQueriesPatch":[]}]"#.to_string(),
+                enqueued_at,
+            },
+        ));
+        let recorded = crate::metrics::LAST_LOCK_WAIT_MS.lock().unwrap().take();
+        let recorded = recorded.expect("dequeuing a frame records zero.sync.lock-wait-time");
+        assert!(
+            recorded >= 40.0,
+            "lock wait covers the queue time, got {recorded} ms"
+        );
+    }
+
     /// TS counts `zero.sync.hydration` once per `#addAndRemoveQueries` batch
     /// (view-syncer.ts:2093 guard → :2300 `hydrations.add(1)`), never per
     /// config pass. Rust counted every `handle_desired_queries` pass, so the
@@ -8446,6 +8526,7 @@ mod tests {
         tx.send(CGMessage::NewConnection {
             params: Box::new(test_params("c1", "ws1")),
             sink: DirectWebSocketSink::new(ws_tx),
+            enqueued_at: std::time::Instant::now(),
         })
         .unwrap();
         drop(tx);
@@ -12953,6 +13034,7 @@ impl ViewSyncerService {
 
         // 1:1 cookie formatting — see the twin note at the config-path site.
         let version = version_to_cookie(&flushed_cvr.version);
+        self.metrics.record_advance(total_process_time_ms);
         Ok(SyncResult {
             cvr: flushed_cvr,
             version,
@@ -12960,7 +13042,7 @@ impl ViewSyncerService {
             num_changes,
             reset_reason: None,
             reset_msg: None,
-            process_time_ms: 0.0,
+            process_time_ms: total_process_time_ms,
         })
     }
 
@@ -14205,6 +14287,7 @@ mod engine_tests {
         engine
             .last_row_count
             .store(7, std::sync::atomic::Ordering::Relaxed);
+        *crate::metrics::LAST_ADVANCE_MS.lock().unwrap() = None;
         let result = engine
             .advance_and_sync(make_cvr(), "v1".to_string(), &["ws1".to_string()], 0, 0, 0)
             .await;
@@ -14213,6 +14296,17 @@ mod engine_tests {
 
         cleanup();
         let result = result.expect("advance_and_sync must not error/panic");
+        // `zero.sync.advance-time` — TS records `timer.totalElapsed()` (the
+        // process clock) at the end of `#advancePipelines` (view-syncer.ts:2628-
+        // 2632); rust records it here, inside `advance_and_sync`, with the same
+        // value the outcome carries. NON-VACUOUS: before 2026-09-09 the record
+        // lived in `on_notification` on the WALL clock — this direct call left
+        // the seam `None`.
+        assert_eq!(
+            crate::metrics::LAST_ADVANCE_MS.lock().unwrap().take(),
+            Some(result.process_time_ms),
+            "advance-time is the outcome's process time"
+        );
         assert!(result.reset_reason.is_none(), "unexpected reset");
         assert!(
             !result.version.is_empty(),
