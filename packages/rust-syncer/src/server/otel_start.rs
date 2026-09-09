@@ -33,13 +33,15 @@ fn metrics_enabled() -> bool {
 }
 
 /// The instruments exported as base2 exponential histograms — TS
-/// `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (server/otel-start.ts), verbatim.
-/// `zero.sync.e2e_serving_lag` is created with `getOrCreateNativeHistogram`
-/// in TS but is NOT in that list, so it is an explicit-bucket histogram on
-/// both arms.
-pub(crate) const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 2] = [
-    "zero.sync.view_syncer_hydration",
+/// `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (observability/metrics.ts:25-29),
+/// verbatim and in TS order. `server/otel-start.ts:75` maps every name in it to
+/// an `EXPONENTIAL_HISTOGRAM` view, so an instrument missing here is exported as
+/// an explicit-bucket histogram and the two arms emit different OTLP types for
+/// it — exactly what this list exists to prevent.
+pub(crate) const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 3] = [
     "zero.sync.view_syncer_lag",
+    "zero.sync.view_syncer_hydration",
+    "zero.sync.e2e_serving_lag",
 ];
 
 /// Initialize OTLP metrics export and install the global meter provider. Returns
@@ -175,11 +177,14 @@ mod tests {
     fn native_histogram_list_is_the_ts_list() {
         // Compared as slices, not arrays: an added/removed instrument must fail the
         // assertion at runtime rather than only failing to type-check.
+        // The literal is TS `NATIVE_HISTOGRAM_INSTRUMENT_NAMES`
+        // (observability/metrics.ts:25-29) transcribed in TS order.
         assert_eq!(
             super::NATIVE_HISTOGRAM_INSTRUMENTS.as_slice(),
             [
+                "zero.sync.view_syncer_lag",
                 "zero.sync.view_syncer_hydration",
-                "zero.sync.view_syncer_lag"
+                "zero.sync.e2e_serving_lag"
             ]
             .as_slice()
         );
