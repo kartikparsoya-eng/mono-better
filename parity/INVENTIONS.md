@@ -932,26 +932,44 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   `advance_gate::the_budget_reads_the_time_slice_timer_not_wall_clock`
   (rust-ivm: the budget reads this timer, not wall clock).
 
-## I-19 — 2 MiB page cache per serving SQLite connection (`SERVING_CONNECTION_CACHE_SIZE_KIB`)
+## I-19 — Serving SQLite page cache pinned to TS's effective value (`SERVING_CONNECTION_CACHE_SIZE_KIB`)
+- **Status:** CLOSED as a divergence 2026-09-09 (value = TS's 16 MiB); the
+  constant and pragma are retained as an explicit define-drift pin.
 - **Files:** `rust-ivm/src/sqlite/mod.rs` (`apply_serving_page_cache`),
   `snapshotter/snapshotter.rs` (`Snapshot::create`, default when no operator
-  value), `ivm/memory_source.rs` (`set_db_path`, the per-TableSource
-  connection).
-- **No TS twin (connection topology):** the vendored SQLite carries
-  zero-sqlite3's `SQLITE_DEFAULT_CACHE_SIZE=-16000` (16325e611, part of the
-  planner-stats define parity). TS opens two better-sqlite3 Databases per
-  view-syncer and its TableSources share them; rust opens one connection per
-  TableSource (~136 per client group on the sandbox) plus the snapshot pair, so
-  the identical per-connection default is ~70x the memory per client group.
-- **Evidence (2026-09-09 bisect, full-catalog differential oracle at a 24g
-  cgroup cap, hog query excluded):** `095af74e6` PASS 0 mismatches;
-  `16325e611`, `fcef5d9a7`, `0976394ad` OOM-killed by the memory cgroup at
-  24.6-24.9 GB anon RSS (kernel log), which also failed the oracle's resume
-  phase and G8. `3623d1da3` (2026-09-07) passed the same run.
-- **Contract (TS-observable):** none — the page cache changes speed only;
-  rows, order, versions and frames are identical. What it preserves is that a
-  client group's memory stays at the pre-16325e611 level.
-- **Tests:** `page_cache_budget_tests::serving_connections_get_a_2mib_page_cache_over_the_16mib_compiled_default`
-  (pins the compiled default AND the override); the ART G8 differential at
-  24g is the integration pin.
-
+  value), `ivm/memory_source.rs` (`set_db_path`, the no-snapshotter TEST
+  fallback).
+- **TS:** `new Snapshotter(logger, replicaFile, shard)` (server/syncer.ts:225)
+  passes no `pageCacheSizeKib`; `Snapshot.create` (snapshotter.ts:284) skips
+  the pragma; every serving connection runs zero-sqlite3's compiled
+  `SQLITE_DEFAULT_CACHE_SIZE=-16000`. The vendored SQLite carries the same
+  define (16325e611, planner-stats define parity).
+- **Connection topology IS TS's:** two pinned `BEGIN CONCURRENT` snapshot
+  connections per client group (Snapshotter curr/prev) shared by every
+  `TableSource` (`pipeline_driver.rs` `build_engine` →
+  `TableSource::with_column_order(conn.clone(), …)`), plus a transient
+  permissions-hash read at CG creation. Measured 2026-09-09 on the box: 49
+  `replica.db` fds for 12 active client groups (≈4 per group = 2 connections ×
+  db/wal). The one-connection-per-source design exists only in
+  `MemorySource::set_db_path` (Go-sidecar heritage), the `else` branch
+  `build_engine` takes when there is no snapshotter — tests.
+- **History / correction (rule 13):** from 0a0d456d9 to 92be04854 the value
+  was 2000 (2 MiB), justified as "rust opens one connection per TableSource
+  (~136 per client group) so the per-connection default is ~70x TS's memory".
+  That rationale described the test fallback, not production. Re-read, the
+  bisect evidence (`16325e611`, `fcef5d9a7`, `0976394ad` OOM-killed at
+  24.6-24.9 GB anon RSS under the 24g cap; `095af74e6` at 2 MiB passed) is
+  16 MiB × 2 × N client groups with N in the high hundreds — the footprint TS
+  carries under its 32g cap in the same differential. The 2 MiB budget
+  therefore gave each rust client group 1/8 of TS's page cache: sandbox pod
+  `…-98c9b4446-bssjz` (image 9231499, 2026-09-09) showed a 60 s cold hydrate at
+  397 µs per sql_step against a 49 µs median. Restored to 16000 the same day.
+- **Contract (TS-observable):** none beyond latency — rows, order, versions
+  and frames are identical at any cache size. What the pin preserves is that a
+  rust client group's page cache equals TS's, so cold-hydrate latency is
+  compared like for like; memory per client group equals TS's too.
+- **Tests:** `page_cache_budget_tests::serving_connections_carry_ts_16mib_page_cache`
+  (sentinel-first, so dropping the pragma fails under both links; asserts the
+  define parity when the link is the wal2 static lib); the ART G8 differential
+  at 24g/32g on the restored image is the integration check (box run
+  2026-09-09, see the commit that lands it).

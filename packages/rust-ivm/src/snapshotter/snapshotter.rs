@@ -522,8 +522,9 @@ impl Snapshot {
             .map_err(|e| format!("pragma synchronous: {}", e))?;
         conn.pragma_update(None, "case_sensitive_like", "ON")
             .map_err(|e| format!("pragma case_sensitive_like: {}", e))?;
-        // I-19: the per-client-group budget unless the operator set one.
-        // (`SERVING_CONNECTION_CACHE_SIZE_KIB`, sqlite/mod.rs.)
+        // TS `Snapshot.create` applies `cache_size = -pageCacheSizeKib` only when
+        // the operator set one (snapshotter.ts:284); otherwise the compiled
+        // 16 MiB. `SERVING_CONNECTION_CACHE_SIZE_KIB` pins that value (I-19).
         let cache_kib =
             page_cache_size_kib.unwrap_or(crate::sqlite::SERVING_CONNECTION_CACHE_SIZE_KIB);
         conn.pragma_update(None, "cache_size", -(cache_kib))

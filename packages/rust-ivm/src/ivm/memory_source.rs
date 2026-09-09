@@ -127,7 +127,16 @@ impl MemorySource {
 
     /// Set the SQLite database path and open a dedicated read-only connection.
     /// One connection per source, opened once and reused for all fetches.
-    /// Matches TS (one better-sqlite3 Database per syncer) and Go (one *sql.Conn per Source).
+    ///
+    /// NO-SNAPSHOTTER FALLBACK ONLY (tests, `init_from_connection`). Production
+    /// sources are `sqlite::table_source::TableSource`s sharing the
+    /// Snapshotter's pinned `BEGIN CONCURRENT` connection
+    /// (`pipeline_driver.rs` `build_engine`: `TableSource::with_column_order(
+    /// conn.clone(), …)`), exactly TS's `#snapshotter.current().db` handed to
+    /// every `TableSource` (pipeline-driver.ts:425/1044). This per-source
+    /// connection is Go-sidecar heritage (one *sql.Conn per Source); it holds
+    /// no read transaction, so it reads HEAD — which is why `set_snapshot_db`
+    /// is a no-op here and the engine's PREV/CURR pinning does not apply.
     pub fn set_db_path(&mut self, path: &str) {
         self.db_path = Some(path.to_string());
         match rusqlite::Connection::open_with_flags(
@@ -139,8 +148,9 @@ impl MemorySource {
             Ok(c) => {
                 let _ = c.busy_timeout(std::time::Duration::from_millis(5000));
                 let _ = c.execute_batch("PRAGMA case_sensitive_like = ON; PRAGMA query_only = ON;");
-                // I-19: one connection per TableSource, so the 16 MiB compiled
-                // default (zero-sqlite3 parity) must not apply per connection.
+                // Same page cache `Snapshot::create` pins (TS's compiled 16 MiB,
+                // `SERVING_CONNECTION_CACHE_SIZE_KIB`), so this fallback costs
+                // what a snapshot connection costs.
                 let _ = crate::sqlite::apply_serving_page_cache(&c);
                 // Install a cross-thread interrupt handle so an in-flight fetch
                 // can be cancelled out-of-band.

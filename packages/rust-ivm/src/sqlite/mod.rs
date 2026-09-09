@@ -36,22 +36,28 @@ pub use sqlite_cost_model::*;
 pub use sqlite_stat_fanout::*;
 pub use table_source::*;
 
-/// Page-cache budget for the connections rust opens PER CLIENT GROUP and PER
-/// TABLE SOURCE, in KiB (`PRAGMA cache_size = -2000`).
+/// Page cache for every serving SQLite connection, in KiB
+/// (`PRAGMA cache_size = -16000`, 16 MiB) — TS parity.
 ///
-/// Rust-only (AGENTS.md rule 5/10, INVENTIONS.md I-19). The vendored SQLite is
-/// compiled with zero-sqlite3's `SQLITE_DEFAULT_CACHE_SIZE=-16000` (16 MiB per
-/// connection, 16325e611) because that define is part of the planner-stats
-/// parity. TS opens two better-sqlite3 Databases per view-syncer (the
-/// snapshotter's curr/prev) and its TableSources share them; rust opens a
-/// connection per TableSource (one per replicated table, ~136 on the sandbox)
-/// plus the snapshot pair, so the same per-connection default multiplies by
-/// ~70x per client group. Measured 2026-09-09 (full-catalog differential
-/// oracle, 24g cgroup cap, hog query excluded): `095af74e6` (2 MiB compiled
-/// default) PASS; `16325e611` and every later image OOM-killed at 24.6-24.9 GB
-/// anon RSS. This restores the 2 MiB per serving connection that every image
-/// before 16325e611 ran with; the page cache is not client-observable.
-pub const SERVING_CONNECTION_CACHE_SIZE_KIB: i64 = 2000;
+/// TS sets no pragma: `new Snapshotter(logger, replicaFile, shard)`
+/// (zero-cache/src/server/syncer.ts:225) passes no `pageCacheSizeKib`, so
+/// `Snapshot.create` (snapshotter.ts:284) skips it and every serving
+/// connection runs zero-sqlite3's compiled `SQLITE_DEFAULT_CACHE_SIZE=-16000`.
+/// The vendored SQLite carries the same define (16325e611, rust-syncer
+/// build.rs), so this constant is an explicit PIN of TS's effective value
+/// against define drift, not a budget.
+///
+/// History (INVENTIONS.md I-19): from 0a0d456d9 to 92be04854 this was 2000
+/// (2 MiB) on the belief that rust opened one connection per TableSource
+/// (~136 per client group). That described `MemorySource::set_db_path`, the
+/// no-snapshotter TEST fallback — production `TableSource`s share the
+/// Snapshotter's two pinned connections exactly like TS (`pipeline_driver.rs`
+/// `build_engine`; measured 2026-09-09: 49 `replica.db` fds for 12 client
+/// groups). So the 24g OOM behind I-19 was 16 MiB × 2 × N client groups —
+/// the footprint TS carries too — and the 2 MiB budget cut each rust client
+/// group's page cache to 1/8 of TS's (sandbox pod 2026-09-09: a 60 s cold
+/// hydrate at 397 µs per sql_step vs a 49 µs median). Restored 2026-09-09.
+pub const SERVING_CONNECTION_CACHE_SIZE_KIB: i64 = 16000;
 
 /// Apply [`SERVING_CONNECTION_CACHE_SIZE_KIB`] to a serving connection.
 pub fn apply_serving_page_cache(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -60,32 +66,31 @@ pub fn apply_serving_page_cache(conn: &rusqlite::Connection) -> rusqlite::Result
 
 #[cfg(test)]
 mod page_cache_budget_tests {
-    /// The compiled default IS zero-sqlite3's 16 MiB (the define parity holds)
-    /// and the serving budget overrides it to 2 MiB — the value every image
-    /// before 16325e611 ran with, which passed the 24g differential where the
-    /// 16 MiB-per-connection images were OOM-killed. Non-vacuous: drop the
-    /// pragma from `apply_serving_page_cache` and the second assertion reads
-    /// -16000.
+    /// Every serving connection carries TS's effective page cache — the
+    /// zero-sqlite3 compiled default, 16 MiB — regardless of what the
+    /// connection started with. Non-vacuous: the sentinel is set FIRST, so
+    /// dropping the pragma from `apply_serving_page_cache` leaves -500 and the
+    /// assertion fails under both links (wal2 static lib in CI, whose compiled
+    /// default already IS -16000, and rusqlite's bundled SQLite otherwise).
     #[test]
-    fn serving_connections_get_a_2mib_page_cache_over_the_16mib_compiled_default() {
+    fn serving_connections_carry_ts_16mib_page_cache() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        // The compiled default differs by link: rusqlite's bundled SQLite here
-        // (2000 pages), zero-sqlite3's `-16000` in the rust-syncer binary
-        // (`build.rs`); either way it is not the serving budget.
         let compiled: i64 = conn
             .pragma_query_value(None, "cache_size", |r| r.get(0))
             .unwrap();
-        assert_ne!(
-            compiled, -2000,
-            "the compiled default is not the 2 MiB budget"
-        );
+        if compiled < 0 {
+            // Negative = KiB: the zero-sqlite3 define parity (16325e611).
+            assert_eq!(compiled, -16000, "SQLITE_DEFAULT_CACHE_SIZE define parity");
+        }
+        conn.pragma_update(None, "cache_size", -500).unwrap();
         super::apply_serving_page_cache(&conn).unwrap();
-        let budget: i64 = conn
+        let applied: i64 = conn
             .pragma_query_value(None, "cache_size", |r| r.get(0))
             .unwrap();
         assert_eq!(
-            budget, -2000,
-            "per-source / per-snapshot connections carry the 2 MiB budget"
+            applied, -16000,
+            "serving connections carry TS's 16 MiB page cache"
         );
+        assert_eq!(super::SERVING_CONNECTION_CACHE_SIZE_KIB, 16000);
     }
 }
