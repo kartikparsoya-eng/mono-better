@@ -3104,10 +3104,15 @@ impl ViewSyncerService {
                             self.cg_id
                         ),
                     );
-                    self.metrics.record_hydration(elapsed_ms);
-                    // No whole-pass slow warn: TS's `Slow query materialization`
-                    // is PER QUERY, on each query's own process time
-                    // (view-syncer.ts:2305-2307) — emitted from `hydrate_and_sync`.
+                    // No whole-pass metric or slow warn here. TS never counts a
+                    // config pass: `#hydrations.add(1)` fires once per
+                    // `#addAndRemoveQueries` batch (view-syncer.ts:2300-2301,
+                    // recorded from `hydrate_and_sync`) and once per query in
+                    // `#hydrateUnchangedQueries` (:1638-1639, recorded there).
+                    // Counting it here made every `already caught up` no-op
+                    // pass a "hydration": 720 vs TS 396 on the same replay
+                    // (2026-09-09 collector diff). TS's `Slow query
+                    // materialization` is likewise PER QUERY (:2305-2307).
                 }
                 Err(e) => {
                     // TS `#runInLockForClient`'s catch (view-syncer.ts:1236-1249):
@@ -6679,6 +6684,77 @@ mod tests {
                 metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
             }
         }
+    }
+
+    /// TS counts `zero.sync.hydration` once per `#addAndRemoveQueries` batch
+    /// (view-syncer.ts:2093 guard → :2300 `hydrations.add(1)`), never per
+    /// config pass. Rust counted every `handle_desired_queries` pass, so the
+    /// `already caught up` no-op passes inflated it: 720 vs TS 396 on an
+    /// identical 6-connection replay (2026-09-09 collector diff).
+    ///
+    /// NON-VACUOUS: restore `self.metrics.record_hydration(elapsed_ms)` in
+    /// `handle_desired_queries` and the no-op pass reads 2, the batch 3.
+    #[test]
+    fn hydration_counter_counts_add_batches_not_config_passes_like_ts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(IssueTableFactory {
+            handle: rt.handle().clone(),
+        });
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = ViewSyncerService::new_test(
+            "cg1",
+            &factory,
+            Arc::new(ToggleAuthValidator { valid }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        seed_test_client_schema(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let patch = |hashes: &[&str]| {
+            let puts: Vec<serde_json::Value> = hashes
+                .iter()
+                .map(|h| serde_json::json!({"op": "put", "hash": h, "ast": {"table": "issue"}}))
+                .collect();
+            serde_json::json!({"desiredQueriesPatch": puts})
+        };
+
+        // initConnection with one query: one batch → 1.
+        assert!(rt.block_on(state.handle_desired_queries(
+            "c1",
+            &patch(&["q1"]),
+            ConfigPassOrigin::InitConnection,
+            CustomQueryTransformMode::All,
+        )));
+        assert_eq!(state.metrics.snapshot()["hydrations"], 1, "one add batch");
+        // The same desired set again: nothing to add or remove, so TS never
+        // enters `#addAndRemoveQueries` (`already caught up`) → still 1.
+        assert!(rt.block_on(state.handle_desired_queries(
+            "c1",
+            &patch(&["q1"]),
+            ConfigPassOrigin::ChangeDesiredQueries,
+            CustomQueryTransformMode::Missing,
+        )));
+        assert_eq!(
+            state.metrics.snapshot()["hydrations"],
+            1,
+            "a no-op config pass is not a hydration"
+        );
+        // Two new queries in one patch: ONE batch, not two.
+        assert!(rt.block_on(state.handle_desired_queries(
+            "c1",
+            &patch(&["q2", "q3"]),
+            ConfigPassOrigin::ChangeDesiredQueries,
+            CustomQueryTransformMode::Missing,
+        )));
+        assert_eq!(
+            state.metrics.snapshot()["hydrations"],
+            2,
+            "a two-query batch counts once"
+        );
     }
 
     /// NON-VACUOUS (log parity, 2026-09-08): TS logs `init pipelines@…` ONLY on
@@ -12241,6 +12317,10 @@ impl ViewSyncerService {
                 changes.finish()?;
             }
             let elapsed = timer.total_elapsed();
+            // TS view-syncer.ts:1638-1639, per rehydrated query:
+            //   this.#hydrations.add(1);
+            //   this.#hydrationTime.recordMs(elapsed);
+            self.metrics.record_hydration(elapsed);
             tracing::debug!("hydrated {count} rows for {qid} ({elapsed} ms)");
             self.pipelines.set_query_transformation_hash(qid, new_hash);
             // Inspector recording — port of the `#hydrateUnchangedQueries` tail
@@ -12512,6 +12592,16 @@ impl ViewSyncerService {
         if let Some(e) = cvr_err {
             return Err(e.into());
         }
+        // TS `generateRowChanges` tail (view-syncer.ts:2300-2301):
+        //   hydrations.add(1);
+        //   hydrationTime.recordMs(totalProcessTime);
+        // ONE count per `#addAndRemoveQueries` batch — not per query, not per
+        // config pass — with the batch's process time (the
+        // `startWithoutYielding()`/`stop()` bracket, yields excluded). They are
+        // the generator's last statements, so a throw mid-batch (a hydrate
+        // error, the CVR version-bump failure above) never reaches them —
+        // hence after both early returns.
+        self.metrics.record_hydration(total_process_time_ms);
         crate::trace::note(
             "hydrate-fetch",
             &format!(
@@ -13675,6 +13765,14 @@ mod engine_tests {
             .await
             .unwrap();
         assert!(drifted.is_empty(), "{drifted:?}");
+        // TS view-syncer.ts:1638: `#hydrations.add(1)` per rehydrated query —
+        // the one same-hash survivor here. NON-VACUOUS: drop the
+        // `record_hydration(elapsed)` in `hydrate_unchanged_queries` → 0.
+        assert_eq!(
+            engine.metrics.snapshot()["hydrations"],
+            1,
+            "one query rehydrated → one hydration"
+        );
         let logged = captured(&buf);
         assert!(
             logged.contains(

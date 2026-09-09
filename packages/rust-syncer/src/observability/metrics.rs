@@ -761,7 +761,10 @@ pub fn register_cvr_pool_gauges(pool: sqlx::PgPool) {
 /// Shared counters + latency histograms. Cheap to clone the `Arc`.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    /// Query hydrations (a `config_and_hydrate` that added ≥1 query).
+    /// Query hydrations — TS `#hydrations` (`zero.sync.hydration`): one per
+    /// `#addAndRemoveQueries` batch (view-syncer.ts:2300) plus one per query
+    /// rehydrated by `#hydrateUnchangedQueries` (:1638). NOT one per config
+    /// pass: an `already caught up` pass adds nothing.
     pub hydrations: AtomicU64,
     /// Advances applied from a change-streamer notification.
     pub advances: AtomicU64,
@@ -796,7 +799,8 @@ impl Metrics {
         field.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Record a query hydration and its wall-clock (ms). Updates the `/statz`
+    /// Record a query hydration and its process time (ms — the TimeSliceTimer's
+    /// yield-excluded `totalProcessTime` / `totalElapsed()`). Updates the `/statz`
     /// counter, the Prometheus `/metrics` histogram, AND the OTLP
     /// `zero.sync.hydration` / `zero.sync.hydration-time` instruments.
     pub fn record_hydration(&self, elapsed_ms: f64) {
