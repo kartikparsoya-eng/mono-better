@@ -44,16 +44,35 @@ unsafe extern "C" fn x_realloc(p: *mut c_void, n: c_int) -> *mut c_void {
     // SAFETY: as above; mi_realloc preserves the old contents up to min(old, n).
     unsafe { libmimalloc_sys::mi_realloc(p, n as usize) }
 }
+/// Clamp a mimalloc byte count into SQLite's `c_int` size domain.
+///
+/// SQLite's `sqlite3_mem_methods` reports sizes as `int`, while mimalloc
+/// reports `size_t`. A bare `as c_int` TRUNCATES: SQLite caps a single
+/// allocation near `0x7fffff00`, and mimalloc's usable/good size for one that
+/// large rounds ABOVE `i32::MAX`, where the cast wraps NEGATIVE. SQLite would
+/// then carry a negative size through its memory accounting
+/// (`sqlite3MallocSize` → `sqlite3_memory_used`) or use it as the xRoundup
+/// result — undefined behaviour at the C level, and the failure mode is memory
+/// corruption rather than an error.
+///
+/// Saturating is legal for both callers: SQLite documents xSize as returning
+/// "the size of the allocation, which may be larger" than the request, so
+/// under-reporting at the extreme is conservative; and xRoundup must return a
+/// value `>= n`, which `i32::MAX` always is because `n` is itself a `c_int`.
+fn saturating_c_int(n: usize) -> c_int {
+    n.min(c_int::MAX as usize) as c_int
+}
+
 unsafe extern "C" fn x_size(p: *mut c_void) -> c_int {
     // SQLite asks for the size of an allocation it owns (memory accounting +
     // `sqlite3MallocSize`); the usable size is >= the request, which SQLite
     // permits ("the size of the allocation, which may be larger").
     // SAFETY: `p` is a live allocation from this allocator.
-    unsafe { libmimalloc_sys::mi_usable_size(p) as c_int }
+    saturating_c_int(unsafe { libmimalloc_sys::mi_usable_size(p) })
 }
 unsafe extern "C" fn x_roundup(n: c_int) -> c_int {
     // SAFETY: pure function of `n`.
-    unsafe { libmimalloc_sys::mi_good_size(n as usize) as c_int }
+    saturating_c_int(unsafe { libmimalloc_sys::mi_good_size(n as usize) })
 }
 unsafe extern "C" fn x_init(_app: *mut c_void) -> c_int {
     0 // SQLITE_OK — mimalloc needs no per-process init.
@@ -98,5 +117,67 @@ pub fn route_sqlite_malloc_through_mimalloc() -> Result<(), c_int> {
         Ok(())
     } else {
         Err(rc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-17: the `usize -> c_int` casts in `x_size` / `x_roundup` truncated.
+    ///
+    /// SQLite caps a single allocation near `0x7fffff00`, and mimalloc's
+    /// usable/good size for an allocation that large rounds ABOVE `i32::MAX`,
+    /// where `as c_int` wraps NEGATIVE. SQLite would then use a negative size
+    /// for memory accounting or as its xRoundup result — undefined at the C
+    /// level, with memory corruption rather than an error as the failure mode.
+    ///
+    /// This tests the clamp directly rather than through a >2GiB allocation,
+    /// which is why the clamp is a named function.
+    ///
+    /// NON-VACUOUS: change `saturating_c_int` back to `n as c_int` and every
+    /// assertion below the first two fails — each of these inputs wraps to a
+    /// negative `c_int`.
+    #[test]
+    fn saturating_c_int_never_wraps_negative() {
+        // Below the boundary: exact passthrough, so ordinary page/pcache sizes
+        // are unaffected.
+        assert_eq!(saturating_c_int(0), 0);
+        assert_eq!(saturating_c_int(4096), 4096);
+        assert_eq!(saturating_c_int(c_int::MAX as usize - 1), c_int::MAX - 1);
+        assert_eq!(saturating_c_int(c_int::MAX as usize), c_int::MAX);
+
+        // At and above the boundary: saturate, never wrap.
+        for n in [
+            c_int::MAX as usize + 1, // wraps to i32::MIN
+            2usize << 31,            // 2^32, wraps to 0
+            0x7fff_ff00usize + 4096, // SQLite's cap, page-rounded up
+            usize::MAX,              // wraps to -1
+        ] {
+            let clamped = saturating_c_int(n);
+            assert!(
+                clamped > 0,
+                "saturating_c_int({n}) must stay positive; a negative size is \
+                 undefined for SQLite's xSize / xRoundup, got {clamped}"
+            );
+            assert_eq!(
+                clamped,
+                c_int::MAX,
+                "an out-of-domain size must clamp to c_int::MAX, not wrap"
+            );
+        }
+    }
+
+    /// The xRoundup C contract is `result >= n`. Saturation preserves it
+    /// because `n` is itself a `c_int`, so `i32::MAX >= n` always holds — the
+    /// truncating version could return a NEGATIVE result for a large `n`,
+    /// violating it outright.
+    #[test]
+    fn x_roundup_returns_at_least_its_argument() {
+        for n in [1i32, 8, 4096, 65536, 0x7fff_ff00, c_int::MAX] {
+            // SAFETY: `x_roundup` is a pure function of `n`.
+            let rounded = unsafe { x_roundup(n) };
+            assert!(rounded >= n, "xRoundup({n}) must round UP, got {rounded}");
+        }
     }
 }
