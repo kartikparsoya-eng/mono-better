@@ -65,6 +65,30 @@ pub struct CorrelatedSubqueryCondition {
     /// TS `condition.scalar` — set by the permission system's
     /// `whereExists(rel, q, {scalar: true})`. Only scalar-flagged subqueries
     /// are pre-resolved to literals by `resolve_simple_scalar_subqueries`.
+    ///
+    /// NOT `skip_serializing_if`, and the reason is worth recording. TS
+    /// declares it `scalar: v.boolean().optional()`
+    /// (zero-protocol/src/ast.ts:126) and only ever sets it to `true`, so an
+    /// unset `scalar` is absent on the TS WIRE — which invites the conclusion
+    /// that rust emitting `"scalar":false` is a wire divergence. It is not:
+    /// this struct is DESERIALIZE-ONLY. Nothing serializes a typed `Ast` in
+    /// production — `analyze_query`, the one place that serializes an AST at
+    /// all, serializes the wire-derived `serde_json::Value` it was handed
+    /// (`resolve_analyze_ast` returns `Result<(serde_json::Value, bool)>`,
+    /// inspect_handler.rs:206-210) — and `hash_of_ast` likewise takes an
+    /// untyped `Value` (read_authorizer.rs:330) from the client's AST
+    /// (:47) or the query-API response's `ast` property
+    /// (transform_query.rs:275).
+    ///
+    /// And the derived shape is not the TS wire in the first place:
+    /// `where_clause` not `where`, an externally-tagged
+    /// `{"CorrelatedSubquery": …}` not `{"type": "correlatedSubquery", …}`,
+    /// `relationship_name`/`parent_key`/`child_key` not camelCase, and an
+    /// explicit `null` for every absent optional. Skipping this one field
+    /// would make an internal representation marginally more TS-like while a
+    /// dozen other fields still differ, which reads as a wire-compatibility
+    /// guarantee that does not exist. `ast_wire_shape_test` pins that shape as
+    /// internal so no one serializes it to a client.
     #[serde(default)]
     pub scalar: bool,
     /// Planner-assigned ID (TS `planIdSymbol`). Set during `build_plan_graph`,
