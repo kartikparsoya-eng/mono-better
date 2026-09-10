@@ -737,6 +737,10 @@ async fn flush_loop(context: FlushLoopContext) {
         flushed_tx,
         is_flushing,
     } = context;
+    // Built once for the life of the loop: the statements depend only on
+    // `schema` (see `FlushSql`), so `format!`ing them per iteration was pure
+    // per-flush overhead.
+    let flush_sql = FlushSql::new(&schema);
     loop {
         // Port of the SYNCHRONOUS block inside TS `#flush`'s `runTx` callback
         // (row-record-cache.ts:270-284): `rows = #pending.size`, `rowsVersion =
@@ -794,7 +798,7 @@ async fn flush_loop(context: FlushLoopContext) {
         let start = std::time::Instant::now();
         let rows_count = pending.len();
 
-        match flush_one_iteration(&pool, &schema, &cvr_id, &version, &pending).await {
+        match flush_one_iteration(&pool, &flush_sql, &cvr_id, &version, &pending).await {
             Ok(()) => {
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                 // TS row-record-cache.ts:289-291: `flushed ${rows} rows@${version}
@@ -848,10 +852,78 @@ async fn flush_loop(context: FlushLoopContext) {
     }
 }
 
+/// The SQL the row write-back issues on every flush iteration.
+///
+/// All three statements depend only on the CVR `schema`, which is fixed for the
+/// life of the flush loop, so they are built ONCE by `FlushSql::new` instead of
+/// `format!`ed per iteration (the two `json_to_recordset` statements are ~600
+/// and ~900 bytes each). The `idle_in_transaction_session_timeout` statement
+/// depends on nothing but a `const`.
+///
+/// This is a rust-only optimization, not a parity change: TS rebuilds its query
+/// per call too (postgres.js tagged templates), and the SQL TEXT here is
+/// byte-identical to what the `format!`s produced — so every PG-side behavior,
+/// the prepared-statement cache included, is unchanged.
+struct FlushSql {
+    idle_timeout: String,
+    rows_version_upsert: String,
+    row_delete: String,
+    row_bulk_insert: String,
+}
+
+impl FlushSql {
+    fn new(schema: &str) -> Self {
+        Self {
+            idle_timeout: format!(
+                "SET LOCAL idle_in_transaction_session_timeout = {}",
+                IDLE_TX_TIMEOUT_MS
+            ),
+            rows_version_upsert: format!(
+                r#"INSERT INTO {} ("clientGroupID", "version") VALUES ($1, $2)
+           ON CONFLICT ("clientGroupID")
+           DO UPDATE SET "clientGroupID" = $1, "version" = $2"#,
+                cvr(schema, "rowsVersion")
+            ),
+            row_delete: format!(
+                r#"DELETE FROM {} AS r
+               USING json_to_recordset($1::json) AS d(
+                 "schema" TEXT,
+                 "table" TEXT,
+                 "rowKey" JSONB
+               )
+               WHERE r."clientGroupID" = $2
+                 AND r."schema" = d."schema"
+                 AND r."table" = d."table"
+                 AND r."rowKey" = d."rowKey""#,
+                cvr(schema, "rows")
+            ),
+            row_bulk_insert: format!(
+                r#"INSERT INTO {}(
+      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
+  ) SELECT
+      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
+    FROM json_to_recordset($1::json) AS x(
+      "clientGroupID" TEXT,
+      "schema" TEXT,
+      "table" TEXT,
+      "rowKey" JSONB,
+      "rowVersion" TEXT,
+      "patchVersion" TEXT,
+      "refCounts" JSONB
+  ) ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
+    DO UPDATE SET "rowVersion" = excluded."rowVersion",
+      "patchVersion" = excluded."patchVersion",
+      "refCounts" = excluded."refCounts""#,
+                cvr(schema, "rows")
+            ),
+        }
+    }
+}
+
 /// Executes one flush iteration: begin tx, upsert rowsVersion, apply row updates, commit.
 async fn flush_one_iteration(
     pool: &sqlx::PgPool,
-    schema: &str,
+    sql: &FlushSql,
     cvr_id: &str,
     version: &CVRVersion,
     pending: &HashMap<String, (RowID, Option<RowRecord>)>,
@@ -873,23 +945,12 @@ async fn flush_one_iteration(
     sqlx::query("SET LOCAL statement_timeout = 0")
         .execute(&mut *tx)
         .await?;
-    sqlx::query(&format!(
-        "SET LOCAL idle_in_transaction_session_timeout = {}",
-        IDLE_TX_TIMEOUT_MS
-    ))
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query(&sql.idle_timeout).execute(&mut *tx).await?;
 
     let version_str = version_string(version);
 
     // 1. Upsert rowsVersion.
-    let rows_version_sql = format!(
-        r#"INSERT INTO {} ("clientGroupID", "version") VALUES ($1, $2)
-           ON CONFLICT ("clientGroupID")
-           DO UPDATE SET "clientGroupID" = $1, "version" = $2"#,
-        cvr(schema, "rowsVersion")
-    );
-    sqlx::query(&rows_version_sql)
+    sqlx::query(&sql.rows_version_upsert)
         .bind(cvr_id)
         .bind(&version_str)
         .execute(&mut *tx)
@@ -930,20 +991,7 @@ async fn flush_one_iteration(
     // is the flush-convoy shape this port has been bitten by before.
     if !deletes.is_empty() {
         let del_json = serde_json::Value::Array(deletes);
-        let del_sql = format!(
-            r#"DELETE FROM {} AS r
-               USING json_to_recordset($1::json) AS d(
-                 "schema" TEXT,
-                 "table" TEXT,
-                 "rowKey" JSONB
-               )
-               WHERE r."clientGroupID" = $2
-                 AND r."schema" = d."schema"
-                 AND r."table" = d."table"
-                 AND r."rowKey" = d."rowKey""#,
-            cvr(schema, "rows")
-        );
-        sqlx::query(&del_sql)
+        sqlx::query(&sql.row_delete)
             .bind(&del_json)
             .bind(cvr_id)
             .execute(&mut *tx)
@@ -972,26 +1020,7 @@ async fn flush_one_iteration(
         //     so the tree is pure overhead on every flush.
         let inserts_json =
             serde_json::to_string(&inserts).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-        let bulk_sql = format!(
-            r#"INSERT INTO {}(
-      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
-  ) SELECT
-      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
-    FROM json_to_recordset($1::json) AS x(
-      "clientGroupID" TEXT,
-      "schema" TEXT,
-      "table" TEXT,
-      "rowKey" JSONB,
-      "rowVersion" TEXT,
-      "patchVersion" TEXT,
-      "refCounts" JSONB
-  ) ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
-    DO UPDATE SET "rowVersion" = excluded."rowVersion",
-      "patchVersion" = excluded."patchVersion",
-      "refCounts" = excluded."refCounts""#,
-            cvr(schema, "rows")
-        );
-        sqlx::query(&bulk_sql)
+        sqlx::query(&sql.row_bulk_insert)
             .bind(inserts_json)
             .execute(&mut *tx)
             .await?;
