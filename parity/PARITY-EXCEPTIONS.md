@@ -152,7 +152,7 @@ Anything not listed here and not STALE/WRONG must match TS.
 - **Rust**: none of it exists; the equivalent visibility comes from `tracing`
   fields at the call sites and the `zero.*` metrics.
 - **Why kept (2026-09-03):** nothing a client can observe; ledger members (cite
-  this id in their alias note): `addedge`, `decorateinput`, `decoratefilterinput`, `getconstraintsfordebug`, `getfiltersfordebug`, `getsortfordebug`, `getconstraintcostsfordebug`, `getdebuginfo`, `getnodename`, `elapsedlap`, `totalelapsed`, `randomid`, `logquerypipelinelifecycle`.
+  this id in their alias note): `addedge`, `decorateinput`, `decoratefilterinput`, `getconstraintsfordebug`, `getfiltersfordebug`, `getsortfordebug`, `getconstraintcostsfordebug`, `getdebuginfo`, `getnodename`, `elapsedlap`, `totalelapsed`, `randomid`, `logquerypipelinelifecycle`, `recordquery`.
 
 ## D-15 · Node-runtime-only helpers (no rust twin possible)
 

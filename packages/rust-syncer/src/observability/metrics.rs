@@ -624,6 +624,13 @@ pub enum ConnectionFailureReason {
 }
 
 impl ConnectionFailureReason {
+    /// Exhaustiveness fixture for `connection_failure_reasons_are_the_ts_vocabulary`
+    /// — a rust-only test helper, NOT a port (TS never enumerates the reasons;
+    /// `recordConnectionFailure` takes one at each call site). `#[cfg(test)]`
+    /// keeps it out of the M11 prod-reachability surface, where a `pub const
+    /// ALL` otherwise binds by name to the unrelated `ALL` in `ivm/db.ts` and
+    /// reads as a ported-but-unreachable item.
+    #[cfg(test)]
     pub const ALL: [ConnectionFailureReason; 5] = [
         ConnectionFailureReason::Auth,
         ConnectionFailureReason::Configuration,

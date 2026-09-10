@@ -518,7 +518,7 @@ CRATES = {
             "apiattempts": ("metrics.rs record_api_attempt", "OTel counter"),
             "recordapiattempt": ("metrics.rs record_api_attempt",
                                  "OTel-idiom fold: recorder lives beside its instruments"),
-            "apirequestmetricattrs": ("metrics.rs api_request_metric_attrs",
+            "apirequestmetricattrs": ("metrics.rs api_request_attrs",
                                       "OTel-idiom fold: attrs helper beside the instruments"),
             "apierrorfromresult": ("custom_queries/transform_query.rs response validation", "error extraction"),
             "apiresponseerrormetricattrs": ("metrics.rs record_api_attempt attrs", "status attrs"),
@@ -674,6 +674,14 @@ STRUCTURAL_KINDS = {"type", "interface", "const", "enum"}
 # table in ZERO-DIVERGENCE-PLAN.md.
 # ---------------------------------------------------------------------------
 HELPER_ALIASES = {
+    # ── anonymous telemetry: a SEPARATE MeterProvider/exporter, not the operator's ──
+    "zero-cache/src/server/anonymous-otel-start.ts::recordQuery": (
+        "N/A",
+        "anonymous-telemetry meter only (its own MeterProvider + exporter, "
+        "nothing on the operator OTLP pipeline); rust has no anonymous-telemetry "
+        "subsystem — see the note where TS calls it, rust-cvr/src/cvr.rs "
+        "recordQueryForTelemetry (D-14)",
+    ),
     # ── @rocicorp/otel + tracer: spans/timers are D-14 (observability-only) ──
     "otel/src/enabled.ts::otelEnabled": ("server/otel_start.rs", "exporter enablement env probe (D-14)"),
     "otel/src/enabled.ts::otelLogsEnabled": ("server/otel_start.rs", "exporter enablement env probe (D-14)"),
