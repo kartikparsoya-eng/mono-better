@@ -1,8 +1,9 @@
 //! Planner builder — port of `planner-builder.ts`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+use indexmap::IndexMap;
 
 use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition};
 use crate::planner::planner_connection::ConnectionCostModel;
@@ -17,7 +18,25 @@ use crate::planner::planner_terminus::PlannerTerminus;
 
 pub struct Plans {
     pub plan: PlannerGraph,
-    pub sub_plans: HashMap<String, Plans>,
+    /// `IndexMap`, not `HashMap`: TS's `subPlans` is a plain object
+    /// (`{[key: string]: Plans}`, planner-builder.ts:39) and
+    /// `Object.values(plans.subPlans)` (:305) walks it in INSERTION order,
+    /// which the language guarantees for non-integer-like string keys. A
+    /// `std::collections::HashMap` iterates in an order `RandomState`
+    /// randomizes per PROCESS.
+    ///
+    /// That order is client-visible: `plan_recursively` walks these to plan
+    /// each sub-graph, and the shared `PlanDebugger` accumulates into an
+    /// ordered `Vec<Value>` (planner_debug.rs), which reaches clients through
+    /// `analyzeQuery --join-plans`. So the events came out in neither TS's
+    /// order nor a STABLE one — two rust pods analysing the same query
+    /// disagreed, which defeats diffing them.
+    ///
+    /// It does not affect which joins get flipped: each sub-plan is an
+    /// independent `PlannerGraph` planned in isolation, the cost model's count
+    /// cache is keyed by `(version, table)` and so is order-insensitive, and
+    /// `apply_plans_to_ast` looks sub-plans up BY KEY (:309), not by iteration.
+    pub sub_plans: IndexMap<String, Plans>,
 }
 
 fn extract_constraint(fields: &[String]) -> PlannerConstraint {
@@ -238,7 +257,8 @@ pub fn build_plan_graph(
     wire_output(&end, PlannerNode::Terminus(terminus.clone()));
     graph.set_terminus(terminus);
 
-    let mut sub_plans = HashMap::new();
+    // Insertion order is TS's traversal order — see `Plans::sub_plans`.
+    let mut sub_plans = IndexMap::new();
     for csq in &mut ast.related {
         if let Some(ref alias) = csq.subquery.alias {
             let child_constraints = extract_constraint(&csq.child_key);
