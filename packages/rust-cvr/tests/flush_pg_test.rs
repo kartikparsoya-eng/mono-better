@@ -248,8 +248,9 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
             return;
         }
     };
+    // write-back tx (parked below) + side tx + test queries.
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
+        .max_connections(6)
         .connect(&uri)
         .await
         .expect("connect to TEST_CVR_PG_URI");
@@ -344,11 +345,59 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
         state_version: "01".to_string(),
         config_version: None,
     };
+
+    // PARK THE WRITE-BACK. The two DB assertions below ("cvr.rows untouched",
+    // "rowsVersion still lagging") describe the state DURING the deferral
+    // window, and the background write-back is entitled to close that window
+    // at any moment — under a loaded full-suite run it did, and the test failed
+    // on its own success. Hold it deterministically with the same row-lock
+    // idiom the in-flight sibling test below uses: the write-back upserts
+    // `rowsVersion` FIRST (the `rows` FOREIGN KEY requires it), so a
+    // `FOR UPDATE` on that row blocks the write-back transaction before it can
+    // touch either table.
+    sqlx::query(&format!(
+        r#"INSERT INTO "{SCHEMA}"."rowsVersion" ("clientGroupID", "version") VALUES ($1, '01')
+           ON CONFLICT ("clientGroupID") DO UPDATE SET "version" = '01'"#
+    ))
+    .bind(CVR_ID)
+    .execute(&pool)
+    .await
+    .expect("seed rowsVersion so the lock has a row to hold");
+    let mut side = pool.begin().await.expect("side tx");
+    sqlx::query(&format!(
+        r#"SELECT 1 FROM "{SCHEMA}"."rowsVersion" WHERE "clientGroupID" = $1 FOR UPDATE"#
+    ))
+    .bind(CVR_ID)
+    .execute(&mut *side)
+    .await
+    .expect("lock rowsVersion row");
+
     let stats = store
         .flush(&expected_version, &cvr_final, connect_time)
         .await
         .expect("flush")
         .expect("material flush");
+
+    // Wait until the write-back backend is PROVABLY parked on the row lock, so
+    // the assertions below observe a started-and-blocked write-back rather
+    // than one that merely has not been scheduled yet.
+    let parked_sql = r#"SELECT count(*) FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND state = 'active' AND query ILIKE '%rowsVersion%'"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let parked: i64 = sqlx::query_scalar(parked_sql)
+            .fetch_one(&pool)
+            .await
+            .expect("pg_stat_activity");
+        if parked >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "write-back never parked on the rowsVersion lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 
     assert!(
         !stats.rows_flushed,
@@ -372,12 +421,15 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
     .fetch_optional(&pool)
     .await
     .expect("select rowsVersion");
-    assert_ne!(
+    assert_eq!(
         rows_version.as_deref(),
-        Some("02"),
+        Some("01"),
         "rowsVersion must lag instances.version while rows are pending (that lag \
          is what `load()` retries on)"
     );
+
+    // Release the lock so the parked write-back can commit.
+    side.rollback().await.expect("release the rowsVersion lock");
 
     // The deferred rows are not lost: `flush` already handed them to the cache
     // with `flushed=false`, which queued them and spawned the background flush.
