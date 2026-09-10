@@ -170,19 +170,39 @@ impl<'a> ChangeProcessor<'a> {
                     update_version(entry, row);
                 }
                 // Ensure refCounts[queryID] exists (TS: `parsedRow.refCounts[queryID] ??= 0`)
-                *entry.1.ref_counts.entry(query_id.to_string()).or_insert(0) += 1;
+                //
+                // `entry(k.to_string())` takes its key eagerly, so it allocated
+                // a fresh `String` for EVERY row even once the query was
+                // present; `query_id` is a per-query constant on a per-row
+                // path. TS's `refCounts[queryID] ??= 0` is a property
+                // assignment that re-uses the key reference and allocates
+                // nothing. Looking up first keeps the allocation for a query's
+                // first row only. `0 + 1 == 1`.
+                match entry.1.ref_counts.get_mut(query_id) {
+                    Some(rc) => *rc += 1,
+                    None => {
+                        entry.1.ref_counts.insert(query_id.to_string(), 1);
+                    }
+                }
             }
             RowChangeType::Edit => {
                 if let Some(row) = row {
                     update_version(entry, row);
                 }
                 // Ensure the key exists (TS: `parsedRow.refCounts[queryID] ??= 0`)
-                entry.1.ref_counts.entry(query_id.to_string()).or_insert(0);
+                if !entry.1.ref_counts.contains_key(query_id) {
+                    entry.1.ref_counts.insert(query_id.to_string(), 0);
+                }
             }
             RowChangeType::Remove => {
                 // Ensure the key exists before decrementing (TS: `parsedRow.refCounts[queryID] ??= 0`)
-                let rc = entry.1.ref_counts.entry(query_id.to_string()).or_insert(0);
-                *rc -= 1;
+                // `0 - 1 == -1`, so the absent case seeds with -1.
+                match entry.1.ref_counts.get_mut(query_id) {
+                    Some(rc) => *rc -= 1,
+                    None => {
+                        entry.1.ref_counts.insert(query_id.to_string(), -1);
+                    }
+                }
             }
         }
 
