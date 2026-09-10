@@ -767,7 +767,7 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   rust pokes/puts must equal TS's for the same trace.
 - **Known gap:** none.
 
-## I-15 — eager first pipeline sync inside the config pass (vs TS's state-loop first sync)
+## I-20 — eager first pipeline sync inside the config pass (vs TS's state-loop first sync)
 - **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`
   (`config_and_hydrate_with_profile`: `handle_config_update` →
   `sync_query_pipeline_set` unconditionally; `on_notification` →
@@ -1022,3 +1022,37 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   unbounded loop makes this test HANG, which is the bug);
   `rust-syncer engine_tests::get_clients_returns_one_handler_per_socket_for_a_repeated_ws_id`
   (the duplicate that made the overlap reachable in production).
+
+## I-21 — `pokePart` byte cap (`ZERO_POKE_PART_MAX_BYTES`, default 256 KiB)
+- **Files:** `rust-cvr/src/client_handler.rs`
+  (`DEFAULT_POKE_PART_MAX_BYTES`, `poke_part_max_bytes`,
+  `POKE_PART_ENVELOPE_EST`, `ROW_PATCH_ENVELOPE_EST`,
+  `estimate_row_patch_bytes`, `estimate_json_bytes`, the
+  `state.body_est_bytes` accumulation in `add_patch`).
+- **What is ported 1:1 (not invented):** `PART_COUNT_FLUSH_THRESHOLD = 100`
+  and the `if (++partCount >= PART_COUNT_FLUSH_THRESHOLD) flushBody()` flush
+  (client-handler.ts:107-109, :294), plus the frame contents and ordering.
+- **What has no TS twin (the invention):** the SECOND flush condition. TS has
+  no byte accounting anywhere in `client-handler.ts` — it flushes on part
+  count alone. Rust also flushes once a part's ESTIMATED serialized size
+  crosses the cap, bounding single-frame size so a burst of large rows cannot
+  build a multi-MB frame (which strains proxies and the client's own inbound
+  payload cap). The cap is ON by default, so it moves frame boundaries in
+  production; the same estimate also feeds I-4's slow-client shed.
+- **TS-observable contract:** splitting is CONTENT-PRESERVING. More, smaller
+  `pokePart` frames are protocol-legal — the client reassembles
+  `pokeStart` … `pokePart`* … `pokeEnd` — so the cap may choose only WHERE the
+  boundaries fall. Every patch must still arrive exactly once, in the order it
+  was added, with byte-identical patch content, and the enclosing poke
+  sequence must be unchanged. The estimate is therefore free to be imprecise
+  (it does no escape accounting) but NOT free to change: its arithmetic
+  determines the boundaries, so treating it as "just an estimate" and
+  swapping in a cheaper upper bound would shift the frame sequence a client
+  sees. Any change to it must be re-pinned against the M13 frame differential.
+- **Tests:**
+  `rust-cvr client_handler::tests::a_large_row_burst_flushes_on_the_byte_cap_and_preserves_every_patch`
+  (20 rows of ~40 KiB — well under the 100-part count threshold, so a split
+  can only come from the byte cap: asserts the burst DOES split, does not
+  degenerate to one part per row, and delivers all 20 patches exactly once in
+  order; non-vacuous — setting the cap to 0 or dropping the
+  `body_est_bytes >= byte_cap` term puts all 20 rows in one part and fails it).

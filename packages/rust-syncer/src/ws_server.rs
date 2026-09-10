@@ -423,6 +423,20 @@ async fn run_ws_writer(
                         crate::metrics::record_ws_queued_bytes_delta(-(*est_bytes as i64));
                     }
                 }
+                // Each frame is sent with `SplitSink::send`, i.e. start_send
+                // + flush, so every frame is flushed to the socket on its own.
+                // That is the PORT, not an oversight: TS writes each message
+                // through `createWebSocketStream`'s `_write`, which calls
+                // `ws.send(chunk, callback)` and waits for the callback
+                // (ws/lib/stream.js:145-153), and `ws`'s `Sender.sendFrame`
+                // corks only a single frame's header+payload and uncorks
+                // immediately (ws/lib/sender.js:563-570) — TS never holds one
+                // frame back waiting for the next. Batching with `feed()` and
+                // a deferred `flush()` would coalesce several frames into one
+                // TCP write and let a lone frame sit in the buffer, which is a
+                // divergence in flush timing (and in latency) even though the
+                // frame sequence would be unchanged. Do not "optimize" this
+                // into a drain loop.
                 match cmd {
                     Some(WsCommand::Send { msg, .. }) => {
                         let text = serde_json::to_string(&msg).unwrap_or_else(|e| {
@@ -1145,12 +1159,12 @@ mod tests {
         let body = rust_cvr::client_handler::PokePartBody {
             poke_id: "00:01".to_string(),
             got_queries_patch: Some(vec![rust_cvr::client_handler::QueryPatchEntry {
-                op: "put".to_string(),
+                op: "put",
                 hash: "h1".to_string(),
             }]),
             desired_queries_patches: None,
             rows_patch: Some(vec![rust_cvr::client_handler::RowPatchOp {
-                op: "put".to_string(),
+                op: "put",
                 table_name: "issue".to_string(),
                 value: Some(Arc::new(serde_json::json!({"id": "i1", "score": 1.0}))),
                 id: None,

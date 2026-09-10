@@ -183,13 +183,25 @@ fn estimate_row_patch_bytes(rp: &RowPatch) -> usize {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryPatchEntry {
-    pub op: String,
+    // `&'static str`, not `String`: every construction site passes the literal
+    // `"put"` or `"del"` (TS `putOpSchema` / `delOpSchema`,
+    // zero-protocol/src/queries-patch.ts:6,21), so a `String` heap-allocated a
+    // two/three-byte constant for every patch in every poke. Serializes
+    // byte-identically — serde writes a `&str` and a `String` the same way.
+    pub op: &'static str,
     pub hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RowPatchOp {
-    pub op: String,
+    // `&'static str` for the same reason as `QueryPatchEntry::op`. NOT modelled
+    // as a rust enum: TS's `rowPatchOpSchema` is a union of FOUR variants with
+    // different field sets — `put{tableName,value}`, `update{tableName,id,
+    // merge?,constrain?}`, `del{tableName,id}` and `clear{}` (no tableName) —
+    // (zero-protocol/src/row-patch.ts:6-34), while rust only ever emits `put`
+    // and `del`. A two-variant enum would misstate the protocol type; this
+    // struct is the permissive superset that carries exactly those two.
+    pub op: &'static str,
     #[serde(rename = "tableName")]
     pub table_name: String,
     // Arc-shared with the originating `RowPatch::Put` (serde's `rc` feature
@@ -202,7 +214,11 @@ pub struct RowPatchOp {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MutationPatchEntry {
-    pub op: String,
+    // `&'static str` for the same reason as `QueryPatchEntry::op`: every
+    // construction site passes the literal `"put"` or `"del"` (TS
+    // `putOpSchema` / `delOpSchema`, zero-protocol/src/mutations-patch.ts:13,17),
+    // so a `String` heap-allocated a constant per patch. Serializes identically.
+    pub op: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutation: Option<MutationPatchMutation>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -354,7 +370,7 @@ impl PokeHandler {
                     match qp {
                         QueryPatch::Put { id, client_id } => {
                             let entry = QueryPatchEntry {
-                                op: "put".to_string(),
+                                op: "put",
                                 hash: id.clone(),
                             };
                             match client_id {
@@ -373,7 +389,7 @@ impl PokeHandler {
                         }
                         QueryPatch::Del { id, client_id } => {
                             let entry = QueryPatchEntry {
-                                op: "del".to_string(),
+                                op: "del",
                                 hash: id.clone(),
                             };
                             match client_id {
@@ -735,7 +751,7 @@ impl PokeHandler {
                 let result = normalized.get("result").cloned().unwrap_or(Value::Null);
 
                 patches.push(MutationPatchEntry {
-                    op: "put".to_string(),
+                    op: "put",
                     mutation: Some(MutationPatchMutation {
                         id: MutationPatchId {
                             client_id,
@@ -767,7 +783,7 @@ impl PokeHandler {
                     .ok_or("mutation id must be a finite number")?;
 
                 patches.push(MutationPatchEntry {
-                    op: "del".to_string(),
+                    op: "del",
                     mutation: None,
                     id: Some(MutationPatchId {
                         client_id,
@@ -840,7 +856,7 @@ pub(crate) fn make_row_patch(patch: &RowPatch) -> Result<RowPatchOp, String> {
         RowPatch::Put { id, contents } => {
             ensure_safe_json(contents)?;
             Ok(RowPatchOp {
-                op: "put".to_string(),
+                op: "put",
                 table_name: id.table.clone(),
                 value: Some(contents.clone()),
                 id: None,
@@ -861,7 +877,7 @@ pub(crate) fn make_row_patch(patch: &RowPatch) -> Result<RowPatchOp, String> {
                 }
             }
             Ok(RowPatchOp {
-                op: "del".to_string(),
+                op: "del",
                 table_name: id.table.clone(),
                 value: None,
                 id: Some(Value::Object(id.row_key.clone())),
@@ -1239,11 +1255,11 @@ mod tests {
             poke_id: "poke-1".to_string(),
             got_queries_patch: Some(vec![
                 QueryPatchEntry {
-                    op: "put".to_string(),
+                    op: "put",
                     hash: "zzz".to_string(),
                 },
                 QueryPatchEntry {
-                    op: "del".to_string(),
+                    op: "del",
                     hash: "aaa".to_string(),
                 },
             ]),
@@ -1254,21 +1270,21 @@ mod tests {
                 (
                     "clientB".to_string(),
                     vec![QueryPatchEntry {
-                        op: "put".to_string(),
+                        op: "put",
                         hash: "h2".to_string(),
                     }],
                 ),
                 (
                     "clientA".to_string(),
                     vec![QueryPatchEntry {
-                        op: "del".to_string(),
+                        op: "del",
                         hash: "h1".to_string(),
                     }],
                 ),
             ])),
             rows_patch: Some(vec![
                 RowPatchOp {
-                    op: "put".to_string(),
+                    op: "put",
                     table_name: "issue".to_string(),
                     // Arc-shared, a float that must stay `1.0`, a null, and a
                     // nested object whose key order must survive.
@@ -1282,7 +1298,7 @@ mod tests {
                     id: None,
                 },
                 RowPatchOp {
-                    op: "del".to_string(),
+                    op: "del",
                     table_name: "comment".to_string(),
                     value: None,
                     id: Some(serde_json::json!({"id": "c1"})),
@@ -1293,7 +1309,7 @@ mod tests {
                 ("cA".to_string(), -1i64),
             ])),
             mutations_patch: Some(vec![MutationPatchEntry {
-                op: "put".to_string(),
+                op: "put",
                 mutation: None,
                 id: None,
             }]),
@@ -2408,6 +2424,106 @@ mod tests {
             .is_err()
         );
         assert_chain_released(&handler);
+    }
+
+    /// I-21 (rust-only): a `pokePart` also flushes when its ESTIMATED
+    /// serialized size crosses `DEFAULT_POKE_PART_MAX_BYTES` (256 KiB).
+    ///
+    /// TS flushes on ONE condition — `if (++partCount >=
+    /// PART_COUNT_FLUSH_THRESHOLD)` with the threshold at 100
+    /// (client-handler.ts:109,294). It has no byte accounting at all, so the
+    /// byte cap, `estimate_row_patch_bytes` and `estimate_json_bytes` have no
+    /// TS twin; the cap is ON by default, so it moves production frame
+    /// boundaries. Registered as INVENTIONS.md I-21.
+    ///
+    /// The client-observable contract an invention may not break: splitting is
+    /// CONTENT-PRESERVING. More, smaller `pokePart` frames are protocol-legal,
+    /// but every patch must still arrive exactly once and in the order it was
+    /// added — the cap may only choose where the boundaries fall.
+    ///
+    /// 20 rows of ~40 KiB keep the part COUNT well under 100, so a split here
+    /// can only come from the byte cap.
+    ///
+    /// NON-VACUOUS: set `DEFAULT_POKE_PART_MAX_BYTES` to 0 (or drop the
+    /// `state.body_est_bytes >= byte_cap` term from the flush condition) and
+    /// all 20 rows ride in ONE part, failing the split assertion; drop the
+    /// `state.body_est_bytes +=` accumulation and the same assertion fails.
+    #[test]
+    fn a_large_row_burst_flushes_on_the_byte_cap_and_preserves_every_patch() {
+        const ROWS: usize = 20;
+        const PAYLOAD_BYTES: usize = 40 * 1024;
+
+        let (handler, messages) = make_handler();
+        let to_version = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        };
+        let poke = handler.start_poke(to_version.clone());
+        for i in 0..ROWS {
+            let mut row_key = Map::new();
+            row_key.insert("id".to_string(), serde_json::json!(i));
+            poke.add_patch(&PatchToVersion {
+                patch: Patch::Row(RowPatch::Put {
+                    id: RowID {
+                        schema: "s".to_string(),
+                        table: "t".to_string(),
+                        row_key,
+                    },
+                    contents: std::sync::Arc::new(serde_json::json!({
+                        "id": i,
+                        "blob": "x".repeat(PAYLOAD_BYTES),
+                    })),
+                }),
+                to_version: to_version.clone(),
+            })
+            .unwrap();
+        }
+        poke.end(to_version).unwrap();
+
+        let msgs = messages.lock().unwrap();
+        let parts: Vec<&Value> = msgs
+            .iter()
+            .filter(|m| m.get(0).and_then(|t| t.as_str()) == Some("pokePart"))
+            .collect();
+
+        assert!(
+            parts.len() > 1,
+            "{} rows of {PAYLOAD_BYTES} bytes must cross the 256 KiB byte cap \
+             and split into several parts; got {} part(s)",
+            ROWS,
+            parts.len()
+        );
+        assert!(
+            parts.len() < ROWS,
+            "the cap must batch rows, not emit one part per row; got {} parts \
+             for {ROWS} rows",
+            parts.len()
+        );
+
+        // Content preservation: every row exactly once, in the order added.
+        let mut ids: Vec<i64> = Vec::new();
+        for part in &parts {
+            let Some(rows) = part[1].get("rowsPatch").and_then(|r| r.as_array()) else {
+                continue;
+            };
+            for rp in rows {
+                // A `put` carries the full contents under `value` (the key
+                // included); a `del` carries only `id.rowKey`.
+                let id = rp
+                    .get("value")
+                    .and_then(|v| v.get("id"))
+                    .or_else(|| rp.get("id").and_then(|i| i.get("rowKey"))?.get("id"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_else(|| panic!("row patch missing its key: op={:?}", rp.get("op")));
+                ids.push(id);
+            }
+        }
+        assert_eq!(
+            ids,
+            (0..ROWS as i64).collect::<Vec<_>>(),
+            "splitting on the byte cap must deliver every patch exactly once, \
+             in the order it was added — only the part BOUNDARIES may differ"
+        );
     }
 
     #[test]
