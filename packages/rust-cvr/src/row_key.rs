@@ -33,7 +33,7 @@
 
 use crate::hash::h128;
 use serde_json::{Map, Value};
-use std::sync::OnceLock;
+use std::cell::RefCell;
 
 use crate::schema::types::RowID;
 use crate::shared::string_compare::string_compare;
@@ -54,6 +54,18 @@ pub fn normalized_key_order(key: &RowKey) -> Vec<(&String, &Value)> {
     // order, i.e. `string_compare`, not byte order.
     entries.sort_by(|a, b| string_compare(a.0, b.0));
     entries
+}
+
+/// Append `v`'s compact JSON to `buf`.
+///
+/// `serde_json::to_writer` into a `Vec<u8>` cannot fail: the only two error
+/// sources are the writer (an infallible `Vec` push) and a `Serialize` impl
+/// that errors, which neither `String` nor `Value` does. The four call sites
+/// below used to carry an `.expect("rowIDString: …")` each, which reads to the
+/// next editor as a real error path worth handling. Concentrating the
+/// impossibility here documents it once instead.
+fn write_json<T: serde::Serialize + ?Sized>(buf: &mut Vec<u8>, v: &T) {
+    serde_json::to_writer(buf, v).expect("serializing a String/Value into a Vec<u8> is infallible");
 }
 
 /// Mirrors TS `rowIDString(id)` — canonical string for a RowID.
@@ -81,25 +93,35 @@ pub fn row_id_string(id: &RowID) -> String {
     // lower bound that avoids the first few reallocs for typical keys.
     let mut buf: Vec<u8> = Vec::with_capacity(32 + entries.len() * 16);
     buf.push(b'[');
-    serde_json::to_writer(&mut buf, &id.schema).expect("rowIDString: schema");
+    write_json(&mut buf, &id.schema);
     buf.push(b',');
-    serde_json::to_writer(&mut buf, &id.table).expect("rowIDString: table");
+    write_json(&mut buf, &id.table);
     for (k, v) in entries {
         buf.push(b',');
-        serde_json::to_writer(&mut buf, k).expect("rowIDString: key");
+        write_json(&mut buf, k);
         buf.push(b',');
-        serde_json::to_writer(&mut buf, v).expect("rowIDString: value");
+        write_json(&mut buf, v);
     }
     buf.push(b']');
     // `serde_json` only ever emits valid UTF-8, so this never fails.
     String::from_utf8(buf).expect("rowIDString serialization produced invalid UTF-8")
 }
 
-/// Max live entries per generation. The cache holds at most `2 * CACHE_GEN_CAP`
-/// entries before the oldest generation is dropped. 64Ki/gen (≤128Ki total)
-/// comfortably covers a large client group's working set of distinct RowIDs
-/// while bounding worst-case retention.
-const CACHE_GEN_CAP: usize = 64 * 1024;
+/// Max live entries per generation, PER THREAD. The cache holds at most
+/// `2 * CACHE_GEN_CAP` entries per thread before the oldest generation is
+/// dropped.
+///
+/// This was 64Ki/gen when the cache was one process-global map. It is now
+/// thread-local (see [`ROW_ID_STRING_CACHE`]), so the process-wide bound is
+/// `threads * 2 * CACHE_GEN_CAP` — with ~200-1024 CG threads, keeping
+/// 64Ki/gen would have raised the worst case from 128Ki entries to well over
+/// 100M. 512/gen (1Ki/thread) keeps the aggregate in the same range as the
+/// single shared cache it replaces (1Ki * 200 shards = 200Ki) while still
+/// serving the memo's actual purpose: catching the same RowID hashed or
+/// compared repeatedly within the window of rows currently being processed.
+/// TS's `WeakMap` retains an entry only while the RowID OBJECT is alive
+/// (row-key.ts:57), which is that same short window.
+const CACHE_GEN_CAP: usize = 512;
 
 /// Two-generation ("hot"/"cold") bounded cache. A lookup checks `hot` then
 /// `cold`, promoting a cold hit into `hot`. When `hot` fills, it rotates to
@@ -142,29 +164,62 @@ impl RowIdStringCache {
     }
 }
 
-/// A per-RowID cache to match the TS WeakMap behavior. This avoids recomputing
-/// the string form when the same RowID is hashed/compared repeatedly.
-///
-/// # Memory lifecycle
-///
-/// Unlike TS's `WeakMap` (which evicts when the RowID is GC'd), this cache is
-/// `static` and lives for the process. To keep it from growing without bound as
-/// callers construct unique RowIDs, it is a two-generation bounded cache (see
-/// [`RowIdStringCache`]) capped at `2 * CACHE_GEN_CAP` entries. Eviction is
-/// output-transparent: a miss simply recomputes the identical string.
-static ROW_ID_STRING_CACHE: OnceLock<parking_lot::Mutex<RowIdStringCache>> = OnceLock::new();
+thread_local! {
+    /// A per-RowID cache to match the TS WeakMap behavior. This avoids recomputing
+    /// the string form when the same RowID is hashed/compared repeatedly.
+    ///
+    /// # Why thread-local and not a shared `static`
+    ///
+    /// TS's memo is a module-level `WeakMap` (row-key.ts:57) — and zero-cache runs
+    /// each sync worker as its own PROCESS, so that map is per-worker and reached
+    /// from a single-threaded event loop. It needs no lock because there is no
+    /// contention to resolve.
+    ///
+    /// Rust runs every client group's thread inside ONE process. A
+    /// `static Mutex<RowIdStringCache>` therefore made every CG thread serialize
+    /// on a shared lock at a point where TS has no synchronization at all — the
+    /// "more serialized context than TS" divergence AGENTS rule 8 exists to catch,
+    /// and on a path that is per-row when it is live. A `thread_local!` gives each
+    /// thread the same private, lock-free memo TS's per-process WeakMap gives each
+    /// worker.
+    ///
+    /// # Memory lifecycle
+    ///
+    /// Unlike TS's `WeakMap` (which evicts when the RowID is GC'd), this cache
+    /// holds strong keys, so it is a two-generation bounded cache (see
+    /// [`RowIdStringCache`]) capped at `2 * CACHE_GEN_CAP` entries per thread; the
+    /// cap was lowered when the cache became per-thread so the process-wide bound
+    /// did not multiply by the thread count. Eviction is output-transparent: a
+    /// miss simply recomputes the identical string, so neither the cap nor the
+    /// thread the call lands on can change what a caller observes.
+    static ROW_ID_STRING_CACHE: RefCell<RowIdStringCache> =
+        RefCell::new(RowIdStringCache::new());
+}
 
-/// Mirrors TS's memoized `rowIDString` using a thread-safe bounded cache.
+/// Mirrors TS's memoized `rowIDString` using a per-thread bounded cache.
 pub fn row_id_string_cached(id: &RowID) -> String {
-    let cache =
-        ROW_ID_STRING_CACHE.get_or_init(|| parking_lot::Mutex::new(RowIdStringCache::new()));
-    let mut guard = cache.lock();
-    if let Some(s) = guard.get(id) {
-        return s;
-    }
-    let s = row_id_string(id);
-    guard.insert(id.clone(), s.clone());
-    s
+    ROW_ID_STRING_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(s) = cache.get(id) {
+            return s;
+        }
+        let s = row_id_string(id);
+        cache.insert(id.clone(), s.clone());
+        s
+    })
+}
+
+/// TEST-ONLY: entries the CALLING THREAD's `rowIDString` memo currently holds.
+///
+/// The discriminator between a per-thread and a process-global cache: a freshly
+/// spawned thread must see 0 here even after another thread has memoized the
+/// same RowID. See `row_id_string_cache_is_per_thread`.
+#[doc(hidden)]
+pub fn __test_row_id_string_cache_len() -> usize {
+    ROW_ID_STRING_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.hot.len() + cache.cold.len()
+    })
 }
 
 /// Mirrors TS `rowIDHash(id) = h128(rowIDString(id)).toString(36)`.
@@ -201,6 +256,64 @@ mod tests {
             table: table.to_string(),
             row_key,
         }
+    }
+
+    /// F-16: the `rowIDString` memo must be PER THREAD, not a process-global
+    /// `Mutex`.
+    ///
+    /// TS's memo is a module-level `WeakMap` (row-key.ts:57) reached from a
+    /// single-threaded event loop in a per-worker PROCESS — no lock, no
+    /// cross-worker sharing. Rust runs every client group's thread in one
+    /// process, so a `static Mutex<RowIdStringCache>` made all of them
+    /// serialize on one lock where TS synchronizes nothing (AGENTS rule 8).
+    ///
+    /// The discriminator is cache RESIDENCY, not the returned string: the memo
+    /// is output-transparent by design, so both shapes return identical text.
+    /// A freshly spawned thread must therefore see an EMPTY cache even though
+    /// this thread has already memoized the very same RowID.
+    ///
+    /// NON-VACUOUS: restore
+    /// `static ROW_ID_STRING_CACHE: OnceLock<parking_lot::Mutex<..>>` with the
+    /// `cache.lock()` body and `entries_seen_by_a_fresh_thread` comes back 1
+    /// instead of 0 — the assertion that the spawned thread starts cold fails.
+    #[test]
+    fn row_id_string_cache_is_per_thread() {
+        let id = make_row_id("public", "issue", json!({"id": "i1"}));
+        let expected = row_id_string(&id);
+
+        let before = __test_row_id_string_cache_len();
+        assert_eq!(row_id_string_cached(&id), expected);
+        assert_eq!(
+            __test_row_id_string_cache_len(),
+            before + 1,
+            "the calling thread must have memoized the RowID"
+        );
+        // A second call is a hit: residency must not grow.
+        assert_eq!(row_id_string_cached(&id), expected);
+        assert_eq!(__test_row_id_string_cache_len(), before + 1);
+
+        let id_for_thread = id.clone();
+        let expected_for_thread = expected.clone();
+        let (entries_seen_by_a_fresh_thread, text, after) = std::thread::spawn(move || {
+            let seen = __test_row_id_string_cache_len();
+            let text = row_id_string_cached(&id_for_thread);
+            (seen, text, __test_row_id_string_cache_len())
+        })
+        .join()
+        .expect("the probe thread must not panic");
+
+        assert_eq!(
+            entries_seen_by_a_fresh_thread, 0,
+            "a fresh thread must start with its OWN empty memo; a \
+             process-global cache would already hold the entry this thread \
+             inserted, which is the shared lock this test exists to forbid"
+        );
+        assert_eq!(
+            text, expected_for_thread,
+            "the memo is output-transparent: which thread computes it, and \
+             whether it hit or missed, cannot change the string"
+        );
+        assert_eq!(after, 1, "the probe thread memoized into its own cache");
     }
 
     #[test]
