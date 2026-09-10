@@ -22,10 +22,21 @@ use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::{NodeStream, StreamItem, from_vec};
 
 /// Cap state — tracks count and PK set per partition.
+///
+/// `pks` holds `Rc<str>`, not `String`, because TS shares the PK strings by
+/// REFERENCE everywhere it handles them: `[...capState.pks]` (cap.ts:210) and
+/// `new Set(pks)` (:216) copy pointers, and `#storage.set(key, {size, pks})`
+/// (:241) stores the array itself — so removing one row from a capped set of N
+/// costs TS ~2N pointer copies and ZERO string allocations. With
+/// `Vec<String>` the same removal did three DEEP copies of the whole vector
+/// (`pks.clone()`, the `HashSet<String>` collect, and `pks.clone()` again when
+/// storing) — ~3N `String` allocations per removed row on every capped query,
+/// scaling with the limit. `Rc<str>` makes each of those a refcount bump,
+/// which is what TS is doing.
 #[derive(Clone, Debug)]
 pub struct CapState {
     pub size: usize,
-    pub pks: Vec<String>,
+    pub pks: Vec<Rc<str>>,
 }
 
 /// Storage for Cap state — tracks PK sets per partition.
@@ -62,7 +73,7 @@ impl CapStorage {
 /// is already unwinding (TS's `if (!exceptionThrown)`) to avoid double-panic.
 struct CapInitialFetchGuard {
     persisted: Rc<Cell<bool>>,
-    pks: Rc<RefCell<Vec<String>>>,
+    pks: Rc<RefCell<Vec<Rc<str>>>>,
     storage: Shared<CapStorage>,
     key: String,
 }
@@ -188,7 +199,7 @@ impl Cap {
         // Lazy: yield nodes one at a time, recording PKs as a side effect.
         // State is persisted when the stream is exhausted or limit reached.
         // Port of TS Cap.#initialFetch (cap.ts:101-120).
-        let pks: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let pks: Rc<RefCell<Vec<Rc<str>>>> = Rc::new(RefCell::new(Vec::new()));
         let count = Rc::new(Cell::new(0usize));
         let persisted = Rc::new(Cell::new(false));
 
@@ -225,7 +236,9 @@ impl Cap {
                             )
                         })
                         .collect();
-                    pks_c.borrow_mut().push(format!("[{}]", pk_parts.join(",")));
+                    pks_c
+                        .borrow_mut()
+                        .push(Rc::from(format!("[{}]", pk_parts.join(",")).as_str()));
                     let c = count_c.get() + 1;
                     count_c.set(c);
                     if c >= limit {
@@ -356,19 +369,23 @@ impl Output for CapOutput {
 
                 if let Some(state) = cap_state {
                     let old_pk = cap.serialize_pk(&old_node.row);
-                    let pk_set: HashSet<String> = state.pks.iter().cloned().collect();
-                    if pk_set.contains(&old_pk) {
+                    // Cloning into the set is a refcount bump per entry now,
+                    // matching TS's `new Set(pks)` (cap.ts:216), which shares
+                    // the same string references.
+                    let pk_set: HashSet<Rc<str>> = state.pks.iter().cloned().collect();
+                    if pk_set.contains(old_pk.as_str()) {
                         // Update the PK in our set if it changed.
                         let new_pk = cap.serialize_pk(&node.row);
                         if old_pk != new_pk {
-                            let pks: Vec<String> = state
+                            let new_pk_rc: Rc<str> = Rc::from(new_pk.as_str());
+                            let pks: Vec<Rc<str>> = state
                                 .pks
                                 .iter()
                                 .map(|p| {
-                                    if p == &old_pk {
-                                        new_pk.clone()
+                                    if &**p == old_pk.as_str() {
+                                        Rc::clone(&new_pk_rc)
                                     } else {
-                                        p.clone()
+                                        Rc::clone(p)
                                     }
                                 })
                                 .collect();
@@ -402,7 +419,7 @@ impl Output for CapOutput {
                 if ct == ChangeType::Add {
                     if cap_state.size < cap.limit {
                         let mut pks = cap_state.pks.clone();
-                        pks.push(pk);
+                        pks.push(Rc::from(pk.as_str()));
                         cap.storage.borrow_mut().set(
                             state_key,
                             CapState {
@@ -420,7 +437,7 @@ impl Output for CapOutput {
                 }
 
                 if ct == ChangeType::Remove {
-                    let pk_index = cap_state.pks.iter().position(|p| p == &pk);
+                    let pk_index = cap_state.pks.iter().position(|p| &**p == pk.as_str());
                     let pk_index = match pk_index {
                         Some(i) => i,
                         None => return, // Not in our set — drop
@@ -433,7 +450,7 @@ impl Output for CapOutput {
 
                     // Try to refill: fetch from input with partition constraint,
                     // find first row NOT in PK set.
-                    let pk_set: HashSet<String> = pks.iter().cloned().collect();
+                    let pk_set: HashSet<Rc<str>> = pks.iter().cloned().collect();
                     let constraint = cap.partition_key.as_ref().map(|pk_cols| {
                         let mut c = Constraint::default();
                         for col in pk_cols {
@@ -455,7 +472,7 @@ impl Output for CapOutput {
                     };
                     for n in crate::ivm::stream::skip_yields(cap.input.borrow().fetch(&fetch_req)) {
                         let node_pk = cap.serialize_pk(&n.row);
-                        if !pk_set.contains(&node_pk) {
+                        if !pk_set.contains(node_pk.as_str()) {
                             replacement = Some(n);
                             break;
                         }
@@ -476,7 +493,7 @@ impl Output for CapOutput {
                         }
                         // Now add replacement to set and forward the add.
                         let rep_pk = self.cap.borrow().serialize_pk(&rep.row);
-                        pks.push(rep_pk);
+                        pks.push(Rc::from(rep_pk.as_str()));
                         self.cap.borrow_mut().storage.borrow_mut().set(
                             state_key,
                             CapState {
@@ -509,8 +526,8 @@ impl Output for CapOutput {
 
                 if let Some(state) = cap_state {
                     let pk = cap.serialize_pk(&node.row);
-                    let pk_set: HashSet<String> = state.pks.iter().cloned().collect();
-                    if pk_set.contains(&pk) {
+                    let pk_set: HashSet<Rc<str>> = state.pks.iter().cloned().collect();
+                    if pk_set.contains(pk.as_str()) {
                         drop(cap);
                         if let Some(output) = output {
                             output.borrow_mut().push(change, pusher);

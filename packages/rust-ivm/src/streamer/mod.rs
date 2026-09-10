@@ -162,19 +162,45 @@ impl Streamer {
 
 /// The schema `path` relationships down from `root` (each step is a
 /// relationship name the walk found in the parent's `relationships`).
-fn schema_at<'a>(root: &'a SourceSchema, path: &[String]) -> &'a SourceSchema {
+fn schema_at<'a>(root: &'a SourceSchema, path: &[Rc<str>]) -> &'a SourceSchema {
     path.iter().fold(root, |schema, rel| {
         schema
             .relationships
-            .get(rel)
+            .get(&**rel)
             .expect("streamer path was built from existing relationships")
     })
 }
 
-fn extend_path(path: &Rc<[String]>, rel: &str) -> Rc<[String]> {
-    let mut next = Vec::with_capacity(path.len() + 1);
-    next.extend_from_slice(path);
-    next.push(rel.to_string());
+/// Append `rel` to a frame's relationship path.
+///
+/// The path is a RUST-ONLY construct, not a port. TS's `#streamNodes` recurses
+/// with the resolved child schema in the call frame
+/// (`yield* this.#streamNodes(queryID, childSchema, op, children)`,
+/// pipeline-driver.ts:1385) and never materializes a path at all.
+/// `StreamerStream` replaced that generator recursion with an explicit `Frame`
+/// stack — registered in `parity/INVENTIONS.md` under I-12's fetch-path
+/// forwarding, because the stack is what lets a child-relationship `yield`
+/// suspend the walk — and a stack frame cannot hold a borrow of the child
+/// schema, so it stores the relationship path and re-resolves through
+/// `schema_at`. Nothing in the path reaches a client: `RowChange` carries the
+/// same fields TS yields (`{type, queryID, table, rowKey, row}`).
+///
+/// The invariant that matters is therefore not the representation but the
+/// resolution: `schema_at(root, extend_path(p, rel))` must be exactly the
+/// schema TS would have passed as `childSchema`. `Rc<str>` rather than `String`
+/// makes copying the PREFIX one refcount bump per element instead of a fresh
+/// allocation per element; with `Rc<[String]>`, `extend_from_slice` deep-cloned
+/// every element, so at depth 3 each descent allocated four Strings plus the
+/// Vec plus the Rc — per STREAMED NODE, in any nested query.
+///
+/// (Carrying the resolved schema instead of re-walking is a separate, deeper
+/// change: it would need `SourceSchema.relationships` to hold
+/// `Rc<SourceSchema>`. The design note at the top of this module about
+/// deliberately NOT cloning schemas per node still applies and is untouched.)
+fn extend_path(path: &Rc<[Rc<str>]>, rel: &str) -> Rc<[Rc<str>]> {
+    let mut next: Vec<Rc<str>> = Vec::with_capacity(path.len() + 1);
+    next.extend(path.iter().cloned());
+    next.push(Rc::from(rel));
     Rc::from(next)
 }
 
@@ -184,7 +210,7 @@ enum Frame {
     Changes {
         query_id: Rc<str>,
         root: Rc<SourceSchema>,
-        path: Rc<[String]>,
+        path: Rc<[Rc<str>]>,
         changes: std::vec::IntoIter<Change>,
         hidden: bool,
     },
@@ -193,7 +219,7 @@ enum Frame {
     Nodes {
         query_id: Rc<str>,
         root: Rc<SourceSchema>,
-        path: Rc<[String]>,
+        path: Rc<[Rc<str>]>,
         op: ChangeType,
         nodes: crate::ivm::stream::NodeStream,
         hidden: bool,
@@ -203,7 +229,7 @@ enum Frame {
     Relationships {
         query_id: Rc<str>,
         root: Rc<SourceSchema>,
-        path: Rc<[String]>,
+        path: Rc<[Rc<str>]>,
         op: ChangeType,
         node: Node,
         rel_idx: usize,
@@ -374,7 +400,7 @@ impl Iterator for StreamerStream {
                     *rel_idx += 1;
                     let schema = schema_at(root, path);
                     if let Some(rel_fn) = node.relationships.get(rel_name)
-                        && schema.relationships.contains_key(rel_name)
+                        && schema.relationships.contains_key(&**rel_name)
                     {
                         let stream = rel_fn();
                         let child_hidden = *hidden || is_exists_condition_rel(rel_name);
@@ -685,5 +711,86 @@ mod get_row_key_tests {
     fn absent_pk_column_does_not_yield_missing_key() {
         let r = row(&[("other", Value::Str(Arc::from("x")))]);
         let _ = get_row_key(&["id".to_string()], &r);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ivm::data::SortOrder;
+    use crate::ivm::schema::ColumnType;
+    use std::sync::Arc;
+
+    fn schema(table: &str) -> SourceSchema {
+        let sort: SortOrder = Arc::new(vec![["id".to_string(), "asc".to_string()]]);
+        SourceSchema {
+            table_name: table.to_string(),
+            columns: HashMap::from([("id".to_string(), ColumnType::Number { optional: false })]),
+            primary_key: vec!["id".to_string()],
+            relationships: HashMap::new(),
+            relationship_order: vec![],
+            compare_rows: crate::ivm::data::make_comparator(sort.clone(), false),
+            is_hidden: false,
+            sort: Some(sort),
+            system: System::Client,
+        }
+    }
+
+    /// F-30: the frame `path` is a rust-only stand-in for the `childSchema`
+    /// argument TS's `#streamNodes` recursion carries in its call frame
+    /// (pipeline-driver.ts:1385), so the property to pin is not the
+    /// representation but the RESOLUTION: walking the path from the root must
+    /// land on exactly the schema TS would have passed. The `Rc<str>` prefix
+    /// sharing is what makes the descent cheap (the pre-fix `Rc<[String]>` +
+    /// `extend_from_slice` deep-cloned every element, per streamed node).
+    ///
+    /// NON-VACUOUS: fold `schema_at` from the last segment, or push a
+    /// transformed `rel` in `extend_path`, and the resolution assertions fail;
+    /// change `path` back to `Rc<[String]>` and the sharing assertion cannot
+    /// compile.
+    #[test]
+    fn a_frame_path_resolves_to_the_schema_ts_would_pass_as_child_schema() {
+        let root = schema("issue").with_relationship(
+            "comments",
+            schema("comment").with_relationship("labels", schema("label"), false, System::Client),
+            false,
+            System::Client,
+        );
+
+        let empty: Rc<[Rc<str>]> = Rc::from(Vec::<Rc<str>>::new());
+        assert_eq!(
+            schema_at(&root, &empty).table_name,
+            "issue",
+            "an empty path is the root — TS's first `#streamChanges` call gets \
+             the query's own schema"
+        );
+
+        let p1 = extend_path(&empty, "comments");
+        let p2 = extend_path(&p1, "labels");
+        assert_eq!(
+            p2.iter().map(|s| &**s).collect::<Vec<_>>(),
+            vec!["comments", "labels"],
+            "each descent appends its relationship name, in order"
+        );
+
+        // The whole point: these must equal what TS reaches by recursing with
+        // `schema.relationships[relationship]` at each level.
+        assert_eq!(
+            schema_at(&root, &p1).table_name,
+            root.relationships["comments"].table_name
+        );
+        assert_eq!(
+            schema_at(&root, &p2).table_name,
+            root.relationships["comments"].relationships["labels"].table_name
+        );
+        assert_eq!(schema_at(&root, &p2).table_name, "label");
+
+        // The prefix is SHARED: descending is a refcount bump per existing
+        // element, not a fresh allocation per element.
+        assert!(
+            Rc::ptr_eq(&p1[0], &p2[0]),
+            "extending a path must share the prefix strings, not re-allocate \
+             them — this is the F-30 fix"
+        );
     }
 }
