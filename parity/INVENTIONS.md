@@ -985,3 +985,40 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   define parity when the link is the wal2 static lib); the ART G8 differential
   at 24g/32g on the restored image is the integration check (box run
   2026-09-09, see the commit that lands it).
+
+## I-15 — per-client poke chain (`ClientHandler::poke_chain`)
+- **Files:** `rust-cvr/src/client_handler.rs` (`poke_chain: Arc<AtomicBool>`,
+  `acquire_chain`, `release_chain`, `Drop for PokeHandler`),
+  `rust-syncer/src/services/view_syncer/view_syncer.rs` (`get_clients`, which
+  must hand `MultiPoker` at most one handler per socket).
+- **What is ported 1:1 (not invented):** the poke frame protocol itself —
+  `pokeStart` / `pokePart*` / `pokeEnd` and the `pokeStarted` flag that gates
+  the `finalVersion` close (client-handler.ts:208-212, :312-325).
+- **What has no TS twin (the invention):** the mutual exclusion. TS's
+  `startPoke` keeps `pokeStarted`, `body` and `partCount` as plain LOCALS of
+  the closure it returns (client-handler.ts:208-210); there is no flag, no
+  queue and no lock, because the view-syncer's `#lock` serializes passes and
+  JS runs one thread, so two pokes for one client cannot interleave. Rust
+  reaches the pokers from the serial CG thread and added the flag to make an
+  accidental overlap detectable instead of emitting two interleaved
+  `pokeStart`s on one socket.
+- **TS-observable contract:** a client's frames are always a well-formed,
+  non-nested poke sequence — `pokeStart` … `pokePart`* … `pokeEnd`, with no
+  second `pokeStart` before the first poke ends. When the invariant cannot be
+  upheld the connection FAILS (`downstream.fail` → error frame → close), so
+  the client reconnects and rehydrates at a consistent frame. What must never
+  happen is the third option: blocking. `acquire_chain` therefore has a
+  BOUNDED retry (`MAX_SPINS`) and returns `Err`; it must never wait
+  indefinitely, because the only code that can release the chain is another
+  `PokeHandler` on the same thread, reachable only through an `.await` a spin
+  loop never yields to. The unbounded `while … { thread::yield_now() }` this
+  replaced turned one duplicated poke target into a permanent 100%-CPU wedge
+  of the client-group thread — no acks, no pokes, for every client in the
+  group (the 2026-08-27 connect-ack outage shape).
+- **Tests:**
+  `rust-cvr client_handler::tests::a_second_overlapping_poke_fails_instead_of_wedging_the_thread`
+  (two pokers over one client: the second gets `Err`, and the poker that never
+  acquired must not release the holder's chain on drop — restoring the
+  unbounded loop makes this test HANG, which is the bug);
+  `rust-syncer engine_tests::get_clients_returns_one_handler_per_socket_for_a_repeated_ws_id`
+  (the duplicate that made the overlap reachable in production).

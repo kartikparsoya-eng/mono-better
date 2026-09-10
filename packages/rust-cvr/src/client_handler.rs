@@ -485,7 +485,7 @@ impl PokeHandler {
                 return Ok(());
             }
             drop(base);
-            self.acquire_chain(&mut state);
+            self.acquire_chain(&mut state)?;
             if let Err(error) = self.downstream.push(serde_json::json!([
                 "pokeStart",
                 {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
@@ -561,7 +561,7 @@ impl PokeHandler {
 
     fn ensure_body(&self, state: &mut PokeState) -> Result<(), String> {
         if !state.started {
-            self.acquire_chain(state);
+            self.acquire_chain(state)?;
             if let Err(error) = self.downstream.push(serde_json::json!([
                 "pokeStart",
                 {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
@@ -596,15 +596,53 @@ impl PokeHandler {
         Ok(())
     }
 
-    fn acquire_chain(&self, state: &mut PokeState) {
-        while self
-            .poke_chain
-            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
-            .is_err()
-        {
+    /// Take this client's poke chain, or fail rather than hang.
+    ///
+    /// Rust-only mutual exclusion (AGENTS rule 5/10; see `poke_chain` and
+    /// parity/INVENTIONS.md I-15). TS needs none: its `startPoke` keeps
+    /// `pokeStarted`/`body` as plain locals (client-handler.ts:208-210) and the
+    /// view-syncer's `#lock` plus JS's single thread already make two pokes for
+    /// one client impossible to interleave. Rust's pokers are reached from the
+    /// serial CG thread, so the flag exists to turn any accidental overlap into
+    /// a detectable state instead of two interleaved `pokeStart`s on one socket.
+    ///
+    /// It must NOT spin unboundedly, which is what it used to do:
+    /// `std::thread::yield_now()` yields the OS THREAD, while the only code
+    /// that can release this chain is another `PokeHandler` on the SAME thread
+    /// — reachable only through an `.await` point this loop never reaches. So a
+    /// contended chain was not a slow path, it was a permanent 100%-CPU wedge
+    /// of the CG thread, and every client of the group stopped receiving acks
+    /// and pokes (the shape of the 2026-08-27 connect-ack outage).
+    ///
+    /// A bounded retry is kept rather than failing on the first miss purely as
+    /// insurance against a cross-thread holder this analysis has not foreseen;
+    /// it costs microseconds and cannot mask the same-thread case, which no
+    /// number of retries can resolve. On give-up the caller's `add_patch`
+    /// routes the error to `downstream.fail`, failing THIS client so it
+    /// reconnects and rehydrates — recoverable, unlike a wedged thread.
+    fn acquire_chain(&self, state: &mut PokeState) -> Result<(), String> {
+        /// Enough to cover a genuine cross-thread hand-off, far too few to
+        /// spend meaningful CPU on the unresolvable same-thread case.
+        const MAX_SPINS: u32 = 1024;
+        for _ in 0..MAX_SPINS {
+            if self
+                .poke_chain
+                .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
+                .is_ok()
+            {
+                state.poke_in_progress = true;
+                return Ok(());
+            }
             std::thread::yield_now();
         }
-        state.poke_in_progress = true;
+        // Deliberately do NOT set `poke_in_progress`: this handler never took
+        // the chain, so its `release_chain`/`Drop` must not clear the flag out
+        // from under the handler that actually holds it.
+        Err(format!(
+            "poke chain already held for client group {}: refusing to block the \
+             client-group thread",
+            self.client_group_id
+        ))
     }
 
     fn release_chain(&self, state: &mut PokeState) {
@@ -1375,6 +1413,67 @@ mod tests {
                 config_version: Some(1),
             },
         }
+    }
+
+    /// Two overlapping pokes on ONE client must FAIL the second, never block.
+    ///
+    /// `poke_chain` is rust-only mutual exclusion (INVENTIONS.md I-15): TS
+    /// keeps `pokeStarted`/`body` as locals in `startPoke`
+    /// (client-handler.ts:208-210) and relies on the view-syncer `#lock` plus a
+    /// single JS thread, so it has nothing to contend. Rust's pokers all run on
+    /// the serial CG thread, which is exactly why the old
+    /// `while compare_exchange(..).is_err() { thread::yield_now() }` could
+    /// never make progress: the holder is another `PokeHandler` on THIS thread
+    /// and only an `.await` point could let it run. A contended chain wedged
+    /// the client-group thread at 100% CPU indefinitely — no ack, no poke, for
+    /// every client in the group.
+    ///
+    /// NON-VACUOUS, but by HANGING rather than failing: restore the unbounded
+    /// `while` loop in `acquire_chain` and this test never returns (verified by
+    /// running it with a kill timeout). That hang IS the bug.
+    #[test]
+    fn a_second_overlapping_poke_fails_instead_of_wedging_the_thread() {
+        let (handler, _messages) = make_handler();
+        let patch = make_row_patch_put("issue", serde_json::json!({"id": "i1"}));
+        let version = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        };
+
+        // Two live pokers over the same client — the state a duplicated poke
+        // target produced (see `get_clients` de-duplication).
+        let first = handler.start_poke(version.clone());
+        let second = handler.start_poke(version.clone());
+
+        // The first admits its patch and TAKES the chain.
+        first
+            .add_patch(&patch)
+            .expect("the first poke must proceed normally");
+
+        // The second cannot, and must say so instead of spinning. `add_patch`
+        // has already routed this to `downstream.fail`, so the client
+        // reconnects and rehydrates — recoverable, unlike a wedged thread.
+        let err = second
+            .add_patch(&patch)
+            .expect_err("the second overlapping poke must fail, not block");
+        assert!(
+            err.contains("poke chain already held"),
+            "the failure must name the chain contention; got {err:?}"
+        );
+
+        // The failed poker must not have claimed the chain, so the FIRST
+        // poker's release is still the one that matters.
+        drop(second);
+        assert!(
+            handler.poke_chain.load(AtomicOrdering::SeqCst),
+            "dropping the poker that never acquired must not release the chain \
+             out from under the holder"
+        );
+        drop(first);
+        assert!(
+            !handler.poke_chain.load(AtomicOrdering::SeqCst),
+            "the holder's drop must release the chain"
+        );
     }
 
     #[test]

@@ -10877,9 +10877,21 @@ impl ViewSyncerService {
         }
     }
 
+    /// The poke targets for `ws_ids`, at most ONE handler per socket.
+    ///
+    /// The de-duplication is load-bearing, not defensive tidiness. TS's
+    /// `#getClients()` returns the values of a Map keyed by clientID, so a
+    /// duplicate is unrepresentable; rust looks handlers up from a LIST of
+    /// ws_ids (`registered_ws.values()`, keyed by client_id, so a repeated
+    /// ws_id is representable) and a repeat would put the same
+    /// `Arc<ClientHandler>` into one `MultiPoker` twice. The second poker then
+    /// contends its own client's `poke_chain` — which `acquire_chain` cannot
+    /// resolve, because the holder is the first poker on this very thread.
     fn get_clients(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(ws_ids.len());
         ws_ids
             .iter()
+            .filter(|id| seen.insert(id.as_str()))
             .filter_map(|id| self.clients.get(id).cloned())
             .collect()
     }
@@ -15963,6 +15975,56 @@ mod engine_tests {
             floor, buggy,
             "the fix must not collapse the catch-up interval"
         );
+    }
+
+    /// One handler per socket, however often a ws_id repeats in the request.
+    ///
+    /// TS cannot produce a duplicate: `#getClients()` reads the values of a Map
+    /// keyed by clientID. Rust resolves handlers from a LIST of ws_ids (built
+    /// from `registered_ws.values()`, which is keyed by client_id — so a
+    /// repeated ws_id is representable), and a repeat put the same
+    /// `Arc<ClientHandler>` into one `MultiPoker` twice. Both pokers then share
+    /// that client's `poke_chain`: the first takes it, the second cannot, and
+    /// `acquire_chain` used to spin on `std::thread::yield_now()` forever
+    /// because the holder is on this very thread and only an `.await` could let
+    /// it run. One duplicated entry wedged the whole client-group thread.
+    ///
+    /// NON-VACUOUS: drop the `seen.insert(...)` filter in `get_clients` and the
+    /// length assertion fails with 2.
+    #[test]
+    fn get_clients_returns_one_handler_per_socket_for_a_repeated_ws_id() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let shard = ShardID {
+            app_id: "zero".to_string(),
+            shard_num: 0,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn rust_cvr::client_handler::WebSocketSink> =
+            Arc::new(DirectWebSocketSink::new(tx));
+        engine.register_client("c1", "ws1", "cg1", &shard, None, sink);
+
+        let clients =
+            engine.get_clients(&["ws1".to_string(), "ws1".to_string(), "ws1".to_string()]);
+        assert_eq!(
+            clients.len(),
+            1,
+            "a repeated ws_id must yield ONE poker, not one per repeat"
+        );
+
+        // The duplicate is what made this fatal: two pokers over one client
+        // share its chain, so the second could never acquire it.
+        let refs: Vec<&rust_cvr::client_handler::ClientHandler> =
+            clients.iter().map(|c| c.as_ref()).collect();
+        let pokers = rust_cvr::client_handler::MultiPoker::new(
+            &refs,
+            rust_cvr::schema::types::version_from_string("02"),
+            "test",
+        );
+        // Reaching this line at all is the point: with a duplicate present,
+        // the first `add_patch` never returned.
+        pokers.cancel();
     }
 
     /// An advance may only poke clients that are AT the pre-advance cvr.version;
