@@ -403,6 +403,14 @@ impl CVRStoreHandle {
         Ok(self.row_cache.get_row_records().await?)
     }
 
+    /// How many times the row cache deep-copied its whole map on `apply`
+    /// because a `get_row_records()` snapshot was still alive. Rust-only
+    /// observability with no TS twin (see `RowRecordCache::cow_copies`); the
+    /// serving paths must keep this at 0.
+    pub async fn row_cache_cow_copies(&self) -> u64 {
+        self.row_cache.cow_copies().await
+    }
+
     /// Test-only: seed the owned row cache, standing in for the `cvr.rows` a TS
     /// test would INSERT before calling `flush`.
     #[cfg(test)]

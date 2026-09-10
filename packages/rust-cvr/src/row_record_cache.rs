@@ -131,6 +131,21 @@ struct CacheState {
     /// not handle-clones. Inc on `CacheState::new`, dec when the last clone (and
     /// thus the Arc) drops.
     _census: crate::live_count::Guard,
+    /// How many times `apply` had to COPY the whole row-record map instead of
+    /// mutating it in place, i.e. how many times `Arc::make_mut` found a
+    /// `get_row_records()` snapshot still alive (strong_count > 1).
+    ///
+    /// Rust-only observability (AGENTS rule 5): TS has no twin because its
+    /// `getRowRecords()` hands out a reference to the live `Map` and `apply`
+    /// mutates that same object — there is nothing to copy. Rust needs the
+    /// copy-on-write to give the caller a stable view, so the COPY is a
+    /// rust-only cost, and it is proportional to the client group's ENTIRE row
+    /// set. This counter is the only way a test (or an operator) can tell
+    /// "mutated in place" from "deep-copied 800K records", since both produce
+    /// identical results. Expected to stay 0: every caller must release its
+    /// snapshot before the flush that applies (see
+    /// `ViewSyncerService::hydrate_and_sync` / `advance_and_sync`).
+    cow_copies: u64,
 }
 
 impl CacheState {
@@ -143,6 +158,7 @@ impl CacheState {
             flushing: false,
             flush_error: None,
             _census: crate::live_count::Guard::new(&crate::live_count::ROW_RECORD_CACHE),
+            cow_copies: 0,
         }
     }
 }
@@ -377,6 +393,12 @@ impl RowRecordCache {
         // client group's entire row set to change nothing. The version bookkeeping
         // below still runs unconditionally, which is the part TS's call is for.
         if !row_records.is_empty() {
+            // Count the copy BEFORE `make_mut` decides: once it has run, an
+            // in-place mutation and a copy are indistinguishable. See
+            // `CacheState::cow_copies`.
+            if Arc::strong_count(state.cache.as_ref().unwrap()) > 1 {
+                state.cow_copies += 1;
+            }
             let cache = Arc::make_mut(state.cache.as_mut().unwrap());
             for (id, row) in &row_records {
                 let id_str = row_id_string(id);
@@ -454,6 +476,14 @@ impl RowRecordCache {
         }
 
         Ok(count)
+    }
+
+    /// How many times `apply` deep-copied the whole row-record map because a
+    /// `get_row_records()` snapshot was still alive. See
+    /// `CacheState::cow_copies` — this must stay 0 on the serving paths, and a
+    /// non-zero value means a caller is holding its snapshot across the flush.
+    pub async fn cow_copies(&self) -> u64 {
+        self.state.lock().await.cow_copies
     }
 
     /// Mirrors TS `hasPendingUpdates()`.
@@ -1308,6 +1338,75 @@ mod tests {
         );
         cache.state.try_lock().unwrap().cache = Some(Arc::new(HashMap::new()));
         cache
+    }
+
+    /// `apply` must mutate the row-record map IN PLACE when no
+    /// `get_row_records()` snapshot is outstanding, and copy-on-write only when
+    /// one is. The copy is proportional to the client group's ENTIRE row set,
+    /// so on a large CG it is the dominant per-pass cost — and it is invisible
+    /// in the results, which are identical either way. `cow_copies` is the only
+    /// observable, which is why it exists.
+    ///
+    /// TS cannot copy at all: `getRowRecords()` returns the live `Map` and
+    /// `apply` mutates that same object (row-record-cache.ts:239+), so every
+    /// copy rust makes is rust-only cost. This pins that the copy happens ONLY
+    /// under a live snapshot.
+    ///
+    /// NON-VACUOUS: move step (2)'s `drop(snapshot2)` to AFTER its `apply` —
+    /// the shape this fix removed from `hydrate_and_sync`/`advance_and_sync` —
+    /// and the second assertion fails with `cow_copies == 2`. (Holding step
+    /// (1)'s snapshot instead proves nothing: `make_mut` already unshared the
+    /// map, so that Arc no longer aliases the cache.)
+    #[tokio::test]
+    async fn apply_mutates_in_place_unless_a_snapshot_is_outstanding() {
+        let cache = loaded_cache_for_test();
+        let rec = make_record("public", "issue", 1, "v1");
+        let v = CVRVersion::empty();
+
+        // (1) A snapshot IS alive across the apply → copy-on-write.
+        let snapshot = cache.get_row_records().await.expect("loaded cache reads");
+        cache
+            .apply(vec![(rec.id.clone(), Some(rec.clone()))], v.clone(), true)
+            .await
+            .expect("apply with a live snapshot");
+        assert_eq!(
+            cache.cow_copies().await,
+            1,
+            "a live get_row_records() snapshot must force ONE copy-on-write"
+        );
+        // The snapshot must still see the PRE-apply state — that isolation is
+        // the reason the copy is taken at all.
+        assert!(
+            !snapshot.contains_key(&row_id_string(&rec.id)),
+            "the outstanding snapshot must not observe the apply"
+        );
+        drop(snapshot);
+
+        // (2) Read a snapshot and RELEASE it before applying — the shape every
+        // serving path must use. Note the copy-on-write in (1) already
+        // UNSHARED the map (`make_mut` installed a fresh Arc), so this must
+        // take its own snapshot for the assertion to mean anything: holding the
+        // stale one from (1) could never affect this apply.
+        let rec2 = make_record("public", "issue", 2, "v1");
+        let snapshot2 = cache.get_row_records().await.expect("read");
+        assert!(!snapshot2.contains_key(&row_id_string(&rec2.id)));
+        drop(snapshot2);
+        cache
+            .apply(vec![(rec2.id.clone(), Some(rec2.clone()))], v.clone(), true)
+            .await
+            .expect("apply with no live snapshot");
+        assert_eq!(
+            cache.cow_copies().await,
+            1,
+            "a snapshot RELEASED before `apply` must let it mutate in place — \
+             the counter must NOT have advanced past the first (snapshotted) apply"
+        );
+
+        // Both applies must have landed regardless of which path they took:
+        // the copy is a cost, never a behaviour change.
+        let after = cache.get_row_records().await.expect("read back");
+        assert!(after.contains_key(&row_id_string(&rec.id)));
+        assert!(after.contains_key(&row_id_string(&rec2.id)));
     }
 
     /// TS `executeRowUpdates` (row-record-cache.ts:429-449) deletes ONLY a

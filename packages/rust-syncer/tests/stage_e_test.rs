@@ -814,6 +814,164 @@ type SharedConnAlias = Rc<RefCell<Connection>>;
 
 mod common;
 
+/// PG-gated (`TEST_CVR_PG_URI`): a hydrate pass must RELEASE its row-record
+/// snapshot before the flush that applies to the cache. Holding it makes
+/// `RowRecordCache::apply` copy-on-write the client group's ENTIRE row set
+/// (`Arc::make_mut` sees a live `get_row_records()` Arc) — hundreds of MB of
+/// memcpy on the serial CG thread for a large CG, with byte-identical results.
+///
+/// TS never copies: `received()` reads `const existingRows = await
+/// this._cvrStore.getRowRecords()` as a LOCAL (cvr.ts:845), so no reference
+/// survives the call, and `apply` mutates the live `Map` in place. Rust has to
+/// hoist the read (its consumer runs in a synchronous `FnMut`), so the port
+/// must at least release it as early as TS does.
+///
+/// Needs the real store: without PG `existing_rows()` short-circuits to an
+/// empty map and no snapshot is ever taken, which is why the store-less tests
+/// cannot see this.
+///
+/// NON-VACUOUS: in `hydrate_and_sync`, delete the `drop(existing_rows_owned)`
+/// after `drop(processor)` and this fails with `cow_copies == 1`.
+#[test]
+fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
+    let Some(uri) = common::pg_uri() else {
+        eprintln!(
+            "SKIP pg_hydrate_releases_its_row_snapshot_before_the_flush: TEST_CVR_PG_URI not set"
+        );
+        return;
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        let schema = "stage_e_row_snapshot";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&uri)
+            .await
+            .expect("connect TEST_CVR_PG_URI");
+        sqlx::raw_sql(&common::cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .expect("create CVR schema");
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "issue" (
+                "id"    "text|NOT_NULL",
+                "title" "text",
+                "_0_version" "text",
+                PRIMARY KEY ("id")
+            );
+            INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+                ('i1', 'first issue', '01'),
+                ('i2', 'second issue', '01');
+            "#,
+        )
+        .unwrap();
+        let specs =
+            rust_syncer::compute_zql_specs(&conn, &rust_syncer::ZqlSpecOptions::default(), None)
+                .unwrap();
+        let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init_from_connection(specs, shared_conn).unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        engine
+            .set_cvr_store(
+                pool.clone(),
+                schema.to_string(),
+                "cg1".to_string(),
+                "task-0".to_string(),
+            )
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+        let anyone_can = serde_json::json!({
+            "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+        });
+        let put = |hash: &str, ast: serde_json::Value| DesiredQuerySpec {
+            hash: hash.to_string(),
+            ast: Some(ast),
+            name: None,
+            args: None,
+            ttl: None,
+        };
+        // Pass 1 populates `cvr.rows`, so pass 2's `existing_rows()` returns a
+        // NON-EMPTY snapshot — the state in which holding it costs a full copy.
+        let cvr1 = engine
+            .config_and_hydrate(
+                empty_cvr("cg1", "01"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![put("q_all", serde_json::json!({"table": "issue"}))],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                Some(&anyone_can),
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "01".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+        assert!(
+            !engine.existing_rows().await.unwrap().is_empty(),
+            "precondition: pass 1 must have written row records, else a copy \
+             would be free and this test could not observe it"
+        );
+        let before = engine.row_cache_cow_copies().await;
+
+        // Pass 2 hydrates a second query: it READS the snapshot (add_queries is
+        // non-empty) and then flushes. Every copy-on-write from here is the bug.
+        let _cvr2 = engine
+            .config_and_hydrate(
+                cvr1,
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![put(
+                    "q_desc",
+                    serde_json::json!({"table": "issue", "orderBy": [["id", "desc"]]}),
+                )],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                Some(&anyone_can),
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "01".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            engine.row_cache_cow_copies().await,
+            before,
+            "the hydrate pass must release its row-record snapshot before the \
+             flush; a copy-on-write here duplicates the whole CG row set"
+        );
+    });
+}
+
 /// PG-gated (`TEST_CVR_PG_URI`): the catch-up scan that closes a hydrate pass
 /// must not replay the got-`put` this very pass just tracked. TS
 /// `#catchupClients(lc, cvr, finalVersion, addQueries ids, pokers)`

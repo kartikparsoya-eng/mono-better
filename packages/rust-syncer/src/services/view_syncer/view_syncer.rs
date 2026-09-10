@@ -10480,6 +10480,20 @@ impl ViewSyncerService {
         Ok(store.inspect_queries(ttl_clock, client_id).await?)
     }
 
+    /// How many times the CVR row cache deep-copied its entire map on `apply`
+    /// because a `get_row_records()` snapshot was still alive. Rust-only test
+    /// observability (AGENTS rule 5) over the rust-only copy-on-write; TS
+    /// cannot copy at all (`getRowRecords()` returns the live `Map`). The
+    /// serving paths must hold this at 0 — see the snapshot-scoping notes in
+    /// `hydrate_and_sync` and `advance_and_sync`.
+    #[doc(hidden)]
+    pub async fn row_cache_cow_copies(&self) -> u64 {
+        match self.store.clone() {
+            Some(store) => store.lock().await.row_cache_cow_copies().await,
+            None => 0,
+        }
+    }
+
     /// Inject the shared-pool runtime handle used to offload CVR store I/O
     /// (must be the runtime that owns the CVR `PgPool`).
     pub fn set_tokio_handle(&mut self, handle: tokio::runtime::Handle) {
@@ -12747,6 +12761,10 @@ impl ViewSyncerService {
         processor.finish(existing_rows)?;
         let num_changes = processor.total_processed();
         drop(processor);
+        // Release the row-record snapshot before the flush — see the twin note
+        // in `advance_and_sync`. Held past here, it forces
+        // `RowRecordCache::apply` to copy the client group's entire row set.
+        drop(existing_rows_owned);
 
         // Hand the folded signatures to the updater's provider so its flush can
         // persist each hydrated query's signature and flag drift.
@@ -12948,8 +12966,6 @@ impl ViewSyncerService {
         } else {
             self.existing_rows().await.map_err(|e| e.to_string())?
         };
-        let existing_rows: &RowRecordMap = &existing_rows_owned;
-
         // Build the updater with the real post-advance version, then replay the
         // collected delta through it (order preserved).
         let (sigs, provider) = Self::signature_provider();
@@ -12963,7 +12979,19 @@ impl ViewSyncerService {
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
         let pokers = MultiPoker::new(&client_refs, pokers_version, "advance-and-sync");
 
+        // The row-record snapshot is CONSUMED by this block and released with
+        // it, before the flush below. TS releases it per `received()` call — its
+        // `const existingRows = await this._cvrStore.getRowRecords()`
+        // (cvr.ts:845) is a local, so no reference survives the call. Rust has
+        // to read it once up front (the consumer runs inside a synchronous
+        // `FnMut` and cannot await), but it must not hold it any LONGER than
+        // TS: a live snapshot makes the flush's `RowRecordCache::apply`
+        // copy-on-write the client group's entire row set (`Arc::make_mut`
+        // sees strong_count > 1). Moving `existing_rows_owned` in here is what
+        // makes that structural rather than a comment — `cow_copies` stays 0.
         {
+            let existing_rows_owned = existing_rows_owned;
+            let existing_rows: &RowRecordMap = &existing_rows_owned;
             let mut processor = ChangeProcessor::new(&mut updater, &pokers);
             for (ct, qid, table, rk, row) in collected {
                 // A `received` version-bump failure is recoverable (TS throws);
