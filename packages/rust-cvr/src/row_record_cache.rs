@@ -952,8 +952,26 @@ async fn flush_one_iteration(
 
     // 3. Bulk insert via json_to_recordset (matches TS exactly).
     if !inserts.is_empty() {
+        // Serialize STRAIGHT TO TEXT and PROPAGATE a failure. Two reasons.
+        //
+        // (a) `unwrap_or(Array(vec![]))` turned a serialization failure into an
+        //     EMPTY insert batch: the transaction committed, the flush reported
+        //     success, `flushed_rows_version` advanced — and the row records
+        //     were gone, after clients had already been poked those rows. That
+        //     is the I-6 durability contract inverted (a client seeing a version
+        //     the CVR never recorded). TS cannot reach that state: a failing
+        //     serialization rejects `#flush` (cvr-store.ts) and the flush fails.
+        //     Unreachable today — every `RowsRow` field is a `String`, a
+        //     `serde_json::Value` or `Option<Value>`, and `Value::Number` cannot
+        //     hold a non-finite float — which is exactly why it should be a `?`
+        //     and not a fallback: nothing legitimate is being tolerated.
+        //
+        // (b) `to_value` built a full intermediate `Value` tree (an `IndexMap`
+        //     plus seven `Value`s per row) that sqlx then walked again to
+        //     produce the JSON text. `$1::json` takes a text bind identically,
+        //     so the tree is pure overhead on every flush.
         let inserts_json =
-            serde_json::to_value(&inserts).unwrap_or(serde_json::Value::Array(vec![]));
+            serde_json::to_string(&inserts).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
         let bulk_sql = format!(
             r#"INSERT INTO {}(
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"

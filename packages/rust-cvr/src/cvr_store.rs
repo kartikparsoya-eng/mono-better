@@ -1350,13 +1350,20 @@ impl CVRStoreHandle {
                 stats.rows += n;
             }
             if !stmts.inserts.is_empty() {
-                let rows_json = Value::Array(
-                    stmts
-                        .inserts
-                        .iter()
-                        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-                        .collect(),
-                );
+                // Serialize the batch to TEXT in one pass and PROPAGATE a
+                // failure. The previous per-row
+                // `to_value(r).unwrap_or(Value::Null)` substituted a JSON
+                // `null` for an unserializable row, which `json_to_recordset`
+                // expands into a row of all-NULLs — so a single bad row either
+                // violated NOT NULL or wrote a corrupt record, in place of the
+                // real one. TS rejects the flush instead. Unreachable today
+                // (every `RowsRow` field is a String/Value and `Value::Number`
+                // cannot be non-finite); the point is to stop tolerating it.
+                // Binding text also skips the intermediate `Value` tree that
+                // sqlx would immediately re-serialize — `$1::json` is identical
+                // either way.
+                let rows_json = serde_json::to_string(&stmts.inserts)
+                    .map_err(|e| CVRStoreError::Sqlx(sqlx::Error::Encode(Box::new(e))))?;
                 let sql = format!(
                     r#"INSERT INTO {}
                    ("clientGroupID", "schema", "table", "rowKey",
@@ -1379,7 +1386,7 @@ impl CVRStoreHandle {
                     "refCounts" = excluded."refCounts""#,
                     self.cvr("rows")
                 );
-                sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
+                sqlx::query(&sql).bind(rows_json).execute(&mut *tx).await?;
                 stats.rows += stmts.inserts.len();
             }
         }
