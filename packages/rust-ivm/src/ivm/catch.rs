@@ -147,7 +147,7 @@ pub fn expand_node(node: &Node) -> CaughtNode {
             let children: Vec<CaughtNode> = crate::ivm::stream::skip_yields(stream)
                 .map(|n| expand_node(&n))
                 .collect();
-            relationships.push((name.clone(), children));
+            relationships.push((name.to_string(), children));
         }
     }
     CaughtNode {

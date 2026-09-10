@@ -103,8 +103,8 @@ impl Join {
     fn process_parent_node(
         &self,
         parent_row: Row,
-        parent_rels: HashMap<String, RelStream>,
-        parent_order: Vec<String>,
+        parent_rels: HashMap<Rc<str>, RelStream>,
+        parent_order: Vec<Rc<str>>,
     ) -> Node {
         let child = self.child.clone();
         let parent_key = self.parent_key.clone();
@@ -175,10 +175,10 @@ impl Join {
         let mut taken_rels = parent_rels;
         for name in &parent_order {
             if let Some(rel) = taken_rels.remove(name) {
-                node = node.set_relationship(name, rel);
+                node = node.set_relationship(Rc::clone(name), rel);
             }
         }
-        node = node.set_relationship(&relationship_name, child_stream);
+        node = node.set_relationship(relationship_name.as_str(), child_stream);
         node
     }
 
@@ -415,10 +415,10 @@ impl Join {
             let mut taken_rels = parent_rels;
             for name in &parent_order {
                 if let Some(rel) = taken_rels.remove(name) {
-                    node = node.set_relationship(name, rel);
+                    node = node.set_relationship(Rc::clone(name), rel);
                 }
             }
-            node = node.set_relationship(&relationship_name, child_stream);
+            node = node.set_relationship(relationship_name.as_str(), child_stream);
             StreamItem::Data(node)
         }))
     }

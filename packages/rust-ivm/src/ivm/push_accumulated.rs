@@ -9,6 +9,8 @@
 //! - edit in → adds, removes, or edits out
 //! - child in → adds, removes, or children out
 
+use std::rc::Rc;
+
 use std::collections::HashMap;
 
 use crate::ivm::change::{
@@ -30,7 +32,7 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !node.relationships.contains_key(name) {
-                        node = node.set_relationship(name, rel.clone());
+                        node = node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_add_change(node)
@@ -39,7 +41,7 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !node.relationships.contains_key(name) {
-                        node = node.set_relationship(name, rel.clone());
+                        node = node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_remove_change(node)
@@ -57,13 +59,13 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut new_node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !new_node.relationships.contains_key(name) {
-                        new_node = new_node.set_relationship(name, rel.clone());
+                        new_node = new_node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 let mut old_node = lo.clone();
                 for (name, rel) in &ro.relationships {
                     if !old_node.relationships.contains_key(name) {
-                        old_node = old_node.set_relationship(name, rel.clone());
+                        old_node = old_node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_edit_change(new_node, old_node)
@@ -81,7 +83,7 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !node.relationships.contains_key(name) {
-                        node = node.set_relationship(name, rel.clone());
+                        node = node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_child_change(node, lc.clone())
@@ -101,7 +103,7 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut new_node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !new_node.relationships.contains_key(name) {
-                        new_node = new_node.set_relationship(name, rel.clone());
+                        new_node = new_node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_edit_change(new_node, lo.clone())
@@ -116,7 +118,7 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 let mut old_node = lo.clone();
                 for (name, rel) in &rn.relationships {
                     if !old_node.relationships.contains_key(name) {
-                        old_node = old_node.set_relationship(name, rel.clone());
+                        old_node = old_node.set_relationship(Rc::clone(name), rel.clone());
                     }
                 }
                 make_edit_change(ln.clone(), old_node)
@@ -134,14 +136,23 @@ pub fn add_empty_relationships(schema: &SourceSchema, change: &Change) -> Change
         return change.clone();
     }
 
-    let rel_names: Vec<String> = schema.relationships.keys().cloned().collect();
+    // `Rc<str>` once per relationship name, then a refcount bump per node
+    // below. `add_empty_relationships` runs PER CHANGE (TS
+    // `makeAddEmptyRelationships`, push-accumulated.ts:355) and each name used
+    // to be allocated three times over: once for this vec, then twice more
+    // inside `set_relationship` (map key + order entry) for every node.
+    let rel_names: Vec<Rc<str>> = schema
+        .relationships
+        .keys()
+        .map(|k| Rc::from(k.as_str()))
+        .collect();
 
     match change {
         Change::Add(node) => {
             let mut n = node.clone();
             for name in &rel_names {
                 if !n.relationships.contains_key(name) {
-                    n = n.set_relationship(name, empty_rel());
+                    n = n.set_relationship(Rc::clone(name), empty_rel());
                 }
             }
             make_add_change(n)
@@ -150,7 +161,7 @@ pub fn add_empty_relationships(schema: &SourceSchema, change: &Change) -> Change
             let mut n = node.clone();
             for name in &rel_names {
                 if !n.relationships.contains_key(name) {
-                    n = n.set_relationship(name, empty_rel());
+                    n = n.set_relationship(Rc::clone(name), empty_rel());
                 }
             }
             make_remove_change(n)
@@ -160,10 +171,10 @@ pub fn add_empty_relationships(schema: &SourceSchema, change: &Change) -> Change
             let mut on = old_node.clone();
             for name in &rel_names {
                 if !n.relationships.contains_key(name) {
-                    n = n.set_relationship(name, empty_rel());
+                    n = n.set_relationship(Rc::clone(name), empty_rel());
                 }
                 if !on.relationships.contains_key(name) {
-                    on = on.set_relationship(name, empty_rel());
+                    on = on.set_relationship(Rc::clone(name), empty_rel());
                 }
             }
             make_edit_change(n, on)

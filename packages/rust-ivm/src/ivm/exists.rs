@@ -102,7 +102,7 @@ impl Exists {
     fn fetch_size_stream(&self, node: &Node) -> Box<dyn Iterator<Item = StreamItem<usize>>> {
         let rel_fn = node
             .relationships
-            .get(&self.relationship_name)
+            .get(self.relationship_name.as_str())
             .unwrap_or_else(|| {
                 panic!(
                     "Exists: relationship \"{}\" not found on node",
@@ -284,7 +284,7 @@ impl FilterOutput for Exists {
                                 // so the added child must be EXCLUDED from the
                                 // remove being pushed (exists.ts:142-156).
                                 let removed_node = node.set_relationship(
-                                    &self.relationship_name,
+                                    self.relationship_name.as_str(),
                                     crate::ivm::stream::empty_rel(),
                                 );
                                 self.push_to_output(make_remove_change(removed_node));
@@ -311,7 +311,7 @@ impl FilterOutput for Exists {
                                 let rel =
                                     crate::ivm::stream::rel_from_vec(vec![removed_child_node]);
                                 let removed_node =
-                                    node.set_relationship(&self.relationship_name, rel);
+                                    node.set_relationship(self.relationship_name.as_str(), rel);
                                 self.push_to_output(make_remove_change(removed_node));
                             }
                         } else {

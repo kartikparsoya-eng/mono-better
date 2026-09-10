@@ -315,7 +315,7 @@ impl FlippedJoin {
                 Vec::new()
             } else {
                 let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
-                let node = pn.set_relationship(&relationship_name, rel);
+                let node = pn.set_relationship(relationship_name.as_str(), rel);
                 vec![StreamItem::Data(node)]
             }
         }))
@@ -382,7 +382,7 @@ impl FlippedJoin {
 
                 let new_node = parent_node
                     .clone()
-                    .set_relationship(&relationship_name, child_stream);
+                    .set_relationship(relationship_name.as_str(), child_stream);
 
                 if exists {
                     output.borrow_mut().push(
@@ -397,7 +397,7 @@ impl FlippedJoin {
                     );
                 } else {
                     let node = parent_node.clone().set_relationship(
-                        &relationship_name,
+                        relationship_name.as_str(),
                         Rc::new(move || from_vec(vec![change_clone.node().clone()])),
                     );
                     match change.change_type() {
@@ -467,7 +467,7 @@ impl FlippedJoin {
                     None => empty_stream(),
                 }
             });
-            node.set_relationship(&relationship_name, rel)
+            node.set_relationship(relationship_name.as_str(), rel)
         };
 
         match change {

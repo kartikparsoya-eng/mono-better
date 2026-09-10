@@ -234,6 +234,71 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 mod value_parity_tests {
     use super::*;
 
+    /// F-07: a relationship NAME must be allocated once and shared, not copied
+    /// into the map and the order vec separately, and not re-allocated when the
+    /// node is cloned.
+    ///
+    /// `Node.relationships` / `rel_order` are per-ROW structures. TS pays
+    /// nothing for either: `relationships` is a plain object
+    /// (`Record<string, () => Stream<Node | 'yield'>>`, data.ts:10-18) whose
+    /// keys are shared by reference, and its INSERTION order is what
+    /// `rel_order` exists to reproduce. Rust keyed both on `String`, so
+    /// `set_relationship` allocated the name TWICE per insert, and `join`'s
+    /// push path (`push_parent` / `push_child`, which clone BOTH fields per
+    /// parent node) re-allocated every name again — 4-6 allocations per name
+    /// per row per join level.
+    ///
+    /// NON-VACUOUS: revert either field to `String` and both assertions fail —
+    /// `Rc::ptr_eq` is the observable that a `String` key cannot satisfy.
+    #[test]
+    fn a_relationship_name_is_allocated_once_and_shared() {
+        let row: Row = Arc::new(
+            [("id".to_string(), Value::Str(Arc::from("i1")))]
+                .into_iter()
+                .collect(),
+        );
+        let node = Node::new(row).set_relationship(
+            "comments",
+            std::rc::Rc::new(crate::ivm::stream::empty_stream) as RelStream,
+        );
+
+        let key = node
+            .relationships
+            .keys()
+            .next()
+            .expect("the relationship was set");
+        assert!(
+            std::rc::Rc::ptr_eq(key, &node.rel_order[0]),
+            "the map key and the order entry must be ONE allocation, not two"
+        );
+
+        // The clone `join` takes per parent node must be refcount bumps.
+        let cloned = node.clone();
+        assert!(
+            std::rc::Rc::ptr_eq(&cloned.rel_order[0], &node.rel_order[0]),
+            "cloning a Node must share its relationship names, not re-allocate them"
+        );
+        assert!(
+            std::rc::Rc::ptr_eq(
+                cloned.relationships.keys().next().unwrap(),
+                node.relationships.keys().next().unwrap()
+            ),
+            "the cloned map key must be the same allocation"
+        );
+
+        // Re-setting the SAME name must not add a second order entry (TS
+        // `{...rels, [name]: fn}` replaces the property in place).
+        let again = node.set_relationship(
+            "comments",
+            std::rc::Rc::new(crate::ivm::stream::empty_stream) as RelStream,
+        );
+        assert_eq!(
+            again.rel_order.len(),
+            1,
+            "replacing a relationship must not duplicate its order entry"
+        );
+    }
+
     #[test]
     fn js_stringify_value_matches_json_stringify() {
         // Standard JSON forms.
@@ -427,8 +492,17 @@ pub fn make_partial_bound_comparator(order: SortOrder, reverse: bool) -> Compara
 #[derive(Clone)]
 pub struct Node {
     pub row: Row,
-    pub relationships: HashMap<String, RelStream>,
-    pub rel_order: Vec<String>,
+    /// Keyed by an `Rc<str>` rather than a `String`: this is a PER-ROW map
+    /// whose names are fixed per query, and `join`'s push path clones both
+    /// this and `rel_order` per parent node (join.rs `push_parent` /
+    /// `push_child`), so a `String` key re-allocated every name on every
+    /// clone. TS has neither cost — `relationships` is a plain object
+    /// (`Record<string, () => Stream<Node | 'yield'>>`, data.ts:10-18) whose
+    /// keys are shared by reference.
+    pub relationships: HashMap<Rc<str>, RelStream>,
+    /// The `relationships` insertion order, which is what a JS object's string
+    /// keys give TS for free. Shares each name with the map above.
+    pub rel_order: Vec<Rc<str>>,
 }
 
 impl std::fmt::Debug for Node {
@@ -451,12 +525,19 @@ impl Node {
     }
 
     /// `{...rels, [name]: fn}` — port of TS spread.
-    pub fn set_relationship(self, name: &str, rel: RelStream) -> Self {
+    ///
+    /// Takes `impl Into<Rc<str>>` so a caller holding an `Rc<str>` (the merge
+    /// paths in `push_accumulated`, which copy names from one node to another)
+    /// passes `Rc::clone(name)` and allocates nothing, while a caller holding a
+    /// `&str` still gets one allocation. It used to take `&str` and allocate
+    /// the name TWICE — once for `rel_order`, once for the map key.
+    pub fn set_relationship(self, name: impl Into<Rc<str>>, rel: RelStream) -> Self {
         let mut node = self;
-        if !node.relationships.contains_key(name) {
-            node.rel_order.push(name.to_string());
+        let name: Rc<str> = name.into();
+        if !node.relationships.contains_key(&name) {
+            node.rel_order.push(Rc::clone(&name));
         }
-        node.relationships.insert(name.to_string(), rel);
+        node.relationships.insert(name, rel);
         node
     }
 }

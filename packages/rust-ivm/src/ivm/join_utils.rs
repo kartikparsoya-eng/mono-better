@@ -209,7 +209,7 @@ impl Iterator for GenerateWithOverlay {
                             let rel_name = child.relationship_name.clone();
                             let existing_rel = node
                                 .relationships
-                                .get(&rel_name)
+                                .get(rel_name.as_str())
                                 .cloned()
                                 .unwrap_or_else(|| {
                                     panic!("overlayGenerator: relationship {rel_name} not found on node")
@@ -230,7 +230,8 @@ impl Iterator for GenerateWithOverlay {
                                 )
                             });
                             self.pending.push_back(StreamItem::Data(
-                                node.clone().set_relationship(&rel_name, overlaid_rel),
+                                node.clone()
+                                    .set_relationship(rel_name.as_str(), overlaid_rel),
                             ));
                             yield_node = false;
                         }
@@ -337,7 +338,7 @@ impl Iterator for GenerateWithOverlayUnordered {
                             let rel_name = child.relationship_name.clone();
                             let existing_rel = node
                                 .relationships
-                                .get(&rel_name)
+                                .get(rel_name.as_str())
                                 .cloned()
                                 .unwrap_or_else(|| {
                                     panic!("overlayGenerator: relationship {rel_name} not found on node")
@@ -360,7 +361,8 @@ impl Iterator for GenerateWithOverlayUnordered {
                                 )
                             });
                             return Some(StreamItem::Data(
-                                node.clone().set_relationship(&rel_name, overlaid_rel),
+                                node.clone()
+                                    .set_relationship(rel_name.as_str(), overlaid_rel),
                             ));
                         }
                     }

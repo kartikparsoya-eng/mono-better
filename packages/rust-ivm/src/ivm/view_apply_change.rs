@@ -66,7 +66,7 @@ impl ViewNode {
     /// Get all relationship names present on this node.
     pub fn relationship_names(&self) -> Vec<String> {
         match self {
-            ViewNode::Lazy(node) => node.rel_order.clone(),
+            ViewNode::Lazy(node) => node.rel_order.iter().map(|n| n.to_string()).collect(),
             ViewNode::Expanded(node) => node.relationships.keys().cloned().collect(),
         }
     }
