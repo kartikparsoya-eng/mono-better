@@ -88,6 +88,11 @@ fn main() {
     if let Err(rc) = rust_syncer::alloc::route_sqlite_malloc_through_mimalloc() {
         eprintln!("[alloc] SQLITE_CONFIG_MALLOC rejected (rc={rc}); SQLite stays on glibc malloc");
     }
+    // INVENTIONS.md I-22: the cost-model probe carries TS's `db.prepare` throw
+    // (`SqliteError`) and its watchdog interrupt as TYPED unwinds the driver
+    // catches; the default hook would still print three raw stderr lines per
+    // throw that TS never emits. Installed before any Engine can run.
+    rust_ivm::sqlite::sqlite_cost_model::install_typed_unwind_panic_hook();
     // Start the heap profiler first so it observes allocations for the whole
     // process lifetime. The guard lives until `main` returns; on graceful
     // shutdown (ctrl_c / SIGTERM handled below) it drops and writes the profile

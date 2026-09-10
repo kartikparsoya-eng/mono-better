@@ -1056,3 +1056,39 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   degenerate to one part per row, and delivers all 20 patches exactly once in
   order; non-vacuous — setting the cap to 0 or dropping the
   `body_est_bytes >= byte_cap` term puts all 20 rows in one part and fails it).
+
+## I-22 — Silent panic hook for typed JS-throw carriers (`install_typed_unwind_panic_hook`)
+- **Files:** `rust-ivm/src/sqlite/sqlite_cost_model.rs`
+  (`is_typed_unwind_payload`, `install_typed_unwind_panic_hook`, the
+  `SqliteError` / `CostProbeInterrupted` payload types), `rust-syncer/src/main.rs`
+  (the call at process entry).
+- **What is ported 1:1 (not invented):** the throw itself and where it lands.
+  TS `db.prepare(sql)` throws better-sqlite3's `SqliteError`
+  (sqlite-cost-model.ts:78); `#addQueryImpl` logs `query-pipeline-hydrate-failed`
+  and rethrows (pipeline-driver.ts:794-812); the view-syncer fails the group with
+  an `Internal` error frame. Rust reproduces every one of those log lines and the
+  frame (`tests/hydrate_probe_failure_test.rs`, first two tests).
+- **What has no TS twin (the invention):** the CARRIER. The cost-model closure
+  keeps TS's `Result`-less signature, so the throw can only travel as a panic
+  unwind (`panic_any(SqliteError)` / `panic_any(CostProbeInterrupted)`), which
+  the driver catches. A panic unwind, unlike a JS throw, ALSO trips the
+  process-wide panic hook, and the default hook wrote three raw non-JSON stderr
+  lines per probe failure — 229 times in the 2026-09-11 60-min prod replay,
+  versus nothing on the TS arm. The hook installed at process entry returns
+  silently for exactly the two carrier payload types (matched by TYPE, never by
+  message) and delegates every other panic to the previously installed hook.
+- **TS-observable contract:** a caught carrier produces exactly the ported log
+  lines and nothing else on any output stream; a DEFECT panic keeps the full
+  default report, so the CG-task-panic diagnostics (`cg_executor.rs` "task
+  panicked" + `fail_group("panic")`) and every `panic!`-based test assertion are
+  unchanged. `ScalarResetError` (`engine/mod.rs` `take_scalar_reset`) is NOT a
+  carrier: its `panic_any` is the legacy in-memory API only; production
+  `advance_to_head_stream` returns that condition as a value.
+- **Tests:**
+  `rust-syncer/tests/hydrate_probe_failure_test.rs::typed_probe_unwind_is_silent_on_stderr_while_a_defect_panic_still_reports`
+  (child process installs the hook, fails the REAL probe, then raises an
+  ordinary panic: stderr must carry the ordinary panic's report and no
+  `sqlite_cost_model.rs` / `Box<dyn Any>` line; non-vacuous — a no-op installer
+  fails it);
+  `rust-ivm sqlite_cost_model::tests::typed_unwind_payloads_are_the_two_throw_carriers_only`
+  (type discrimination: `&str` and `String` payloads are not carriers).

@@ -29,6 +29,15 @@
 //! NON-VACUOUS: restore `std::panic::resume_unwind(payload)` in
 //! `pipeline_driver::hydrate` / `HydrateChanges::next` and both tests below
 //! abort with that panic instead of reporting an `Err`.
+//!
+//! LOG SURFACE (third test): the carrier unwind is caught, but the DEFAULT
+//! panic hook still reported it — three raw non-JSON stderr lines per probe
+//! failure (`thread 'cg-exec-N' panicked at …/sqlite_cost_model.rs:632`,
+//! `Box<dyn Any>`, the `RUST_BACKTRACE` note), 229 times in the 2026-09-11
+//! 60-min replay, while the TS arm's caught throw printed nothing beyond its
+//! JSON log lines. `install_typed_unwind_panic_hook` (INVENTIONS.md I-22)
+//! silences exactly the two carrier payloads. NON-VACUOUS: make that installer a
+//! no-op and the child process's stderr carries `sqlite_cost_model.rs` again.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -244,5 +253,64 @@ fn unpreparable_cost_probe_fails_the_group_with_an_error_not_a_dead_task() {
     assert_eq!(
         rows_patches, 0,
         "a hydrate that failed its cost probe must not have streamed rows"
+    );
+}
+
+/// Log-surface level, in a CHILD PROCESS (a panic hook is process-global and
+/// libtest captures per-thread, so only a real process boundary observes what
+/// reaches stderr). The child does what `main.rs` does at entry — install the
+/// hook — then fails the real probe, then raises an ordinary panic for
+/// contrast. The parent asserts the probe's carrier left NO trace on stderr
+/// while the ordinary panic still got the default report: the hook must be
+/// silent for carriers only, never for defects.
+#[test]
+fn typed_probe_unwind_is_silent_on_stderr_while_a_defect_panic_still_reports() {
+    if !scanstatus_available() {
+        eprintln!("SKIP: linked SQLite lacks SQLITE_ENABLE_STMT_SCANSTATUS");
+        return;
+    }
+    const CHILD_ENV: &str = "HYDRATE_PROBE_PANIC_HOOK_CHILD";
+    const TEST_NAME: &str =
+        "typed_probe_unwind_is_silent_on_stderr_while_a_defect_panic_still_reports";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        rust_ivm::sqlite::sqlite_cost_model::install_typed_unwind_panic_hook();
+        let mut pipelines = seeded_pipelines();
+        let failed = pipelines
+            .hydrate(
+                &[("q1".to_string(), unprobeable_ast().to_string())],
+                Rc::new(TimeSliceTimer::new()) as Rc<dyn Timer>,
+            )
+            .is_err();
+        assert!(
+            failed,
+            "the unprobeable query must fail the hydrate in the child"
+        );
+        let defect = std::panic::catch_unwind(|| panic!("DEFECT_PANIC_MARKER"));
+        assert!(defect.is_err());
+        println!("CHILD_OK");
+        std::process::exit(0);
+    }
+
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn the test binary as the child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("CHILD_OK"),
+        "child did not complete: status={:?}\nstdout={stdout}\nstderr={stderr}",
+        out.status
+    );
+    assert!(
+        stderr.contains("DEFECT_PANIC_MARKER"),
+        "a defect panic must still reach the default hook's stderr report \
+         (the hook may silence carriers only); stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("sqlite_cost_model.rs") && !stderr.contains("Box<dyn Any>"),
+        "the probe's typed unwind must leave NO panic report on stderr — TS's \
+         caught SqliteError prints nothing beyond its JSON log lines; stderr={stderr}"
     );
 }

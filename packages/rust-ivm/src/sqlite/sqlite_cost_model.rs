@@ -111,6 +111,40 @@ pub fn is_interrupt_error(e: &str) -> bool {
 /// planning without flips instead of tearing down the client group.
 pub struct CostProbeInterrupted(pub String);
 
+/// True for the two panic payloads this module uses as CARRIERS of a TS
+/// `throw` — [`SqliteError`] (better-sqlite3's class from `db.prepare`,
+/// sqlite-cost-model.ts:78) and [`CostProbeInterrupted`] — as opposed to a
+/// defect panic. Rust-only (AGENTS.md rule 5; INVENTIONS.md I-22): the
+/// cost-model closure has TS's `Result`-less signature, so a throw can only
+/// travel as an unwind, and the process must tell that unwind apart from a bug.
+pub fn is_typed_unwind_payload(payload: &(dyn std::any::Any + Send)) -> bool {
+    payload.is::<SqliteError>() || payload.is::<CostProbeInterrupted>()
+}
+
+/// Install a process-wide panic hook that stays SILENT for
+/// [`is_typed_unwind_payload`] carriers and delegates every other panic to the
+/// hook installed before it (the default report + backtrace note, or whatever
+/// a harness set). Rust-only (AGENTS.md rule 5; INVENTIONS.md I-22): the
+/// carrier is caught by the driver (TS catches the same throw at
+/// pipeline-driver.ts:794-812) and its only log surface is the ported
+/// `query-pipeline-hydrate-failed` / `closing connection with error` lines —
+/// whereas the default Rust hook wrote three raw non-JSON stderr lines per
+/// probe failure (`thread 'cg-exec-N' panicked at …`, `Box<dyn Any>`, the
+/// `RUST_BACKTRACE` note), 229 times in the 2026-09-11 60-min prod replay.
+/// Idempotent; `main.rs` calls it at process entry, before any Engine runs.
+pub fn install_typed_unwind_panic_hook() {
+    static TYPED_UNWIND_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+    TYPED_UNWIND_HOOK_INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if is_typed_unwind_payload(info.payload()) {
+                return;
+            }
+            previous(info);
+        }));
+    });
+}
+
 /// Prepare `sql` (without executing) and read all scanstatus loops.
 /// Port of TS `getScanstatusLoops` (sqlite-cost-model.ts:139); like TS,
 /// iterates idx until the API reports end-of-loops, with the COMPLEX flag so
@@ -684,6 +718,22 @@ mod tests {
         // A plain SQL error takes the same `<sqlite message>: <sql>` shape.
         let err = super::get_scanstatus_loops(&conn, "SELECT nope FROM t").unwrap_err();
         assert_eq!(err, "no such column: nope: SELECT nope FROM t");
+    }
+
+    /// The hook must discriminate by TYPE, not by message: both carriers are
+    /// silent, an ordinary `panic!` (a defect) is not. The process-level stderr
+    /// proof is `rust-syncer/tests/hydrate_probe_failure_test.rs`.
+    #[test]
+    fn typed_unwind_payloads_are_the_two_throw_carriers_only() {
+        let sqlite: Box<dyn std::any::Any + Send> = Box::new(super::SqliteError("x".into()));
+        let interrupted: Box<dyn std::any::Any + Send> =
+            Box::new(super::CostProbeInterrupted("y".into()));
+        let plain: Box<dyn std::any::Any + Send> = Box::new("a defect panic");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("formatted panic"));
+        assert!(super::is_typed_unwind_payload(&*sqlite));
+        assert!(super::is_typed_unwind_payload(&*interrupted));
+        assert!(!super::is_typed_unwind_payload(&*plain));
+        assert!(!super::is_typed_unwind_payload(&*owned));
     }
 
     use super::*;
