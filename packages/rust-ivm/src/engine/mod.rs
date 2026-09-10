@@ -2064,8 +2064,8 @@ mod scalar_reset_tests {
                 &[],
                 "unqueried",
                 crate::ivm::source::make_source_change_remove(missing_row),
-                &HashMap::new(),
-                &HashMap::new(),
+                &Rc::new(HashMap::new()),
+                &Rc::new(HashMap::new()),
                 &mut |_| {},
             )
             .is_none()

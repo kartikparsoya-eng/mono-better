@@ -290,5 +290,7 @@ fn an_in_flight_advance_shares_the_map_rather_than_copying_it() {
         "draining the advance must not add holders — the per-change companion \
          streamers share, they do not copy"
     );
-    f.eng.finish_advance(stream);
+    f.eng
+        .finish_advance(stream)
+        .expect("the advance must finish cleanly");
 }
