@@ -95,6 +95,48 @@ fn json_to_sqlite_value(v: &serde_json::Value) -> rusqlite::types::Value {
     }
 }
 
+/// The SELECT column list both row readers use.
+///
+/// `+"col" AS "col"` rather than TS's plain `"col"` (`Object.keys(table.columns)
+/// .map(c => id(c))`, snapshotter.ts:345). The unary `+` has NO TS twin and no
+/// recorded rationale — it arrived with the bulk rust-ivm consolidation
+/// (d736e6ea2). Measured on this query shape (select every column by key):
+/// the plan is identical (`SEARCH t USING INDEX sqlite_autoindex_t_1 (id=?)`
+/// either way), and so are the returned values and their `typeof`, so it is
+/// inert here rather than a behavioural divergence. It is kept — not
+/// "cleaned up" — because changing the SQL TEXT changes the `prepare_cached`
+/// key and could change the plan on a shape or SQLite version this measurement
+/// did not cover, and that is not a change to make as a side effect of a
+/// memoization. Flagged for a deliberate follow-up (AGENTS rule 1: port
+/// faithfully and flag, do not silently adjust).
+fn select_col_list(spec: &TableSpec) -> String {
+    spec.cols()
+        .iter()
+        .map(|c| {
+            let q = quote_ident(c);
+            format!("+{} AS {}", q, q)
+        })
+        .collect::<Vec<String>>()
+        .join(",")
+}
+
+/// There is deliberately NO memo of the SELECT text here.
+///
+/// Both readers are on the advance hot path and both rebuild a string that is
+/// byte-identical for a given table and key shape, so memoizing it looks free.
+/// It is not: TS keys `statementCache` by the SQL TEXT ITSELF
+/// (`statementCache.get(`SELECT ${cols...} FROM ...`)`, snapshotter.ts:344-348
+/// and :377-381), which makes its cache SELF-INVALIDATING — a table whose
+/// column set changed simply produces a different key and misses. A memo keyed
+/// on `(table, key shape)` is not self-invalidating, and this very file handles
+/// `RESET op -> ResetPipelinesSignal(REASON_SCHEMA_CHANGE)`: a schema change
+/// rebuilds the specs on the SAME CG thread, so a per-thread memo would keep
+/// serving the pre-change column list while the reader below maps result
+/// columns by ordinal against the NEW `spec.cols()`. `prepare_cached` already
+/// caches the prepared statement, keyed by text, exactly as TS does.
+///
+/// (AGENTS rule 5: a rust-only cache whose invalidation TS does not need is a
+/// divergence, not an optimization.)
 /// Read a single row from a snapshot connection, keyed by rowKey columns.
 fn get_row(
     conn: &rusqlite::Connection,
@@ -102,28 +144,22 @@ fn get_row(
     row_key: &HashMap<String, rusqlite::types::Value>,
 ) -> Result<Option<HashMap<String, rusqlite::types::Value>>, String> {
     let key_cols = sorted_keys(row_key);
+    // Also used below to map the result row's columns by ordinal — the SELECT
+    // list and this loop MUST stay in the same order, which is why both read
+    // `spec.cols()`.
+    let cols = spec.cols();
     let conds: Vec<String> = key_cols
         .iter()
         .map(|c| format!("{}=?", quote_ident(c)))
         .collect();
-    let cols = spec.cols();
-    let col_list: Vec<String> = cols
-        .iter()
-        .map(|c| {
-            let q = quote_ident(c);
-            format!("+{} AS {}", q, q)
-        })
-        .collect();
-
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
-        col_list.join(","),
+        select_col_list(spec),
         quote_ident(&spec.name),
         conds.join(" AND ")
     );
 
-    // Cached: one SELECT shape per table, executed once per change-log entry —
-    // the advance hot path the advancement-timeout budget measures.
+    // `prepare_cached` keyed by this text, exactly as TS's `statementCache`.
     let mut stmt = conn
         .prepare_cached(&sql)
         .map_err(|e| format!("get_row prepare: {}", e))?;
@@ -137,7 +173,9 @@ fn get_row(
         .map_err(|e| format!("get_row query: {}", e))?;
 
     if let Some(row) = rows.next().map_err(|e| format!("get_row next: {}", e))? {
-        let mut result = HashMap::new();
+        // Sized up front: this runs once per change-log entry on the advance
+        // path, and the column count is known.
+        let mut result = HashMap::with_capacity(cols.len());
         for (i, col) in cols.iter().enumerate() {
             let val: rusqlite::types::Value = crate::sqlite::db::read_value_lossy(row, i)
                 .map_err(|e| format!("get_row get {}: {}", col, e))?;
@@ -182,20 +220,14 @@ fn get_rows(
         })
         .collect();
 
+    // Also used below to map each result row's columns by ordinal.
     let cols = spec.cols();
-    let col_list: Vec<String> = cols
-        .iter()
-        .map(|c| {
-            let q = quote_ident(c);
-            format!("+{} AS {}", q, q)
-        })
-        .collect();
-
+    let where_clause = or_conds.join(" OR ");
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
-        col_list.join(","),
+        select_col_list(spec),
         quote_ident(&spec.name),
-        or_conds.join(" OR ")
+        where_clause
     );
 
     let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::new();
@@ -205,7 +237,7 @@ fn get_rows(
         }
     }
 
-    // Cached: same rationale as get_row above.
+    // `prepare_cached` keyed by this text, same as get_row above.
     let mut stmt = conn
         .prepare_cached(&sql)
         .map_err(|e| format!("get_rows prepare: {}", e))?;
@@ -215,7 +247,7 @@ fn get_rows(
 
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("get_rows next: {}", e))? {
-        let mut map = HashMap::new();
+        let mut map = HashMap::with_capacity(cols.len());
         for (i, col) in cols.iter().enumerate() {
             let val: rusqlite::types::Value = crate::sqlite::db::read_value_lossy(row, i)
                 .map_err(|e| format!("get_rows get {}: {}", col, e))?;
