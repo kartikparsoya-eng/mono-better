@@ -11,6 +11,10 @@ use crate::ivm::constraint::MultiConstraint;
 use crate::ivm::data::Value;
 use crate::ivm::operator::{Basis, FetchRequest, Start};
 use crate::ivm::schema::ColumnType;
+// TS has ONE identifier quoter (`sql.ident`); this crate carried two
+// byte-identical copies — `snapshotter::spec::quote_ident` and a private
+// duplicate here. Use the canonical one, plus its zero-allocation `push_` twin.
+use crate::snapshotter::spec::{push_quoted_ident, quote_ident};
 
 /// A compiled SQL query — text + parameter values.
 #[derive(Clone, Debug)]
@@ -62,7 +66,10 @@ pub fn build_select_query(
     order: Option<&[(String, String)]>,
     reverse: bool,
 ) -> SqlQuery {
-    let mut sql = String::new();
+    // Seeded so the SELECT-list appends below don't re-grow the buffer: the
+    // prefix alone is `SELECT ` + a quoted ident per column + ` FROM ` + the
+    // quoted table.
+    let mut sql = String::with_capacity(32 + columns.len() * 16 + table_name.len());
     let mut params: Vec<SqlParam> = Vec::new();
 
     // SELECT col1, col2, ... FROM table (or SELECT * if no columns specified)
@@ -79,11 +86,15 @@ pub fn build_select_query(
             if i > 0 {
                 sql.push(',');
             }
-            sql.push_str(&quote_ident(col));
+            // Written straight into `sql`: `quote_ident` would allocate two
+            // Strings per column, per fetch. Same code path, so the bytes —
+            // including the client-observable separator rules above — are
+            // unchanged by construction.
+            push_quoted_ident(&mut sql, col);
         }
     }
     sql.push_str(" FROM ");
-    sql.push_str(&quote_ident(table_name));
+    push_quoted_ident(&mut sql, table_name);
 
     // Build WHERE clauses
     let mut where_clauses: Vec<String> = Vec::new();
@@ -91,7 +102,12 @@ pub fn build_select_query(
     // Constraint (equality)
     if let Some(constraint) = &req.constraint {
         for (key, value) in constraint {
-            where_clauses.push(format!("{} = ?", quote_ident(key)));
+            // One allocation instead of three (`replace` + `format!` for the
+            // ident + `format!` for the clause). Byte-identical output.
+            let mut clause = String::with_capacity(key.len() + 8);
+            push_quoted_ident(&mut clause, key);
+            clause.push_str(" = ?");
+            where_clauses.push(clause);
             params.push(SqlParam::from(value));
         }
     }
@@ -526,11 +542,6 @@ fn value_position_to_sql_param(vp: &ValuePosition) -> (String, Vec<SqlParam>) {
         ValuePosition::Column { name } => (quote_ident(name), vec![]),
         ValuePosition::Literal { value } => ("?".to_string(), vec![SqlParam::from(value)]),
     }
-}
-
-/// Quote an identifier for SQLite (double quotes, escape internal quotes).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Convert a Value to its SQLite storage type.

@@ -41,7 +41,33 @@ pub struct LiteAndZqlSpec {
 /// Double-quote a SQLite identifier, escaping embedded quotes.
 /// Port of Go `quoteIdent` (spec.go:68).
 pub fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    let mut out = String::with_capacity(name.len() + 2);
+    push_quoted_ident(&mut out, name);
+    out
+}
+
+/// Append `name` to `out`, SQL-quoted. Zero-allocation twin of
+/// [`quote_ident`], and its single implementation — `quote_ident` is now
+/// defined in terms of this, so the two cannot drift and the emitted bytes are
+/// identical by construction.
+///
+/// Rust-only (AGENTS.md rule 5): TS builds identifiers with `sql.ident(c)` into
+/// a template that appends to an existing string, so it never materialises a
+/// per-identifier String. `quote_ident` allocated TWO per call (the `replace`
+/// plus the `format!`), which is per-column per-fetch on the query-builder
+/// path — and a correlated EXISTS issues one fetch per PARENT ROW, so per-fetch
+/// cost is effectively per-row.
+pub fn push_quoted_ident(out: &mut String, name: &str) {
+    out.push('"');
+    for ch in name.chars() {
+        // TS `sql.ident` doubles an embedded quote; so does
+        // `name.replace('"', "\"\"")`, which this replaces.
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
 }
 
 /// Return the keys of m in ascending order — TS's `normalizedKeyOrder`.
