@@ -527,9 +527,10 @@ mod tests {
 // ─── Syncer connection management (L9 Stage 2a) ──────────────────────────────
 // Port of the `Syncer` class's connection-management half
 // (workers/syncer.ts:288+): accept-path connection creation, the live
-// connection map, group user pinning, drain. Moved verbatim from router.rs;
-// the CG executor substrate (CGMessage/CGHandle/executors) remains in
-// router.rs until the Stage-3 quarantine into workers/cg_executor.rs.
+// connection map, group user pinning, drain. The CG executor substrate
+// (CGMessage/CGHandle/executors) is next door in `workers/cg_executor.rs`;
+// both halves came out of the single pre-L9 actor-core file, which no longer
+// exists.
 
 use std::collections::HashMap;
 use std::sync::Arc;

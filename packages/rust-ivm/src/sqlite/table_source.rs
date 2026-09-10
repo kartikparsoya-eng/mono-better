@@ -244,9 +244,15 @@ fn sql_param_literal(p: &SqlParam) -> String {
 ///   panic) and lets that cancel path drive teardown.
 /// - `HardError` (SQLITE_CORRUPT / "malformed" / anything else): a real read
 ///   failure. We must NOT silently return `None` (that truncates the result and
-///   serves a partial/corrupt view). We propagate it — a panic here is caught by
-///   the napi `catch_unwind` (napi/src/lib.rs:222) and surfaced as a thrown
-///   error, exactly the TS lifecycle for a thrown SQLite step error.
+///   serves a partial/corrupt view). We propagate it — the panic is caught by
+///   the per-operation `catch_unwind` around the stream pull in
+///   `rust-syncer/src/services/view_syncer/pipeline_driver.rs`
+///   (`HydrateChanges::next` / `AdvanceChanges::next`), which rolls the
+///   half-wired source connections back and hands the message out as an `Err`;
+///   the view-syncer turns that into `#cleanup(err)` and the client
+///   re-hydrates. That is the TS lifecycle for a thrown SQLite step error
+///   (`#addQueryImpl`'s `catch (e) { ...; throw e; }`,
+///   pipeline-driver.ts:794-812).
 enum RowErr {
     Interrupt,
     HardError,
@@ -331,15 +337,17 @@ impl Iterator for LazyRowsIter {
             Ok(None) => None,
             Err(e) => match classify_row_error(&e) {
                 // Cancellation: stop iterating quietly. The engine's between-rows
-                // cancel check + napi cancel path own teardown; do not log this
-                // as a "row read error" and do not panic. Matches TS, where
-                // cancellation is driver-level and never a corruption error.
+                // cancel check and the caller's cancellation token own teardown;
+                // do not log this as a "row read error" and do not panic.
+                // Matches TS, where cancellation is driver-level and never a
+                // corruption error.
                 RowErr::Interrupt => None,
                 // Corruption / I/O / other: DO NOT truncate — a swallowed corrupt
                 // read serves a partial result (a correctness leak). Propagate as
-                // a hard error so the napi catch_unwind surfaces it as a thrown
-                // error → view-syncer teardown → rehydrate at a consistent frame.
-                // This mirrors TS `rowIterator.next()` throwing out of `#fetch`.
+                // a hard error; `pipeline_driver`'s per-pull `catch_unwind`
+                // converts it into the operation's `Err` → view-syncer
+                // `#cleanup(err)` → rehydrate at a consistent frame. This
+                // mirrors TS `rowIterator.next()` throwing out of `#fetch`.
                 RowErr::HardError => {
                     panic!("[rust-ivm] row read error for {}: {}", table_name, e);
                 }
@@ -474,8 +482,9 @@ pub(crate) fn sqlite_value_to_ivm(
     match val {
         Ok(Sv::Null) => Value::Null,
         // TS/better-sqlite3 surfaces a read error as a thrown error; do the same
-        // (the napi catch_unwind turns this panic into a thrown JS error) instead
-        // of silently coercing a decode failure to NULL. Unreachable for a
+        // (`pipeline_driver`'s per-pull `catch_unwind` turns this panic into the
+        // operation's `Err`, the rust twin of the throw) instead of silently
+        // coercing a decode failure to NULL. Unreachable for a
         // `get::<Value>` (Value is the universal storage type), but never swallow.
         Err(e) => panic!("failed to read {table}.{col} from SQLite: {e}"),
 

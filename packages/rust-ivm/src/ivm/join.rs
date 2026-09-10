@@ -216,8 +216,10 @@ impl Join {
                 // Port of TS join.ts:167 `assert(rowEqualsForCompoundKey(...),
                 // 'Parent edit must not change relationship.')`. Key-changing
                 // edits are split into add/remove at the source; one reaching
-                // here is an invariant violation. Reset (panic contained at the
-                // napi boundary) rather than silently dropping into drift.
+                // here is an invariant violation. Reset (panic contained by
+                // `pipeline_driver`'s per-pull `catch_unwind`, with the CG
+                // executor's `catch_unwind` as the outer net) rather than
+                // silently dropping into drift.
                 assert!(
                     row_equals_for_compound_key(&old_node.row, &parent_row, &self.parent_key),
                     "Parent edit must not change relationship.",

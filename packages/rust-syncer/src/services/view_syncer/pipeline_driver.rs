@@ -1,8 +1,8 @@
 //! IvmPipelines — the pure-Rust IVM bridge (Stage A of the Phase 7 wiring).
 //!
 //! Port of the engine-side of `pipeline-driver.ts` (behavior) and of the
-//! `EngineState` construction/hydrate/advance logic in `rust-ivm/napi/src/lib.rs`
-//! (the parity-tested Rust integration), with all napi / TSFN / actor-thread
+//! `EngineState` construction/hydrate/advance logic that the removed napi
+//! cdylib carried (deleted in a5e502ad9), with its TSFN / actor-thread
 //! machinery stripped out. This struct is owned by the ViewSyncer and lives on
 //! its dedicated CG thread — it is intentionally NOT `Send`/`Sync` because the
 //! `rust-ivm` `Engine` holds `Rc<RefCell<..>>` sources.
@@ -11,7 +11,7 @@
 //!   - open the SQLite replica via a `Snapshotter`
 //!   - build `TableSource`s and hydrate query ASTs (streaming `RowChange`s)
 //!   - advance the replica to head, streaming `RowChange`s (with reset/panic
-//!     handling that matches the napi/TS lifecycle)
+//!     handling that matches the TS lifecycle — pipeline-driver.ts:794-812)
 //!   - `get_row` for catchup, `row_set_signature` passthrough
 //!
 //! The CVR combination (feeding these `RowChange`s into `rust-cvr`'s
@@ -576,7 +576,8 @@ impl IvmPipelines {
     /// when `None`, in-memory `MemorySource`s are used (test/dev mode — no
     /// snapshotter, so `advance()` is unavailable).
     ///
-    /// Port of `EngineState`/`init` in `rust-ivm/napi/src/lib.rs`.
+    /// Port of `EngineState`/`init` as the removed napi cdylib carried it
+    /// (deleted in a5e502ad9); TS twin is `pipeline-driver.ts` `init`.
     pub fn init(
         &mut self,
         tables: Vec<IvmTableSpec>,
@@ -1624,8 +1625,9 @@ fn scalar_reset_message(payload: &Box<dyn std::any::Any + Send>) -> Option<Strin
 // ─── TS AST → Rust AST conversion ────────────────────────────────────────────
 // The TS AST JSON uses `{ type: "..." }` internal tagging, camelCase field
 // names, `[string, string]` order-by tuples, and `correlation: { parentField,
-// childField }`. Ported verbatim from `rust-ivm/napi/src/lib.rs` so the syncer
-// path deserializes transformed ASTs identically to the parity-tested napi path.
+// childField }`. Ported verbatim from the removed napi cdylib (deleted in
+// a5e502ad9) so the syncer path deserializes transformed ASTs identically to
+// the parity-tested path it replaced.
 
 #[derive(serde::Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]

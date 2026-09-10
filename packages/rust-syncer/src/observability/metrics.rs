@@ -237,8 +237,8 @@ fn view_syncer_lag_otel() -> &'static OtelHistogram<f64> {
                 "Lag from replica-ready change to ViewSyncer output for active client groups. A \
                  change is output after IVM advancement, CVR flush, and pokeEnd.",
             )
-            // Exported as a base2 exponential histogram via the otel.rs view
-            // (TS getOrCreateNativeHistogram parity).
+            // Exported as a base2 exponential histogram via the
+            // `server/otel_start.rs` view (TS getOrCreateNativeHistogram parity).
             .build()
     })
 }
@@ -377,7 +377,8 @@ fn view_syncer_hydration_otel() -> &'static OtelHistogram<f64> {
                  group. Includes query transformation, query materialization, CVR flush, \
                  catchup, and pokeEnd.",
             )
-            // Exponential-histogram view in otel.rs (TS native-histogram parity).
+            // Exponential-histogram view in `server/otel_start.rs`
+            // (TS native-histogram parity).
             .build()
     })
 }

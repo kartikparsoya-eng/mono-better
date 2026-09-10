@@ -107,7 +107,7 @@ pub enum PlannerNode {
 /// cleanup that a future edit could forget to extend.
 ///
 /// Back-edges are only read during planning (the FO→FI BFS in
-/// `planner-graph.rs`), while the graph holds every node strong, so `upgrade()`
+/// `planner_graph.rs`), while the graph holds every node strong, so `upgrade()`
 /// cannot fail there; a dead upgrade is skipped exactly like TS's BFS ignoring
 /// a terminus.
 #[derive(Clone)]

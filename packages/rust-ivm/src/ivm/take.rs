@@ -105,7 +105,8 @@ pub type PartitionKey = Vec<String>;
 /// would be under-hydrated. TS persists the (partial) state then asserts
 /// `!downstreamEarlyReturn` — which throws and resets the pipeline. We mirror
 /// that: on a clean early drop we persist the partial state and panic (caught
-/// at the napi boundary -> reset). We skip both if a panic is already in flight
+/// by `pipeline_driver`'s per-pull `catch_unwind` -> the operation fails ->
+/// view-syncer `#cleanup` -> rehydrate). We skip both if a panic is in flight
 /// (Rust analog of TS's `if (!exceptionThrown)`) so we never double-panic.
 struct InitialFetchGuard {
     persisted: Rc<Cell<bool>>,
@@ -720,7 +721,8 @@ impl Take {
         // truncation), and a reset re-hydrates anyway so it gives no WAL benefit
         // over teardown — the WAL fix is keeping this divergence RARE (streaming
         // hydrate completeness), not cheapening the recovery). The panic is
-        // caught at the napi boundary and surfaced as a thrown error.
+        // caught by `pipeline_driver`'s per-pull `catch_unwind` and surfaced as
+        // the operation's `Err`, the rust twin of TS's throw.
         let bound = take_state.bound.as_ref().expect("Bound should be set");
         let compare = self.compare_rows().clone();
 
@@ -1127,9 +1129,9 @@ mod bound_none_edit_tests {
     /// keep TS parity here (no `-2` in-place reset): a reset re-hydrates anyway,
     /// so it renews the snapshot pin identically to a teardown and buys no WAL
     /// benefit; the WAL fix is keeping this divergence RARE (streaming-hydrate
-    /// completeness). The panic must be `catch_unwind`-safe so the napi boundary
-    /// surfaces it as a thrown error (teardown) rather than SIGABRT-ing the
-    /// process. Prod-observed on hf2cg (CG udog2taq51jh7eagf8, take.rs:670).
+    /// completeness). The panic must be `catch_unwind`-safe so
+    /// `pipeline_driver`'s per-pull boundary surfaces it as the operation's
+    /// `Err` (teardown) rather than SIGABRT-ing the process. Prod-observed on hf2cg (CG udog2taq51jh7eagf8, take.rs:670).
     #[test]
     fn edit_on_empty_partition_panics_bound_should_be_set() {
         let input: Shared<dyn Input> = Rc::new(RefCell::new(EmptyInput::new()));

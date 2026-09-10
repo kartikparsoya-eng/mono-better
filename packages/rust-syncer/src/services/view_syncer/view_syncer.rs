@@ -423,7 +423,8 @@ thread_local! {
 /// `timeSliceQueue.withLock(() => new Promise(setImmediate))`.
 ///
 /// tokio's `yield_now` is the `setImmediate` twin: it defers the task until
-/// after the runtime has polled its I/O driver (tokio `task/yield_now.rs`:
+/// after the runtime has polled its I/O driver (the tokio crate's own
+/// `task/yield_now.rs`, not a file in this repo:
 /// "the scheduler ... wakes deferred tasks only after it has run [the
 /// driver]"), so every other ready task on this shard — the other client
 /// groups' inbound frames and notifications, timers — runs before the next
@@ -3285,8 +3286,9 @@ impl ViewSyncerService {
 
         // No change in the RAW token → skip re-validation + re-transformation.
         // TS: `authChanged = !authEquals(prev, next)`, and `authEquals` compares
-        // the raw token string for BOTH opaque and JWT auth (connection-context-
-        // manager.ts:349 → auth.ts `authEquals`). Comparing decoded JWT claims
+        // the raw token string for BOTH opaque and JWT auth
+        // (connection-context-manager.ts:349 → auth.ts `authEquals`).
+        // Comparing decoded JWT claims
         // here (the old behavior) wrongly treated an OPAQUE token refresh as
         // unchanged — opaque tokens carry no claims, so both decode to `{}` and a
         // `token-1` → `token-2` swap was skipped, never re-transforming custom
@@ -9551,8 +9553,8 @@ mod tests {
 
     // ─── ViewSyncerService mock-factory harness ───────────────────────────────────────
     //
-    // Drives ViewSyncerService (the fused port of TS view-syncer.ts + syncer-ws-message-
-    // handler.ts dispatch) directly on the test thread, with mock dispatch
+    // Drives ViewSyncerService (the fused port of TS view-syncer.ts +
+    // syncer-ws-message-handler.ts dispatch) directly on the test thread, with mock dispatch
     // services (Noop* above), an in-memory replica carrying a real `issue`
     // table spec, and a channel-backed DirectWebSocketSink standing in for the
     // client socket. Models the TS view-syncer.pg.test.ts `connect()` +
@@ -10185,8 +10187,9 @@ mod tests {
 // The former `sync_engine.rs` engine + CVR hot path, merged into
 // `ViewSyncerService` per TS: `view-syncer.ts` owns `#pipelines` / `#cvrStore` /
 // `#clients` directly. Port of the `CVRState` + `hydrate_and_sync` /
-// `advance_and_sync` logic in `rust-ivm/napi/src/lib.rs`, with the napi / TSFN /
-// actor-thread machinery stripped. Drives the flow:
+// `advance_and_sync` logic that the removed napi cdylib carried (deleted in
+// a5e502ad9), with its TSFN / actor-thread machinery stripped. Drives the
+// flow:
 //
 //   engine `RowChange` → `ChangeProcessor::on_row_change` →
 //   `CVRQueryDrivenUpdater` → `MultiPoker` (poke frames) → `DirectWebSocketSink`
@@ -10406,10 +10409,11 @@ impl ViewSyncerService {
 
     /// Rust-only relay to `CVRStore.updateTTLClock` (no TS twin): in TS the
     /// view-syncer holds `#cvrStore` and calls `updateTTLClock` on it directly;
-    /// here the router cannot reach the `!Send` store (the engine owns it), so
+    /// here the caller cannot reach the `!Send` store (the engine owns it), so
     /// this forwards the call, fire-and-forget on the shared-pool runtime (TS
     /// `.catch`es and logs — view-syncer.ts:1110-1114). The 1:1 port of
-    /// `#updateTTLClockInCVRWithoutLock` itself lives in `router.rs`.
+    /// `#updateTTLClockInCVRWithoutLock` itself is `update_ttl_clock_in_cvr_
+    /// without_lock`, further down this file.
     /// No-op without a store (in-memory / test CGs).
     pub fn update_ttl_clock(&self, ttl_clock: rust_cvr::ttl_clock::TTLClock, last_active: i64) {
         let Some(store_arc) = self.store.clone() else {

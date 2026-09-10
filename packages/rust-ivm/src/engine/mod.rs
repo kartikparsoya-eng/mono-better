@@ -595,8 +595,9 @@ impl Engine {
     ///
     /// A scanstatus probe interrupted by the watchdog (`sqlite3_interrupt`
     /// racing planning) unwinds with the typed `CostProbeInterrupted` payload;
-    /// like the napi-era caller, degrade to planning WITHOUT flips instead of
-    /// letting the panic tear down the client group.
+    /// degrade to planning WITHOUT flips instead of letting the panic reach
+    /// `pipeline_driver`'s per-pull `catch_unwind` and fail the client group's
+    /// operation. An unflipped plan is slower, never wrong.
     fn plan_ast(&mut self, ast: &Ast) -> Ast {
         let Some(conn) = self.cost_model_conn.clone() else {
             return ast.clone();

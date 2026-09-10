@@ -112,7 +112,8 @@ fn replace_unpaired_surrogate_escapes(text: &str) -> Option<String> {
 /// every boundary the string crosses (the PG driver, better-sqlite3), so
 /// U+FFFD is what TS stores in the CVR, compares against the replica, and
 /// returns to the client. `serde_json` implements the same JS rule internally
-/// (read.rs `parse_unicode_escape`, WTF-8 when `validate` is false) but exposes
+/// (the serde_json crate's own read.rs, `parse_unicode_escape`, WTF-8 when
+/// `validate` is false) but exposes
 /// it only through `deserialize_bytes`, which `Value`'s `deserialize_any` never
 /// reaches — hence the repair here rather than a parser flag.
 ///

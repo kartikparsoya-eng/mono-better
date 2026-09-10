@@ -6,7 +6,7 @@
 //! `zql/src/query/` directory 1:1 by filename. A few TS files have no runtime to
 //! port (`query.ts` type machinery, `create-builder.ts` client factory) and are
 //! omitted; `runnable-query-impl.ts` also absorbs `static-query.ts`, and
-//! `query-delegate-base.rs` absorbs the small `query-delegate.ts` residue whose
+//! `query_delegate_base.rs` absorbs the small `query-delegate.ts` residue whose
 //! `newQuery` runtime lives in `sqlite/query_delegate.rs`.
 
 pub mod complete_ordering;

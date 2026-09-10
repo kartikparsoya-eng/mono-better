@@ -13,8 +13,11 @@ use crate::ivm::stream::RelStream;
 ///
 /// Uses a custom serde representation: plain JSON values (not tagged enums).
 /// `null` → `Null`, `true`/`false` → `Bool`, `42` → `F64`, `"hello"` → `Str`,
-/// `{...}`/`[...]` → `Json`. This matches the TS wire format and the
-/// `json_to_value` mapping in `napi/src/lib.rs`.
+/// `{...}`/`[...]` → `Json`. This matches the TS wire format, and the two
+/// other rust JSON→`Value` paths must agree with it: `builder::filter`'s
+/// `json_to_value` and `replay::json_to_rust_value` (pinned by
+/// `json_number_parity_with_js` below — the number-bounds disagreement between
+/// them is how a divergence once hid).
 #[derive(Clone, Debug, Default)]
 pub enum Value {
     #[default]

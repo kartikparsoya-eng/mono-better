@@ -1,7 +1,8 @@
 //! Inspector protocol op dispatch — port of
 //! `services/view-syncer/inspect-handler.ts` (`handleInspect`).
 //!
-//! The caller (the per-CG dispatch in `router.rs`, twin of the TS
+//! The caller (the per-CG dispatch in `services/view_syncer/view_syncer.rs`,
+//! twin of the TS
 //! `viewSyncer.inspect` lock body) resolves the client's socket and TTL clock
 //! and passes them in, mirroring how TS hands `handleInspect` the resolved
 //! `client` / `cvr` / `cvrStore`. Every op — present, unported, and unknown —

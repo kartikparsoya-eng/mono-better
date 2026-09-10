@@ -24,7 +24,7 @@
 //! rowKey + refcount merge, deleteUnreferencedRows). Compares returned patches,
 //! StoreOps, and resulting CVR state.
 //!
-//! store.rs: as_query (the CVR-load decoder, inverse round-trip of
+//! cvr_store.rs: as_query (the CVR-load decoder, inverse round-trip of
 //! query_record_to_query_row). The flush-path DB-row builders are IO-tier (covered
 //! by the .pg.test.rs integration tests, not this fixture).
 //!
@@ -1494,7 +1494,7 @@ fn parity_check() {
         );
     }
 
-    // ---- ⑧ store.rs load path: as_query is the inverse of query_record_to_query_row ----
+    // ---- ⑧ cvr_store.rs load path: as_query is the inverse of query_record_to_query_row ----
     // Anchored to the TS-verified `queryRows` fixtures: take TS's QueriesRow, run the
     // Rust load-path deserializer `as_query`, re-serialize via the (TS-matched)
     // `query_record_to_query_row`, and require identity. Pins the CVR-load decoder

@@ -1,6 +1,6 @@
 //! rust-syncer — full Rust syncer binary for zero-cache.
 //!
-//! Replaces the entire TS syncer process (syncer.ts, dispatcher.ts,
+//! Replaces the entire TS syncer process (syncer.ts, worker-dispatcher.ts,
 //! view-syncer.ts, connection.ts, etc.) with a single Rust binary.
 //! See `packages/zero-cache/docs/rust-cvr-port/89-full-rust-syncer.md`.
 //!
@@ -8,7 +8,8 @@
 //! The module tree mirrors the TS source layout 1:1 (`auth/`, `workers/`,
 //! `services/view_syncer/`, `custom_queries/`, `db/`) so each Rust file maps to
 //! its TS origin. The one documented exception is the per-CG **actor core**
-//! (`router.rs`): TS's separate `ViewSyncerService` (view-syncer.ts),
+//! (`services/view_syncer/view_syncer.rs`, with the executor substrate in
+//! `workers/cg_executor.rs`): TS's separate `ViewSyncerService` (view-syncer.ts),
 //! `ConnectionContextManager` (connection-context-manager.ts) and `Syncer`
 //! (syncer.ts) classes map to `ViewSyncerService` + `Syncer` for the
 //! single-threaded-per-CG `spawn_local` model — they cannot split into 1:1 files

@@ -118,8 +118,8 @@ pub fn report(op: &str, total_ms: f64) {
         );
         emit(&line);
         // Clear after printing so anything accumulated AFTER this report (e.g.
-        // the napi-side drain barrier, which runs post-compute on this same
-        // actor thread) is exactly what `report_residual` picks up.
+        // `deliver.drain`, which runs post-compute on this same client-group
+        // thread) is exactly what `report_residual` picks up.
         s.borrow_mut().clear();
     });
 }

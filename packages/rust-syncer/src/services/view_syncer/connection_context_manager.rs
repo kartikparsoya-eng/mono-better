@@ -6,7 +6,8 @@
 //! `self.ccm`; it records `initConnection`/`closeConnection`, resolves connect
 //! auth (`resolve_auth`), serves use-time context reads for the push relay,
 //! mutagen CRUD auth, and custom-query Bearer (via `CcmDispatchAdapter` in
-//! `router.rs`), and drives the auth-maintenance tick (`plan_maintenance` /
+//! `services/view_syncer/view_syncer.rs`), and drives the auth-maintenance
+//! tick (`plan_maintenance` /
 //! `validate_connection` / `fail_connection` / `defer_maintenance` + the
 //! background-connection retransform). The old simplified per-CG fields
 //! (`pinned_user_id` / `client_raw_auth`) are deleted.
