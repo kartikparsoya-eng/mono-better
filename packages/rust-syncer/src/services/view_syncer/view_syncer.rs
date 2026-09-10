@@ -404,7 +404,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn set_slow_hydrate_threshold_for_test(threshold: Option<f64>) {
+pub(crate) fn set_slow_hydrate_threshold_for_test(threshold: Option<f64>) {
     SLOW_HYDRATE_THRESHOLD_OVERRIDE.with(|o| *o.borrow_mut() = threshold);
 }
 
@@ -2493,12 +2493,12 @@ impl ViewSyncerService {
         params: ConnectParams,
         sink: DirectWebSocketSink,
     ) -> Option<(Arc<str>, Arc<str>, String)> {
-        crate::trace::note(
+        crate::trace::note!(
             "conn-open",
-            &format!(
-                "cg={} client={} ws={}",
-                self.cg_id, params.client_id, params.ws_id
-            ),
+            "cg={} client={} ws={}",
+            self.cg_id,
+            params.client_id,
+            params.ws_id
         );
         // TS `keepalive()` at socket accept (syncer.ts:370 → view-syncer.ts
         // :718-724): `#keepAliveUntil = Date.now() + keepaliveMs`. `#lastConnectTime`
@@ -3034,10 +3034,7 @@ impl ViewSyncerService {
                     rust_cvr::schema::types::version_string(&cvr.version)
                 );
             }
-            crate::trace::note(
-                "hydrate-start",
-                &format!("cg={} client={client_id}", self.cg_id),
-            );
+            crate::trace::note!("hydrate-start", "cg={} client={client_id}", self.cg_id);
             // Poke EVERY registered connection, not just the requester — TS
             // `#syncQueryPipelineSet` pokes `#getClients()` unfiltered. Scoping
             // to `&[ws_id]` left the group's other tabs on the old cookie, and
@@ -3098,12 +3095,10 @@ impl ViewSyncerService {
                     // `#pipelinesSynced = true; setSharedRetransformReady(true)`).
                     lock_unpoisoned(&self.ccm).set_shared_retransform_ready(true);
                     let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
-                    crate::trace::note(
+                    crate::trace::note!(
                         "hydrate-end",
-                        &format!(
-                            "cg={} client={client_id} elapsed_ms={elapsed_ms:.1}",
-                            self.cg_id
-                        ),
+                        "cg={} client={client_id} elapsed_ms={elapsed_ms:.1}",
+                        self.cg_id
                     );
                     // No whole-pass metric or slow warn here. TS never counts a
                     // config pass: `#hydrations.add(1)` fires once per
@@ -3596,9 +3591,10 @@ impl ViewSyncerService {
         // TS view-syncer.ts:880-883: the downstream's cleanup logs `client closed`
         // (an error close was already logged as "closing connection … with error").
         tracing::info!(client_id, ws_id, "client closed");
-        crate::trace::note(
+        crate::trace::note!(
             "conn-close",
-            &format!("cg={} client={client_id} ws={ws_id}", self.cg_id),
+            "cg={} client={client_id} ws={ws_id}",
+            self.cg_id
         );
         // Every accepted socket increments the CG handle count, including a
         // socket later superseded by another wsID.
@@ -3701,14 +3697,12 @@ impl ViewSyncerService {
     /// end-to-end serving-lag histogram (no-op when nothing is pending or the
     /// served version does not yet cover it). Port of TS `#markVersionServed`.
     fn mark_version_served(&mut self, version: &CVRVersion) {
-        crate::trace::note(
+        crate::trace::note!(
             "poke-sent",
-            &format!(
-                "cg={} version={} clients={}",
-                self.cg_id,
-                version.state_version,
-                self.registered_ws.len()
-            ),
+            "cg={} version={} clients={}",
+            self.cg_id,
+            version.state_version,
+            self.registered_ws.len()
         );
         if let Some(obs) = self
             .e2e_serving_lag
@@ -3797,9 +3791,11 @@ impl ViewSyncerService {
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
         let advance_started = std::time::Instant::now();
-        crate::trace::note(
+        crate::trace::note!(
             "advance-start",
-            &format!("cg={} clients={}", self.cg_id, client_ids.len()),
+            "cg={} clients={}",
+            self.cg_id,
+            client_ids.len()
         );
         match self
             .advance_and_sync(
@@ -3814,13 +3810,11 @@ impl ViewSyncerService {
         {
             Ok(result) => {
                 let advance_ms = advance_started.elapsed().as_secs_f64() * 1000.0;
-                crate::trace::note(
+                crate::trace::note!(
                     "advance-end",
-                    &format!(
-                        "cg={} elapsed_ms={advance_ms:.1} reset={}",
-                        self.cg_id,
-                        result.reset_reason.is_some()
-                    ),
+                    "cg={} elapsed_ms={advance_ms:.1} reset={}",
+                    self.cg_id,
+                    result.reset_reason.is_some()
                 );
                 // `zero.sync.advance-time` is recorded inside `advance_and_sync`
                 // (TS `#advancePipelines`, view-syncer.ts:2631) from the process
@@ -4522,12 +4516,10 @@ async fn dispatch_cg_message(
             let piggyback = state_rc.borrow_mut().on_new_connection(*params, sink).await;
             if crate::trace::enabled() {
                 let cg_id = state_rc.borrow().cg_id.clone();
-                crate::trace::note(
+                crate::trace::note!(
                     "cg-new-connection",
-                    &format!(
-                        "cg={cg_id} setup_ms={:.1}",
-                        accepted_at.elapsed().as_secs_f64() * 1000.0
-                    ),
+                    "cg={cg_id} setup_ms={:.1}",
+                    accepted_at.elapsed().as_secs_f64() * 1000.0
                 );
             }
             // Piggybacked initConnection: dispatched through the SAME inbound
@@ -4563,14 +4555,12 @@ async fn dispatch_cg_message(
             on_inbound(state_rc, client_id, ws_id, text).await;
             if crate::trace::enabled() {
                 let cg_id = state_rc.borrow().cg_id.clone();
-                crate::trace::note(
+                crate::trace::note!(
                     "cg-inbound",
-                    &format!(
-                        "cg={cg_id} kind={kind} queue_wait_ms={:.1} handle_ms={:.1} handle_cpu_ms={:.1}",
-                        queue_wait.as_secs_f64() * 1000.0,
-                        handled_at.elapsed().as_secs_f64() * 1000.0,
-                        crate::trace::thread_cpu_ms() - handled_cpu
-                    ),
+                    "cg={cg_id} kind={kind} queue_wait_ms={:.1} handle_ms={:.1} handle_cpu_ms={:.1}",
+                    queue_wait.as_secs_f64() * 1000.0,
+                    handled_at.elapsed().as_secs_f64() * 1000.0,
+                    crate::trace::thread_cpu_ms() - handled_cpu
                 );
             }
         }
@@ -4614,12 +4604,10 @@ async fn dispatch_cg_message(
             state_rc.borrow_mut().on_notification(merged).await;
             if crate::trace::enabled() {
                 let cg_id = state_rc.borrow().cg_id.clone();
-                crate::trace::note(
+                crate::trace::note!(
                     "cg-notification",
-                    &format!(
-                        "cg={cg_id} merged={merged_count} handle_ms={:.1}",
-                        notified_at.elapsed().as_secs_f64() * 1000.0
-                    ),
+                    "cg={cg_id} merged={merged_count} handle_ms={:.1}",
+                    notified_at.elapsed().as_secs_f64() * 1000.0
                 );
             }
         }
@@ -5692,6 +5680,15 @@ mod tests {
             _client_group_id: &str,
         ) {
         }
+        // Explicit empty body: this test dispatch has no connection-context
+        // owner. `set_auth_fail_hook` is a REQUIRED trait method so the choice
+        // cannot be inherited silently.
+        fn set_auth_fail_hook(
+            &self,
+            _hook: crate::workers::syncer_ws_message_handler::AuthFailHook,
+        ) {
+        }
+
         fn set_validate_hook(&self, hook: crate::workers::syncer_ws_message_handler::ValidateHook) {
             *self.validate_hook.lock().unwrap() = Some(hook);
         }
@@ -8784,6 +8781,21 @@ mod tests {
         blocked_once: AtomicBool,
     }
     impl PusherDispatch for BlockingPusher {
+        // Explicit empty bodies: this test dispatch has no connection-context
+        // owner. Both hooks are REQUIRED trait methods so the choice cannot be
+        // inherited silently (see the trait docs).
+        fn set_auth_fail_hook(
+            &self,
+            _hook: crate::workers::syncer_ws_message_handler::AuthFailHook,
+        ) {
+        }
+
+        fn set_validate_hook(
+            &self,
+            _hook: crate::workers::syncer_ws_message_handler::ValidateHook,
+        ) {
+        }
+
         fn enqueue_push(
             &self,
             _selector: &ConnectionSelector,
@@ -11254,13 +11266,11 @@ impl ViewSyncerService {
         // resolution + flip planning) BEFORE any row fetch. Timing it separately
         // isolates a data-independent per-query planning cost from the
         // fetch/materialize and flush phases below.
-        crate::trace::note(
+        crate::trace::note!(
             "hydrate-config",
-            &format!(
-                "cg={} config_update_ms={:.1}",
-                self.cg_id,
-                cfg_started.elapsed().as_secs_f64() * 1000.0
-            ),
+            "cg={} config_update_ms={:.1}",
+            self.cg_id,
+            cfg_started.elapsed().as_secs_f64() * 1000.0
         );
         self.sync_query_pipeline_set(
             cfg_cvr,
@@ -11581,15 +11591,13 @@ impl ViewSyncerService {
                     )
                     .await;
                     let transform_ms = transform_started.elapsed().as_secs_f64() * 1000.0;
-                    crate::trace::note(
+                    crate::trace::note!(
                         "transform",
-                        &format!(
-                            "cg={} queries={} transform_ms={:.1} ok={}",
-                            self.cg_id,
-                            custom_queries_to_transform.len(),
-                            transform_ms,
-                            transform_result.is_ok()
-                        ),
+                        "cg={} queries={} transform_ms={:.1} ok={}",
+                        self.cg_id,
+                        custom_queries_to_transform.len(),
+                        transform_ms,
+                        transform_result.is_ok()
                     );
                     crate::metrics::record_query_transformation_time(transform_ms);
                     crate::metrics::record_query_transformation(transform_result.is_ok());
@@ -11830,14 +11838,16 @@ impl ViewSyncerService {
             let mut idx = QueryCoveringIndex::new();
             for (qid, ast_json, hash) in self.pipelines.running_queries() {
                 match serde_json::from_str::<serde_json::Value>(&ast_json) {
-                    Ok(ast) => idx.add(
-                        &qid,
-                        &RunningQuery {
+                    Ok(ast) => {
+                        let q = RunningQuery {
                             transformed_ast: ast,
                             transformation_hash: hash,
                             query_name: query_name_of(&cfg_cvr, &qid),
-                        },
-                    ),
+                        };
+                        let normalized =
+                            crate::auth::read_authorizer::normalize_ast(&q.transformed_ast);
+                        idx.add(&qid, normalized, &q);
+                    }
                     Err(e) => {
                         tracing::warn!("query covering: unparseable stored AST for {qid}: {e}")
                     }
@@ -11849,7 +11859,13 @@ impl ViewSyncerService {
             for (qid, transformed_ast, transformation_hash) in &covering_candidates {
                 let query_name = query_name_of(&cfg_cvr, qid);
                 total_hydrated_queries += 1;
-                if let Some(cov) = idx.find_covering_query(qid, transformed_ast) {
+                // Normalized ONCE and used for both the lookup and the
+                // insert below. TS gets that for free from `normalizeAST`'s
+                // WeakMap memo (zero-protocol/src/ast.ts:432-450); rust has no
+                // AST object identity to key one on, so the memo lives here.
+                // See `QueryCoveringIndex::add`.
+                let normalized_ast = crate::auth::read_authorizer::normalize_ast(transformed_ast);
+                if let Some(cov) = idx.find_covering_query(qid, &normalized_ast) {
                     covered_hydrated_queries += 1;
                     if first_covered.is_none() {
                         first_covered = Some(QueryCoverageShadowHit {
@@ -11864,6 +11880,7 @@ impl ViewSyncerService {
                 }
                 idx.add(
                     qid,
+                    normalized_ast,
                     &RunningQuery {
                         transformed_ast: transformed_ast.clone(),
                         transformation_hash: transformation_hash.clone(),
@@ -11961,14 +11978,12 @@ impl ViewSyncerService {
                     catchup_from,
                 )
                 .await?;
-            crate::trace::note(
+            crate::trace::note!(
                 "catchup",
-                &format!(
-                    "cg={} patches={} catchup_ms={:.1}",
-                    self.cg_id,
-                    patches.len(),
-                    catchup_started.elapsed().as_secs_f64() * 1000.0
-                ),
+                "cg={} patches={} catchup_ms={:.1}",
+                self.cg_id,
+                patches.len(),
+                catchup_started.elapsed().as_secs_f64() * 1000.0
             );
             for p in &patches {
                 pokers.add_patch(p);
@@ -12114,14 +12129,12 @@ impl ViewSyncerService {
         let patches = self
             .gather_catchup_patches(&cvr.version, current, exclude_query_hashes, catchup_from)
             .await?;
-        crate::trace::note(
+        crate::trace::note!(
             "catchup",
-            &format!(
-                "cg={} patches={} catchup_ms={:.1}",
-                self.cg_id,
-                patches.len(),
-                catchup_started.elapsed().as_secs_f64() * 1000.0
-            ),
+            "cg={} patches={} catchup_ms={:.1}",
+            self.cg_id,
+            patches.len(),
+            catchup_started.elapsed().as_secs_f64() * 1000.0
         );
 
         for p in &patches {
@@ -12196,14 +12209,12 @@ impl ViewSyncerService {
                 .await
                 .map_err(|e| format!("catchup_config_patches: {e}"))?;
             if crate::trace::enabled() {
-                crate::trace::note(
+                crate::trace::note!(
                     "catchup-rows",
-                    &format!(
-                        "cg={} rows={} catchup_open_ms={catchup_open_ms:.1} catchup_read_ms={catchup_read_ms:.1} catchup_cfg_ms={:.1}",
-                        self.cg_id,
-                        rows.len(),
-                        catchup_cfg_started.elapsed().as_secs_f64() * 1000.0
-                    ),
+                    "cg={} rows={} catchup_open_ms={catchup_open_ms:.1} catchup_read_ms={catchup_read_ms:.1} catchup_cfg_ms={:.1}",
+                    self.cg_id,
+                    rows.len(),
+                    catchup_cfg_started.elapsed().as_secs_f64() * 1000.0
                 );
             }
             Ok::<_, String>((rows, cfg))
@@ -12538,14 +12549,12 @@ impl ViewSyncerService {
             } else {
                 self.existing_rows().await.map_err(|e| e.to_string())?
             };
-        crate::trace::note(
+        crate::trace::note!(
             "hydrate-rows",
-            &format!(
-                "cg={} existing_rows={} existing_rows_ms={:.1}",
-                self.cg_id,
-                existing_rows_owned.len(),
-                rows_started.elapsed().as_secs_f64() * 1000.0
-            ),
+            "cg={} existing_rows={} existing_rows_ms={:.1}",
+            self.cg_id,
+            existing_rows_owned.len(),
+            rows_started.elapsed().as_secs_f64() * 1000.0
         );
         let existing_rows: &RowRecordMap = &existing_rows_owned;
         let (sigs, provider) = Self::signature_provider();
@@ -12721,19 +12730,17 @@ impl ViewSyncerService {
         // error, the CVR version-bump failure above) never reaches them —
         // hence after both early returns.
         self.metrics.record_hydration(total_process_time_ms);
-        crate::trace::note(
+        crate::trace::note!(
             "hydrate-fetch",
-            &format!(
-                "cg={} queries={} rows={} fetch_materialize_ms={:.1} cpu_ms={:.1} process_ms={:.1} yields={} yielded_ms={:.1}",
-                self.cg_id,
-                queries.len(),
-                processor.total_processed(),
-                fetch_started.elapsed().as_secs_f64() * 1000.0,
-                crate::trace::thread_cpu_ms() - fetch_cpu_started,
-                total_process_time_ms,
-                yields,
-                yielded.as_secs_f64() * 1000.0
-            ),
+            "cg={} queries={} rows={} fetch_materialize_ms={:.1} cpu_ms={:.1} process_ms={:.1} yields={} yielded_ms={:.1}",
+            self.cg_id,
+            queries.len(),
+            processor.total_processed(),
+            fetch_started.elapsed().as_secs_f64() * 1000.0,
+            crate::trace::thread_cpu_ms() - fetch_cpu_started,
+            total_process_time_ms,
+            yields,
+            yielded.as_secs_f64() * 1000.0
         );
         // Record the transformation hash each query was hydrated with, so a later
         // config pass can detect a changed hash (drift / auth re-transform) and
@@ -12805,14 +12812,12 @@ impl ViewSyncerService {
             .await?;
         // Phase profiling (SYNCER_TRACE): CVR-store persist cost, split from the
         // fetch/materialize above so total hydration is fully attributed.
-        crate::trace::note(
+        crate::trace::note!(
             "hydrate-flush",
-            &format!(
-                "cg={} store_flush_ms={:.1} flushed={}",
-                self.cg_id,
-                flush_started.elapsed().as_secs_f64() * 1000.0,
-                store_flushed
-            ),
+            "cg={} store_flush_ms={:.1} flushed={}",
+            self.cg_id,
+            flush_started.elapsed().as_secs_f64() * 1000.0,
+            store_flushed
         );
         // No-op store flush → revert to the ORIGINAL CVR (see `flush_to_store`).
         let flushed_cvr = if store_flushed {
@@ -12938,17 +12943,15 @@ impl ViewSyncerService {
         let mut num_changes = num_changes;
         let total_process_time_ms = timer.stop();
         if crate::trace::enabled() {
-            crate::trace::note(
+            crate::trace::note!(
                 "advance-changes",
-                &format!(
-                    "cg={} changes={} rows={} advance_ivm_ms={:.1} process_ms={:.1} yields={}",
-                    self.cg_id,
-                    num_changes,
-                    collected.len(),
-                    advance_started.elapsed().as_secs_f64() * 1000.0,
-                    total_process_time_ms,
-                    yields
-                ),
+                "cg={} changes={} rows={} advance_ivm_ms={:.1} process_ms={:.1} yields={}",
+                self.cg_id,
+                num_changes,
+                collected.len(),
+                advance_started.elapsed().as_secs_f64() * 1000.0,
+                total_process_time_ms,
+                yields
             );
         }
 
@@ -13410,7 +13413,21 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMap
 fn accumulate_signature(acc: &mut HashMap<String, u64>, rc: &rust_ivm::streamer::RowChange) {
     if rc.change_type != rust_ivm::ivm::change::ChangeType::Edit {
         let unit = rust_ivm::row_signature_unit(&rc.table, &rc.row_key);
-        *acc.entry(rc.query_id.clone()).or_insert(0) ^= unit;
+        // TS reads then writes the SAME key reference
+        // (`#rowSetSignatures.get(change.queryID) ?? 0n` … `.set(change.queryID,
+        // cur ^ unit)`, pipeline-driver.ts:889-895); a JS Map key is a
+        // reference, so TS allocates nothing per row here. `entry(k.clone())`
+        // takes its key eagerly and so allocated a fresh `String` for EVERY row
+        // change even once the query was present — `query_id` is a per-query
+        // constant on a per-row path. Looking up first keeps the clone for the
+        // first row of each query only. `0 ^ unit == unit`, so seeding the
+        // absent entry with `unit` is TS's `?? 0n` followed by the XOR.
+        match acc.get_mut(&rc.query_id) {
+            Some(sig) => *sig ^= unit,
+            None => {
+                acc.insert(rc.query_id.clone(), unit);
+            }
+        }
     }
 }
 
@@ -13552,6 +13569,88 @@ fn same_hash_rehydration_bump_reason(
 #[cfg(test)]
 mod engine_tests {
     use super::*;
+
+    /// TS folds the row-set signature by reading and re-writing the SAME key
+    /// reference: `#trackRowSetSignatures` (pipeline-driver.ts:884-899) does
+    /// `const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n` then
+    /// `.set(change.queryID, cur ^ unit)` for every non-EDIT change, so a
+    /// Remove undoes a prior Add and an Edit contributes nothing.
+    /// `accumulate_signature` is the port of that fold.
+    ///
+    /// The fold used to be `*acc.entry(rc.query_id.clone()).or_insert(0) ^=
+    /// unit`, which allocated a fresh `String` for every row change because
+    /// `entry` takes its key eagerly — `query_id` is a per-query constant on a
+    /// per-row path. It now looks the key up first and clones only for a
+    /// query's first row. This pins the fold's arithmetic across that change.
+    ///
+    /// NON-VACUOUS: make the present-key arm assign rather than XOR
+    /// (`Some(sig) => *sig = unit`) and both the two-row and the undo
+    /// assertions fail; seed the absent key with `0` instead of `unit` and the
+    /// single-row assertion fails; drop the EDIT guard and the last assertion
+    /// fails.
+    #[test]
+    fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
+        use rust_ivm::ivm::change::ChangeType;
+        use rust_ivm::ivm::data::Value;
+        use std::sync::Arc;
+
+        // `Row` is `Arc<FxHashMap<String, Value>>`; collecting into the alias
+        // infers the hasher, so the test needs no `rustc_hash` dependency.
+        let row_key = |id: &str| -> rust_ivm::ivm::data::Row {
+            Arc::new(
+                [("id".to_string(), Value::Str(Arc::from(id)))]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        let change = |ct: ChangeType, qid: &str, id: &str| rust_ivm::streamer::RowChange {
+            change_type: ct,
+            query_id: qid.to_string(),
+            table: "issues".to_string(),
+            row_key: row_key(id),
+            row: None,
+            is_hidden: false,
+        };
+
+        let unit1 = rust_ivm::row_signature_unit("issues", &row_key("i1"));
+        let unit2 = rust_ivm::row_signature_unit("issues", &row_key("i2"));
+        assert_ne!(unit1, unit2, "the fixture rows must hash differently");
+
+        // First row of a query: the absent entry is seeded, TS's `?? 0n` ^ unit.
+        let mut acc: HashMap<String, u64> = HashMap::new();
+        accumulate_signature(&mut acc, &change(ChangeType::Add, "q1", "i1"));
+        assert_eq!(acc.get("q1"), Some(&unit1));
+
+        // Second row of the SAME query takes the present-key arm: XOR in, do
+        // not overwrite.
+        accumulate_signature(&mut acc, &change(ChangeType::Add, "q1", "i2"));
+        assert_eq!(
+            acc.get("q1"),
+            Some(&(unit1 ^ unit2)),
+            "a second row must XOR into the running signature, not replace it"
+        );
+
+        // A Remove of a previously-added row undoes it (XOR is its own inverse).
+        accumulate_signature(&mut acc, &change(ChangeType::Remove, "q1", "i1"));
+        assert_eq!(
+            acc.get("q1"),
+            Some(&unit2),
+            "a Remove must undo the matching Add"
+        );
+
+        // Queries are independent accumulators.
+        accumulate_signature(&mut acc, &change(ChangeType::Add, "q2", "i1"));
+        assert_eq!(acc.get("q2"), Some(&unit1));
+        assert_eq!(acc.get("q1"), Some(&unit2), "q2 must not disturb q1");
+
+        // TS skips EDIT entirely (`change.type !== ChangeType.EDIT`).
+        accumulate_signature(&mut acc, &change(ChangeType::Edit, "q1", "i2"));
+        assert_eq!(
+            acc.get("q1"),
+            Some(&unit2),
+            "an Edit must not change the row-set signature"
+        );
+    }
     // The dissolved engine (L9 Stage 3c-iii): tests keep the old name.
     use super::ViewSyncerService as SyncEngine;
     // Auth-maintenance harness helpers live in the sibling `tests` module.

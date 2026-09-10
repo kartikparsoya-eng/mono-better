@@ -108,11 +108,15 @@ pub fn find_covering_query(
     covered_ast: &Value,
     running_queries: &[(String, RunningQuery)],
 ) -> Option<CoveringQuery> {
+    // This free function keeps TS's raw-AST signature (it IS the port of TS's
+    // free `findCoveringQuery`); the normalization the methods no longer do
+    // internally happens here.
     let mut index = QueryCoveringIndex::new();
     for (qid, q) in running_queries {
-        index.add(qid, q);
+        let normalized = normalize_ast(&q.transformed_ast);
+        index.add(qid, normalized, q);
     }
-    index.find_covering_query(covered_query_id, covered_ast)
+    index.find_covering_query(covered_query_id, &normalize_ast(covered_ast))
 }
 
 /// Index of running queries bucketed by root table, for repeated covering
@@ -138,10 +142,27 @@ impl QueryCoveringIndex {
         }
     }
 
-    pub fn add(&mut self, query_id: &str, query: &RunningQuery) {
+    /// Index a running query under its normalized AST.
+    ///
+    /// Takes the NORMALIZED ast, where TS's `add(queryID, query)` takes the raw
+    /// one and normalizes internally (query-covering.ts:69-70). TS can afford
+    /// that because `normalizeAST` is memoized on AST OBJECT IDENTITY
+    /// (`const normalizeCache = new WeakMap<AST, Required<AST>>()`,
+    /// zero-protocol/src/ast.ts:432-450), so the shadow pass normalizing the
+    /// same AST in both `findCoveringQuery` and `add` costs it once. Rust has
+    /// no object identity for a `&Value` to key a WeakMap on, and
+    /// normalization is a full recursive rebuild — flatten the where-clause,
+    /// sort conditions, sort and recursively normalize `related`. So the memo
+    /// moves to the CALL SITE: the caller normalizes once and hands the result
+    /// to both. A process-global cache instead would repeat F-16's mistake —
+    /// TS's WeakMap is per-worker-process and lock-free, so a mutex-guarded map
+    /// here would trade CPU for contention across ~1000 CG threads. The pass
+    /// is default-on (`enableQueryCovering`) and LOG-ONLY, so it was paying
+    /// double per hydrated query on the serial CG thread for output nobody
+    /// reads unless they are debugging.
+    pub fn add(&mut self, query_id: &str, normalized_ast: Value, query: &RunningQuery) {
         self.remove(query_id);
 
-        let normalized_ast = normalize_ast(&query.transformed_ast);
         let root = root_key(&normalized_ast);
         self.by_root
             .entry(root.clone())
@@ -167,18 +188,18 @@ impl QueryCoveringIndex {
         }
     }
 
+    /// Takes the NORMALIZED ast, for the reason given on [`Self::add`].
     pub fn find_covering_query(
         &self,
         covered_query_id: &str,
-        covered_ast: &Value,
+        normalized_covered: &Value,
     ) -> Option<CoveringQuery> {
-        let normalized_covered = normalize_ast(covered_ast);
-        let queries = self.by_root.get(&root_key(&normalized_covered))?;
+        let queries = self.by_root.get(&root_key(normalized_covered))?;
         for q in queries {
             if q.query_id == covered_query_id {
                 continue;
             }
-            if ast_covered_by(&normalized_covered, &q.normalized_ast) {
+            if ast_covered_by(normalized_covered, &q.normalized_ast) {
                 return Some(CoveringQuery {
                     query_id: q.query_id.clone(),
                     transformation_hash: q.transformation_hash.clone(),
@@ -726,16 +747,19 @@ mod tests {
     #[test]
     fn index_only_considers_matching_root() {
         let mut index = QueryCoveringIndex::new();
-        index.add(
-            "query-1",
-            &RunningQuery {
+        {
+            let q = &RunningQuery {
                 transformed_ast: all_comments(),
                 transformation_hash: "hash-1".to_string(),
                 query_name: None,
-            },
-        );
+            };
+            index.add("query-1", normalize_ast(&q.transformed_ast), q);
+        }
         assert_eq!(
-            index.find_covering_query("query-2", &where_ast(eq("id", json!("123")))),
+            index.find_covering_query(
+                "query-2",
+                &normalize_ast(&where_ast(eq("id", json!("123"))))
+            ),
             None
         );
     }
@@ -744,19 +768,25 @@ mod tests {
     fn index_can_be_updated_during_batch() {
         let mut index = QueryCoveringIndex::new();
         assert_eq!(
-            index.find_covering_query("query-2", &where_ast(eq("id", json!("123")))),
+            index.find_covering_query(
+                "query-2",
+                &normalize_ast(&where_ast(eq("id", json!("123"))))
+            ),
             None
         );
-        index.add(
-            "query-1",
-            &RunningQuery {
+        {
+            let q = &RunningQuery {
                 transformed_ast: all_issues(),
                 transformation_hash: "hash-1".to_string(),
                 query_name: None,
-            },
-        );
+            };
+            index.add("query-1", normalize_ast(&q.transformed_ast), q);
+        }
         assert_eq!(
-            index.find_covering_query("query-2", &where_ast(eq("id", json!("123")))),
+            index.find_covering_query(
+                "query-2",
+                &normalize_ast(&where_ast(eq("id", json!("123"))))
+            ),
             Some(CoveringQuery {
                 query_id: "query-1".to_string(),
                 transformation_hash: "hash-1".to_string(),
@@ -768,28 +798,31 @@ mod tests {
     #[test]
     fn index_replaces_query_when_root_changes() {
         let mut index = QueryCoveringIndex::new();
-        index.add(
-            "query-1",
-            &RunningQuery {
+        {
+            let q = &RunningQuery {
                 transformed_ast: all_issues(),
                 transformation_hash: "issues-hash".to_string(),
                 query_name: None,
-            },
-        );
-        index.add(
-            "query-1",
-            &RunningQuery {
+            };
+            index.add("query-1", normalize_ast(&q.transformed_ast), q);
+        }
+        {
+            let q = &RunningQuery {
                 transformed_ast: all_comments(),
                 transformation_hash: "comments-hash".to_string(),
                 query_name: None,
-            },
-        );
+            };
+            index.add("query-1", normalize_ast(&q.transformed_ast), q);
+        }
         assert_eq!(
-            index.find_covering_query("query-2", &where_ast(eq("id", json!("123")))),
+            index.find_covering_query(
+                "query-2",
+                &normalize_ast(&where_ast(eq("id", json!("123"))))
+            ),
             None
         );
         assert_eq!(
-            index.find_covering_query("query-2", &all_comments()),
+            index.find_covering_query("query-2", &normalize_ast(&all_comments())),
             Some(CoveringQuery {
                 query_id: "query-1".to_string(),
                 transformation_hash: "comments-hash".to_string(),

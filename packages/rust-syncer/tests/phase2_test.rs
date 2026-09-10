@@ -158,6 +158,22 @@ struct MockPusher {
 }
 
 impl PusherDispatch for MockPusher {
+    // Explicit empty bodies: this mock has no connection-context owner. Both
+    // hooks are REQUIRED trait methods (they used to default to a no-op, which
+    // meant a dispatch impl could silently lose push-auth invalidation with no
+    // compile error and no log line).
+    fn set_auth_fail_hook(
+        &self,
+        _hook: rust_syncer::workers::syncer_ws_message_handler::AuthFailHook,
+    ) {
+    }
+
+    fn set_validate_hook(
+        &self,
+        _hook: rust_syncer::workers::syncer_ws_message_handler::ValidateHook,
+    ) {
+    }
+
     fn enqueue_push(
         &self,
         selector: &ConnectionSelector,

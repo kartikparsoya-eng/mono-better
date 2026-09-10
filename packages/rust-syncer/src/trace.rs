@@ -1,9 +1,10 @@
 //! Env-gated event trace harness for debugging the syncer's connection/advance
 //! lifecycle.
 //!
-//! Enable with `SYNCER_TRACE=1`. Zero cost when off (one cached bool check).
+//! Enable with `SYNCER_TRACE=1`. Zero cost when off: `note!` is a MACRO, so
+//! the format arguments are not evaluated at all unless the trace is on.
 //! Instrument key lifecycle events with:
-//!     crate::trace::note("conn-open", &format!("cg={cg} client={id}"));
+//!     crate::trace::note!("conn-open", "cg={cg} client={id}");
 //! and read the flow as a top-to-bottom log of connection open/close, hydrate
 //! start/end (with elapsed), advance start/end, and poke.
 //!
@@ -21,13 +22,27 @@ pub fn enabled() -> bool {
 }
 
 /// Log a free-form lifecycle event. `op` is a short event tag (e.g.
-/// `"conn-open"`, `"hydrate-end"`); `msg` carries the context (ids, elapsed).
-#[inline]
-pub fn note(op: &str, msg: &str) {
-    if enabled() {
-        eprintln!("[syncer-trace] {op:16} {msg}");
-    }
+/// `"conn-open"`, `"hydrate-end"`); the remaining arguments are a
+/// `format!`-style template carrying the context (ids, elapsed).
+///
+/// A MACRO rather than a function, so the template is not built when the trace
+/// is off. This mirrors TS's logging idiom: `lc.debug?.(`…${expensive()}`)` is
+/// an optional CALL, and an optional call short-circuits BEFORE evaluating its
+/// arguments, so TS builds no string when the level is disabled (verified: a
+/// template argument's side effect does not run when `debug` is undefined).
+/// The previous `note(op, &format!(…))` function checked `enabled()` INSIDE,
+/// after every caller had already paid for the `format!` — on per-poke and
+/// per-hydrate paths, and contradicting this module's own "zero cost when off"
+/// claim.
+#[macro_export]
+macro_rules! syncer_trace_note {
+    ($op:expr, $($arg:tt)*) => {
+        if $crate::trace::enabled() {
+            eprintln!("[syncer-trace] {:16} {}", $op, format_args!($($arg)*));
+        }
+    };
 }
+pub use crate::syncer_trace_note as note;
 
 /// CPU time consumed by the calling thread so far, in milliseconds
 /// (`CLOCK_THREAD_CPUTIME_ID`). Trace-only: paired with a wall-clock lap it
@@ -52,6 +67,40 @@ pub fn thread_cpu_ms() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// F-18: `note!` must not evaluate its format arguments when the trace is
+    /// off.
+    ///
+    /// TS's logging idiom is an optional CALL — `lc.debug?.(`…${expensive()}`)`
+    /// — and an optional call short-circuits BEFORE evaluating its arguments,
+    /// so TS builds no string when the level is disabled. `note` used to be a
+    /// FUNCTION checking `enabled()` inside, so every caller passing
+    /// `&format!(…)` paid for the format regardless; ten of the nineteen call
+    /// sites were unguarded, including per-poke (`mark_version_served`) and
+    /// both hydrate passes.
+    ///
+    /// The assertion is tied to `enabled()` rather than to `false`, so the test
+    /// is meaningful whether or not `SYNCER_TRACE` is set in the environment —
+    /// it pins the equivalence, not one side of it.
+    ///
+    /// NON-VACUOUS: turn `note!` back into
+    /// `pub fn note(op: &str, msg: &str)` with the callers' `&format!(…)` and
+    /// the argument is evaluated unconditionally, so this fails in any
+    /// environment where `SYNCER_TRACE` is unset (i.e. every normal test run).
+    #[test]
+    fn note_evaluates_its_arguments_only_when_the_trace_is_enabled() {
+        let evaluated = std::cell::Cell::new(false);
+        crate::trace::note!("test-op", "{}", {
+            evaluated.set(true);
+            "payload"
+        });
+        assert_eq!(
+            evaluated.get(),
+            super::enabled(),
+            "the format arguments must be evaluated exactly when the trace is \
+             enabled — a disabled trace must cost nothing but the flag check"
+        );
+    }
+
     #[test]
     fn thread_cpu_ms_advances_with_cpu_work_and_not_with_sleep() {
         let before = super::thread_cpu_ms();

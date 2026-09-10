@@ -197,15 +197,21 @@ pub trait PusherDispatch: Send + Sync {
     /// relayed push comes back 401/403, the connection's context is removed at
     /// the captured revision, so the connection's next message must-fails and
     /// the client reconnects with FRESH auth instead of relaying a dead token
-    /// forever (the 2026-08-29 401 storm). Default no-op for dispatch impls
-    /// without a connection-context owner (tests).
-    fn set_auth_fail_hook(&self, _hook: AuthFailHook) {}
+    /// forever (the 2026-08-29 401 storm).
+    ///
+    /// REQUIRED, not defaulted: a dispatch impl that silently inherited a
+    /// no-op would lose push-auth invalidation with no compile error and no
+    /// log line — i.e. re-open the 401-storm hole. Impls without a
+    /// connection-context owner (tests) write an explicit empty body, which
+    /// makes the choice visible at the impl site.
+    fn set_auth_fail_hook(&self, hook: AuthFailHook);
 
     /// TS `#processPush` (pusher.ts:545-556): a SUCCESSFUL push validates the
     /// connection's current auth snapshot in the CCM (`server-validated` with
-    /// the returned `userID`, else `client-fallback`). Default no-op for
-    /// dispatch impls without a connection-context owner (tests).
-    fn set_validate_hook(&self, _hook: ValidateHook) {}
+    /// the returned `userID`, else `client-fallback`). REQUIRED for the same
+    /// reason as [`Self::set_auth_fail_hook`] — impls without a
+    /// connection-context owner (tests) write an explicit empty body.
+    fn set_validate_hook(&self, hook: ValidateHook);
 }
 
 /// Callback invoked by the pusher's drainer on a 401/403 relay response:
