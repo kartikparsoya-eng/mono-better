@@ -1097,6 +1097,30 @@ impl IvmPipelines {
         }
     }
 
+    /// The source table names the VENDED diagnostic iterates, or an EMPTY
+    /// vec when the diagnostic cannot fire.
+    ///
+    /// TS reads `#tables.keys()` INSIDE
+    /// `if (runtimeDebugFlags.trackRowCountsVended)` (pipeline-driver.ts:704-710),
+    /// so with the flag off it does no work at all. Rust has to collect before
+    /// the `&mut engine` borrow in `finish_hydrate`, but the flag is a
+    /// process-static, so read it here too: with ~150 sources this was 150
+    /// `String` clones plus a sort on EVERY hydrate to feed a diagnostic that
+    /// is off in production. The per-query slow-hydrate threshold check stays
+    /// at the callsite, where TS has it (:705).
+    ///
+    /// The sort has no TS twin and is deliberate: TS iterates a `Map` in
+    /// insertion order, rust's `HashMap` has no order at all, so sorting is
+    /// what makes the log lines deterministic.
+    fn vended_table_names(&self) -> Vec<String> {
+        if !runtime_debug_flags().track_row_counts_vended() {
+            return Vec::new();
+        }
+        let mut names: Vec<String> = self.sources.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Phase 3 for the driver: register the pipelines in the engine (or destroy
     /// them when the stream was cancelled / abandoned), emit the `-finish` /
     /// `-aborted` lifecycle lines and the VENDED diagnostic, and record the
@@ -1104,10 +1128,7 @@ impl IvmPipelines {
     /// `finally` (pipeline-driver.ts:723-810).
     fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[HydrateQuery]) {
         *self.hydrate_context.borrow_mut() = None;
-        // TS `#tables.keys()` (pipeline-driver.ts:710) — collected before the
-        // `&mut` engine borrow below, and sorted because rust's map is unordered.
-        let mut vended_table_names: Vec<String> = self.sources.keys().cloned().collect();
-        vended_table_names.sort();
+        let vended_table_names = self.vended_table_names();
         let Some(eng) = self.engine.as_mut() else {
             return;
         };
@@ -2252,6 +2273,118 @@ mod tests {
     /// below total 204 (200 + 4), so a dropped table, a missing line, or a
     /// wrong sum (e.g. per-table instead of grand-total) all fail distinctly.
     ///
+    /// F-15: TS builds the VENDED table list INSIDE the flag check
+    /// (`if (runtimeDebugFlags.trackRowCountsVended)` then
+    /// `for (const tableName of this.#tables.keys())`, pipeline-driver.ts:
+    /// 704-710), so a production process with the flag off does no work for
+    /// this diagnostic at all. Rust must collect before `finish_hydrate` takes
+    /// its `&mut engine` borrow, so the flag is read in `vended_table_names`
+    /// instead — with ~150 sources the ungated version was 150 `String` clones
+    /// plus a sort on every hydrate.
+    ///
+    /// This pins BOTH directions, including through the real `finish_hydrate`
+    /// path: flag off => no list and no VENDED line; flag on => the full
+    /// sorted list and the line still fires.
+    ///
+    /// NON-VACUOUS: drop the early return from `vended_table_names` and the
+    /// flag-off assertions fail (the list is populated, and the line appears);
+    /// make it return `Vec::new()` unconditionally and the flag-on assertions
+    /// fail.
+    #[test]
+    fn vended_table_names_is_built_only_when_the_flag_can_use_it() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufGuard;
+            fn make_writer(&'a self) -> BufGuard {
+                BufGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Every hydrate is "slow" so the threshold arm never masks the flag arm.
+        super::super::view_syncer::set_slow_hydrate_threshold_for_test(Some(-1.0));
+        let flags = runtime_debug_flags();
+        let prev = flags.track_row_counts_vended();
+
+        // Runs one hydrate to completion (so `finish_hydrate` fires) and
+        // returns whatever it logged.
+        let hydrate_capturing = || -> String {
+            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(BufWriter(buf.clone()))
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            crate::ensure_permissive_global_subscriber();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut p = IvmPipelines::new();
+                p.init(vec![users_spec()], None, "zero").unwrap();
+                let mut changes = p
+                    .hydrate(
+                        &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                        Rc::new(WallTimer::default()),
+                    )
+                    .unwrap();
+                for _ in changes.by_ref() {}
+                changes.finish().unwrap();
+                p.destroy();
+            });
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+
+        // --- flag OFF: no list, no line ---
+        flags.set_track_row_counts_vended(false);
+        {
+            let mut p = IvmPipelines::new();
+            p.init(vec![users_spec()], None, "zero").unwrap();
+            assert!(
+                p.vended_table_names().is_empty(),
+                "with the diagnostic off, the table list must not be built"
+            );
+            p.destroy();
+        }
+        let logged_off = hydrate_capturing();
+        assert!(
+            !logged_off.contains("VENDED"),
+            "with the flag off no VENDED line may be emitted; got: {logged_off}"
+        );
+
+        // --- flag ON: full sorted list, and the line still fires ---
+        flags.set_track_row_counts_vended(true);
+        {
+            let mut p = IvmPipelines::new();
+            p.init(vec![users_spec()], None, "zero").unwrap();
+            assert_eq!(
+                p.vended_table_names(),
+                vec!["users".to_string()],
+                "with the diagnostic on, every source table must be listed"
+            );
+            p.destroy();
+        }
+        let logged_on = hydrate_capturing();
+
+        flags.set_track_row_counts_vended(prev);
+        super::super::view_syncer::set_slow_hydrate_threshold_for_test(None);
+
+        assert!(
+            logged_on.contains("users VENDED"),
+            "gating the list must not stop the VENDED line from firing when \
+             the flag is on; got: {logged_on}"
+        );
+    }
+
     /// Unlike the shared `query pipeline lifecycle` callsite (moved to its own
     /// integration binary), the `VENDED` / `Total rows considered` callsites are
     /// UNIQUE to `log_vended_row_counts` and exercised only by this test, so the
