@@ -283,6 +283,25 @@ TS_CALL = re.compile(r"\b[\w.#]*[lL][cC]\s*\.\s*(%s)\s*\?\.\s*\(" % "|".join(TS_
 # `closing connection with error`).
 TS_CALL_DYNAMIC = re.compile(r"\b[\w.#]*[lL][cC]\s*\[\s*[^\]\n]{1,120}\]\s*\?\.\s*\(")
 
+# TS logging WRAPPERS: a helper that TAKES the message and forwards it to
+# `lc.<level>?.(message, ...)`. The forwarding site is invisible to TS_CALL
+# because its message is a variable, so the wrapper's CALL SITES are where the
+# texts live. Same class of blind spot as TS_CALL_DYNAMIC above: a TS line rust
+# does emit looks rust-only, and the ratchet then demands a baseline bump for a
+# line that is in fact paired.
+#
+# Origin: `logQueryFailure` (pipeline-driver.ts:1451-1465) — `queryLC.error?.(
+# message, error)` with `message` a parameter, called with exactly two literals
+# ('query hydration failed' :809, 'query pipeline failed' :1439).
+#
+# name -> (level, 0-based index of the message argument)
+TS_WRAPPERS = {
+    "logQueryFailure": ("error", 2),
+}
+TS_WRAPPER_CALL = {
+    name: re.compile(r"\b%s\s*\(" % re.escape(name)) for name in TS_WRAPPERS
+}
+
 
 def test_regions(src: str) -> list[tuple[int, int]]:
     """Byte ranges covered by `#[cfg(test)]` items.
@@ -444,14 +463,20 @@ def scan_ts() -> list[dict]:
                 rel = os.path.relpath(path, ROOT)
                 src = open(path, encoding="utf-8", errors="replace").read()
                 is_test = ".test." in fn or "/test/" in rel
-                hits = [(m, m.group(1)) for m in TS_CALL.finditer(src)]
-                hits += [(m, "dynamic") for m in TS_CALL_DYNAMIC.finditer(src)]
-                for m, level in hits:
+                # (match, level, message-arg index)
+                hits = [(m, m.group(1), 0) for m in TS_CALL.finditer(src)]
+                hits += [(m, "dynamic", 0) for m in TS_CALL_DYNAMIC.finditer(src)]
+                for name, (lvl, idx) in TS_WRAPPERS.items():
+                    hits += [(m, lvl, idx) for m in TS_WRAPPER_CALL[name].finditer(src)]
+                for m, level, msg_idx in hits:
                     inside, _end = balanced(src, m.end() - 1)
                     args = split_top_level(inside)
-                    if not args:
+                    if len(args) <= msg_idx:
                         continue
-                    lit = ts_string_literal(args[0])
+                    # The wrapper's own DEFINITION matches its call regex; its
+                    # message arg is a parameter, not a literal, so it drops out
+                    # here rather than needing a special case.
+                    lit = ts_string_literal(args[msg_idx])
                     if lit is None:
                         continue
                     found.append(

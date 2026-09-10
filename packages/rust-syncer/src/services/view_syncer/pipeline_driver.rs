@@ -1044,7 +1044,7 @@ impl IvmPipelines {
                 // and counts `fail_group("panic")`). See the cost-model probe
                 // (`sqlite_cost_model.rs`), whose TS twin `db.prepare(sql)`
                 // simply THROWS a `SqliteError`.
-                self.on_hydrate_panic(&checkpoint, queries);
+                self.on_hydrate_panic(&checkpoint, queries, &payload);
                 return Err(hydrate_js_error(&payload));
             }
         };
@@ -1060,7 +1060,12 @@ impl IvmPipelines {
     /// Shared by every hydrate panic path (build or a later pull): clear the
     /// hydrate context (TS `finally`), roll the partially-wired source
     /// connections back, and emit the `-failed` lifecycle line per query.
-    fn on_hydrate_panic(&mut self, checkpoint: &HashMap<String, usize>, queries: &[HydrateQuery]) {
+    fn on_hydrate_panic(
+        &mut self,
+        checkpoint: &HashMap<String, usize>,
+        queries: &[HydrateQuery],
+        payload: &Box<dyn std::any::Any + Send>,
+    ) {
         *self.hydrate_context.borrow_mut() = None;
         if let Some(eng) = self.engine.as_mut() {
             eng.rollback_source_connections(checkpoint);
@@ -1071,6 +1076,21 @@ impl IvmPipelines {
                 &q.query_id,
                 self.pipeline_log_info.get(&q.query_id),
             ));
+            // TS logs the lifecycle event and THEN the failure itself
+            // (`logQueryFailure(this.#lc, {queryHash, transformationHash,
+            // queryName}, 'query hydration failed', e)`, pipeline-driver.ts
+            // :806-812) — one per query in the failed batch, before rethrowing.
+            log_query_failure(
+                self.pipeline_log_info
+                    .get(&q.query_id)
+                    .map(|info| QueryLogInfo {
+                        query_hash: &q.query_id,
+                        transformation_hash: &info.transformation_hash,
+                        query_name: info.query_name.as_deref(),
+                    }),
+                QueryFailureMessage::Hydration,
+                payload,
+            );
             // No pipeline was registered for a failed hydrate (TS `#pipelines`
             // is only set on the success path, :771), so drop its identity.
             self.pipeline_log_info.remove(&q.query_id);
@@ -1320,7 +1340,17 @@ impl IvmPipelines {
         } else {
             // Engine panic (e.g. a source-drift assert): mark poisoned
             // and surface as a thrown error (TS teardown parity).
+            //
+            // TS's twin is `QueryPipeline.push`'s catch, which logs
+            // `'query pipeline failed'` with THAT pipeline's identity and
+            // rethrows (pipeline-driver.ts:1432-1444). Rust cannot name the
+            // pipeline: one `stream.next()` pushes the change through every
+            // pipeline inside a single engine call, so the panic is not
+            // attributable to one query. The identity fields are therefore
+            // ABSENT — TS's own `queryInfo === undefined` branch (:1240-1248,
+            // when the pipeline is no longer registered) — rather than wrong.
             self.poisoned = true;
+            log_query_failure(None, QueryFailureMessage::Pipeline, &payload);
             Err(format!("engine advance panic: {}", panic_message(&payload)))
         }
     }
@@ -1449,7 +1479,7 @@ impl Iterator for HydrateChanges<'_> {
                 // failed'...; throw e; }` (pipeline-driver.ts:794-812), whose
                 // throw the view-syncer turns into `#cleanup(err)`.
                 self.driver
-                    .on_hydrate_panic(&self.checkpoint, &self.queries);
+                    .on_hydrate_panic(&self.checkpoint, &self.queries, &payload);
                 // Drop the stream here: its Drop must run OUTSIDE the caught
                 // panic (the RefCell borrows a mid-fetch panic held are already
                 // released) but before `finish`, exactly as `AdvanceChanges`
@@ -1611,6 +1641,83 @@ fn hydrate_js_error(payload: &Box<dyn std::any::Any + Send>) -> JsError {
     match payload.downcast_ref::<rust_ivm::sqlite::sqlite_cost_model::SqliteError>() {
         Some(e) => JsError::new("SqliteError", e.0.clone()),
         None => JsError::plain(panic_message(payload)),
+    }
+}
+
+/// The identity a query-failure log line carries.
+/// Port of TS `QueryLogInfo` (pipeline-driver.ts:110-114).
+struct QueryLogInfo<'a> {
+    query_hash: &'a str,
+    transformation_hash: &'a str,
+    query_name: Option<&'a str>,
+}
+
+/// The two messages TS ever passes to `logQueryFailure`
+/// (pipeline-driver.ts:809 and :1439).
+///
+/// TS takes `message: string`; rust takes the closed set instead, because
+/// `tracing` interns the message at the CALLSITE — a `"{message}"` template
+/// would put a placeholder on the wire where TS puts the text, and the M14 log
+/// differential joins rust lines to TS lines by exactly that text. The values
+/// are TS's verbatim (AGENTS.md rule 5: a labeled adaptation that preserves
+/// what an operator sees).
+enum QueryFailureMessage {
+    Hydration,
+    Pipeline,
+}
+
+/// Port of TS `logQueryFailure` (pipeline-driver.ts:1451-1465).
+///
+/// TS logs a query failure at ERROR with the query's identity attached as
+/// LogContext context, and SKIPS a `ResetPipelinesSignal` entirely — a reset is
+/// an expected control-flow signal, not a failure, and logging it at ERROR
+/// would page on normal operation. Rust's twin of that signal in a caught
+/// panic payload is `ScalarResetError`, so the guard is the same test
+/// `advance_panic_outcome` uses to classify one.
+///
+/// Rust had no twin for this at all: the `query-pipeline-hydrate-failed`
+/// lifecycle line was ported but the ERROR line beside it was not, so a query
+/// failure that pages a TS operator was invisible in rust.
+///
+/// TS reaches the function from three places. Two are ported below (the
+/// hydrate catch, `#addQueryImpl` :806-812, and the advance push catch,
+/// `QueryPipeline.push` :1436-1444). The third — `Streamer.stream`'s
+/// `catch { this.#logQueryFailure?.(queryID, e); throw e; }` (:1288-1291), via
+/// the private `#logQueryFailure` method at :1240 — has no separate rust site:
+/// rust's streamer walk runs INSIDE the same `stream.next()` that the per-pull
+/// `catch_unwind` guards, so a failure there is already reported by the
+/// advance/hydrate site rather than by a second one.
+fn log_query_failure(
+    query_info: Option<QueryLogInfo<'_>>,
+    message: QueryFailureMessage,
+    error: &Box<dyn std::any::Any + Send>,
+) {
+    // TS: `if (error instanceof ResetPipelinesSignal) { return; }`
+    if scalar_reset_message(error).is_some() {
+        return;
+    }
+    let err = panic_message(error);
+    // `None` fields are not recorded by `tracing`, which is how the
+    // `queryInfo === undefined` branch (no `withContext` calls at all) comes
+    // out with no identity fields rather than with null ones.
+    let query_hash = query_info.as_ref().map(|i| i.query_hash);
+    let transformation_hash = query_info.as_ref().map(|i| i.transformation_hash);
+    let query_name = query_info.as_ref().and_then(|i| i.query_name);
+    match message {
+        QueryFailureMessage::Hydration => tracing::error!(
+            query_hash,
+            transformation_hash,
+            query_name,
+            error = %err,
+            "query hydration failed"
+        ),
+        QueryFailureMessage::Pipeline => tracing::error!(
+            query_hash,
+            transformation_hash,
+            query_name,
+            error = %err,
+            "query pipeline failed"
+        ),
     }
 }
 
@@ -1853,6 +1960,128 @@ mod tests {
     /// only a `ScalarResetError` panic payload maps to an in-place reset
     /// (`Some(message)` — the group REHYDRATES); any other payload returns
     /// `None` and the caller fails the group instead.
+    /// TS's `logQueryFailure` (pipeline-driver.ts:1451-1465) had no rust twin:
+    /// the `query-pipeline-hydrate-failed` LIFECYCLE line was ported, but the
+    /// ERROR line TS emits beside it was not, so a query failure that pages a
+    /// TS operator produced no ERROR line at all in rust.
+    ///
+    /// Three properties, all of them TS's:
+    ///   * the two message texts are verbatim, so an operator's alert on
+    ///     `query hydration failed` / `query pipeline failed` fires the same;
+    ///   * the query identity rides along as context (TS's three
+    ///     `withContext` calls), and is ABSENT — not null — on the
+    ///     `queryInfo === undefined` branch;
+    ///   * a `ResetPipelinesSignal` is SKIPPED. A reset is expected control
+    ///     flow, and logging it at ERROR would page on normal operation. Rust's
+    ///     twin in a caught payload is `ScalarResetError`.
+    ///
+    /// NON-VACUOUS: drop the `scalar_reset_message` guard from
+    /// `log_query_failure` and the reset case logs (third assertion fails);
+    /// drop the identity fields and the first fails; change either message
+    /// string and the M14 log differential unpairs it from its TS twin.
+    ///
+    /// Safe as a lib test — these two ERROR callsites are unique to
+    /// `log_query_failure`, so the process-global callsite-interest cache
+    /// cannot be poisoned by another test's subscriber (same reasoning as
+    /// `log_vended_row_counts_emits_per_table_and_grand_total`).
+    #[test]
+    fn log_query_failure_carries_the_ts_text_and_skips_a_reset_signal() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufGuard;
+            fn make_writer(&'a self) -> BufGuard {
+                BufGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = |f: &dyn Fn()| -> String {
+            let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(BufWriter(buf.clone()))
+                .with_ansi(false)
+                .with_max_level(tracing::Level::ERROR)
+                .finish();
+            crate::ensure_permissive_global_subscriber();
+            tracing::subscriber::with_default(subscriber, f);
+            String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+        };
+
+        let plain: Box<dyn std::any::Any + Send> = Box::new("source drift".to_string());
+
+        // 1. Hydration failure WITH identity — TS `#addQueryImpl`'s catch.
+        let logged = capture(&|| {
+            log_query_failure(
+                Some(QueryLogInfo {
+                    query_hash: "qhash1",
+                    transformation_hash: "thash1",
+                    query_name: Some("issueList"),
+                }),
+                QueryFailureMessage::Hydration,
+                &plain,
+            )
+        });
+        assert!(
+            logged.contains("query hydration failed"),
+            "TS's message verbatim; got: {logged}"
+        );
+        for field in ["qhash1", "thash1", "issueList", "source drift"] {
+            assert!(
+                logged.contains(field),
+                "the query identity and the error must ride along ({field}); got: {logged}"
+            );
+        }
+
+        // 2. Pipeline failure with NO identity — TS's `queryInfo === undefined`
+        //    branch makes no `withContext` calls at all, so the fields are
+        //    absent rather than null.
+        let logged = capture(&|| log_query_failure(None, QueryFailureMessage::Pipeline, &plain));
+        assert!(
+            logged.contains("query pipeline failed"),
+            "TS's message verbatim; got: {logged}"
+        );
+        assert!(
+            !logged.contains("query_hash") && !logged.contains("transformation_hash"),
+            "an unattributable failure must omit the identity fields, not log them \
+             as null; got: {logged}"
+        );
+
+        // 3. A reset signal must produce NOTHING.
+        let reset: Box<dyn std::any::Any + Send> = Box::new(ScalarResetError {
+            table: "issue".to_string(),
+            resolved: "1".to_string(),
+            new: "2".to_string(),
+        });
+        let logged = capture(&|| {
+            log_query_failure(
+                Some(QueryLogInfo {
+                    query_hash: "qhash1",
+                    transformation_hash: "thash1",
+                    query_name: None,
+                }),
+                QueryFailureMessage::Hydration,
+                &reset,
+            )
+        });
+        assert!(
+            logged.is_empty(),
+            "a ResetPipelinesSignal is expected control flow — TS returns before \
+             logging (pipeline-driver.ts:1457-1459); got: {logged}"
+        );
+    }
+
     #[test]
     fn scalar_reset_message_classifies_only_scalar_reset_panics() {
         let reset: Box<dyn std::any::Any + Send> = Box::new(ScalarResetError {
