@@ -1197,6 +1197,117 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    /// PRECONDITION for F-10 (moving `pokePart` serialization off the serial
+    /// client-group thread): `flush_body` builds
+    /// `serde_json::json!(["pokePart", body])` — a whole `Value` tree, on the
+    /// CG thread — and the writer task then walks that tree to produce text.
+    /// Handing the writer the TYPED body instead is only safe if the two
+    /// routes are byte-identical, which is what this asserts on a body with
+    /// every optional field populated.
+    ///
+    /// The two things that could differ, and why they do not: key ORDER —
+    /// `serde_json`'s `preserve_order` feature is on in all three crates, so a
+    /// `Value` map keeps the struct's declaration order rather than sorting;
+    /// and ABSENT fields — `skip_serializing_if = "Option::is_none"` runs in
+    /// the struct's own `Serialize`, which both routes go through, so a `None`
+    /// is missing from the `Value` tree in the first place rather than
+    /// becoming `null`.
+    ///
+    /// NON-VACUOUS: this fails the moment either property stops holding — drop
+    /// `preserve_order` from Cargo.toml and the `desiredQueriesPatches` /
+    /// `lastMutationIDChanges` maps come back sorted, which is a different
+    /// frame on the wire.
+    #[test]
+    fn poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body() {
+        let body = PokePartBody {
+            poke_id: "poke-1".to_string(),
+            got_queries_patch: Some(vec![
+                QueryPatchEntry {
+                    op: "put".to_string(),
+                    hash: "zzz".to_string(),
+                },
+                QueryPatchEntry {
+                    op: "del".to_string(),
+                    hash: "aaa".to_string(),
+                },
+            ]),
+            // Deliberately NOT in sorted order of insertion vs key: a BTreeMap
+            // is ordered by key, and the `Value` route must reproduce that same
+            // order, not the declaration order of the literal.
+            desired_queries_patches: Some(BTreeMap::from([
+                (
+                    "clientB".to_string(),
+                    vec![QueryPatchEntry {
+                        op: "put".to_string(),
+                        hash: "h2".to_string(),
+                    }],
+                ),
+                (
+                    "clientA".to_string(),
+                    vec![QueryPatchEntry {
+                        op: "del".to_string(),
+                        hash: "h1".to_string(),
+                    }],
+                ),
+            ])),
+            rows_patch: Some(vec![
+                RowPatchOp {
+                    op: "put".to_string(),
+                    table_name: "issue".to_string(),
+                    // Arc-shared, a float that must stay `1.0`, a null, and a
+                    // nested object whose key order must survive.
+                    value: Some(Arc::new(serde_json::json!({
+                        "id": "i1",
+                        "score": 1.0,
+                        "big": 9007199254740993i64,
+                        "closed": serde_json::Value::Null,
+                        "nested": {"z": 1, "a": 2},
+                    }))),
+                    id: None,
+                },
+                RowPatchOp {
+                    op: "del".to_string(),
+                    table_name: "comment".to_string(),
+                    value: None,
+                    id: Some(serde_json::json!({"id": "c1"})),
+                },
+            ]),
+            last_mutation_id_changes: Some(BTreeMap::from([
+                ("cB".to_string(), 7i64),
+                ("cA".to_string(), -1i64),
+            ])),
+            mutations_patch: Some(vec![MutationPatchEntry {
+                op: "put".to_string(),
+                mutation: None,
+                id: None,
+            }]),
+        };
+
+        let via_value_tree =
+            serde_json::to_string(&serde_json::json!(["pokePart", &body])).unwrap();
+        let typed_directly = serde_json::to_string(&("pokePart", &body)).unwrap();
+        assert_eq!(
+            via_value_tree, typed_directly,
+            "the writer task may only serialize the typed body if it produces \
+             the exact bytes the Value tree does"
+        );
+
+        // And spot-check the two properties by name, so a failure says WHICH
+        // one broke rather than just showing two long strings.
+        assert!(
+            typed_directly.contains(r#""gotQueriesPatch":[{"op":"put","hash":"zzz"}"#),
+            "declaration order and renames must hold: {typed_directly}"
+        );
+        assert!(
+            typed_directly.contains(r#""lastMutationIDChanges":{"cA":-1,"cB":7}"#),
+            "BTreeMap key order must survive the Value tree: {typed_directly}"
+        );
+        assert!(
+            !typed_directly.contains("null,\"tableName\""),
+            "a None field must be ABSENT, never null: {typed_directly}"
+        );
+    }
+
     struct MockSink {
         messages: Arc<StdMutex<Vec<Value>>>,
         failed: Arc<StdMutex<Option<String>>>,
