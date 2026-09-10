@@ -1284,7 +1284,7 @@ fn pg_advance_lmid_change_with_no_queries() {
         .expect("initial hydrate");
 
     let mut hydrate_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         hydrate_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -1326,7 +1326,7 @@ fn pg_advance_lmid_change_with_no_queries() {
     assert!(advanced.reset_reason.is_none(), "advance must not reset");
 
     let mut advance_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         advance_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -1504,7 +1504,7 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
         ))
         .expect("hydrate");
         let mut wire = String::new();
-        while let Ok(WsCommand::Send { msg: frame, .. }) = rx.try_recv() {
+        while let Ok(Some(frame)) = rx.try_recv().map(|c| c.frame_value()) {
             wire.push_str(&frame.to_string());
         }
         wire
@@ -1759,7 +1759,7 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
 
     // Collect the poke frames from the quiet cycle and check every pokeEnd cookie.
     let mut poke_end_cookies: Vec<String> = Vec::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         if let Some(arr) = frame.as_array()
             && arr.first().and_then(|v| v.as_str()) == Some("pokeEnd")
             && let Some(cookie) = arr
@@ -1994,7 +1994,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     let hydrate_cookie = version_string(&hydrated.version);
 
     let mut hydrate_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         hydrate_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -2068,7 +2068,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         .expect("reconnect catchup");
 
     let mut catchup_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx2.try_recv() {
+    while let Ok(Some(frame)) = rx2.try_recv().map(|c| c.frame_value()) {
         catchup_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -2428,7 +2428,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
         .expect("initial hydrate");
 
     let mut hydrate_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         hydrate_wire.push_str(&frame.to_string());
     }
     // Emission must be keyed by the client PK: the hydrated row carries both
@@ -2472,7 +2472,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
         .expect("advance");
 
     let mut adv_wire = String::new();
-    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+    while let Ok(Some(frame)) = rx1.try_recv().map(|c| c.frame_value()) {
         adv_wire.push_str(&frame.to_string());
     }
 

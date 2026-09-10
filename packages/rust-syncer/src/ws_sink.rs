@@ -31,6 +31,14 @@ pub enum WsCommand {
     /// recorded at enqueue; the writer subtracts EXACTLY this value from the
     /// byte counter on dequeue (symmetric accounting → no drift).
     Send { msg: Value, est_bytes: usize },
+    /// Send a `pokePart` frame, serialized HERE from its typed body instead of
+    /// on the client-group thread — see
+    /// `rust_cvr::client_handler::WebSocketSink::push_poke_part` for why that
+    /// is the TS shape. `est_bytes` is accounted exactly as `Send`'s.
+    SendPokePart {
+        body: rust_cvr::client_handler::PokePartBody,
+        est_bytes: usize,
+    },
     /// Send an error message and close with code 1011 — TS `closeWithError`'s
     /// default `INTERNAL_ERROR` (types/ws.ts:7), the code every view-syncer
     /// downstream failure takes (`downstream.fail` → types/streams.ts:91):
@@ -49,6 +57,34 @@ pub enum WsCommand {
     /// Needed because the split READ half cannot write: the reader detects
     /// the condition and relays the close through the writer's queue.
     CloseWithCode { code: u16, reason: String },
+}
+
+impl WsCommand {
+    /// The JSON frame this command puts on the wire, or `None` for the
+    /// terminal ones (`Fail` / `Close`) that carry no frame of their own.
+    ///
+    /// Exists for harnesses that assert on FRAMES rather than on the command
+    /// enum. `SendPokePart` is serialized by the writer task — that is the
+    /// point of the variant — so a test matching `Send { msg }` would stop
+    /// seeing poke parts entirely, and a `while let Ok(Send { .. })` loop would
+    /// TERMINATE on the first one. Reading through this accessor keeps both
+    /// behaviors: a poke part yields its frame, and a terminal command still
+    /// ends the drain exactly where `Send`-only matching used to.
+    ///
+    /// The `Value` it builds for a poke part is byte-equal to what the writer
+    /// emits from the typed body — pinned by
+    /// `poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body`
+    /// (rust-cvr `client_handler.rs`).
+    pub fn frame_value(&self) -> Option<Value> {
+        match self {
+            WsCommand::Send { msg, .. } => Some(msg.clone()),
+            WsCommand::SendPokePart { body, .. } => Some(serde_json::json!(["pokePart", body])),
+            WsCommand::Fail(_)
+            | WsCommand::FailWithCode { .. }
+            | WsCommand::Close(_)
+            | WsCommand::CloseWithCode { .. } => None,
+        }
+    }
 }
 
 /// Shed policy for the unbounded downstream channel: the channel itself must be
@@ -168,7 +204,9 @@ impl DirectWebSocketSink {
             // Only `Send` frames carry queue bytes; `Fail`/`Close` terminate the
             // stream and are accounted as depth only.
             let est = match &command {
-                WsCommand::Send { est_bytes, .. } => *est_bytes as i64,
+                WsCommand::Send { est_bytes, .. } | WsCommand::SendPokePart { est_bytes, .. } => {
+                    *est_bytes as i64
+                }
                 _ => 0,
             };
             let depth = limits.depth.fetch_add(1, Ordering::SeqCst) + 1;
@@ -228,6 +266,14 @@ impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
 
     fn push_sized(&self, msg: Value, est_bytes: usize) -> Result<(), String> {
         self.send_command(WsCommand::Send { msg, est_bytes })
+    }
+
+    fn push_poke_part(
+        &self,
+        body: rust_cvr::client_handler::PokePartBody,
+        est_bytes: usize,
+    ) -> Result<(), String> {
+        self.send_command(WsCommand::SendPokePart { body, est_bytes })
     }
 
     fn fail(&self, e: String) {

@@ -234,7 +234,7 @@ fn unpreparable_cost_probe_fails_the_group_with_an_error_not_a_dead_task() {
     // `#addQueryImpl` before a single change reaches `#processChanges`.
     let mut rows_patches = 0;
     while let Ok(cmd) = rx.try_recv() {
-        if let WsCommand::Send { msg, .. } = cmd
+        if let Some(msg) = cmd.frame_value()
             && msg[0] == "pokePart"
             && msg.get(1).and_then(|b| b.get("rowsPatch")).is_some()
         {

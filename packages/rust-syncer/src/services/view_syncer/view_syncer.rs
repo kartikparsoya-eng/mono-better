@@ -5367,7 +5367,7 @@ mod tests {
         );
         assert_eq!(engine.metrics.snapshot()["permissionReloads"], 1);
         let mut rows = 0usize;
-        while let Ok(crate::ws_sink::WsCommand::Send { msg: v, .. }) = rx.try_recv() {
+        while let Ok(Some(v)) = rx.try_recv().map(|c| c.frame_value()) {
             if v[0] == "pokePart" {
                 rows += v[1]
                     .get("rowsPatch")
@@ -8010,7 +8010,7 @@ mod tests {
         // (that is the accept task's job — see `handle_connection`).
         let mut connected = false;
         while let Ok(cmd) = drx.try_recv() {
-            if let WsCommand::Send { msg: v, .. } = cmd
+            if let Some(v) = cmd.frame_value()
                 && v[0] == "connected"
             {
                 connected = true;
@@ -8267,6 +8267,10 @@ mod tests {
                         saw_error_frame = true;
                     }
                 }
+                // A poke part is neither an error frame nor a close. Named
+                // rather than swept into a wildcard so a future variant has to
+                // make this same decision explicitly.
+                WsCommand::SendPokePart { .. } => {}
                 WsCommand::Close(_) | WsCommand::CloseWithCode { .. } => saw_close = true,
             }
         }
@@ -8460,6 +8464,9 @@ mod tests {
                     }
                 }
                 WsCommand::Fail(_) | WsCommand::FailWithCode { .. } => error_frames += 1,
+                // A poke part is not an error frame (see the twin note in the
+                // supersede test).
+                WsCommand::SendPokePart { .. } => {}
                 WsCommand::Close(reason) => close_reason = Some(reason),
                 WsCommand::CloseWithCode { reason, .. } => close_reason = Some(reason),
             }
@@ -8949,7 +8956,7 @@ mod tests {
 
         let mut saw_connected = false;
         while let Ok(cmd) = sink_b.try_recv() {
-            if let WsCommand::Send { msg, .. } = cmd
+            if let Some(msg) = cmd.frame_value()
                 && msg.get(0).and_then(|v| v.as_str()) == Some("connected")
             {
                 saw_connected = true;
@@ -9295,7 +9302,7 @@ mod tests {
             let mut saw_connected = false;
             let mut error = None;
             while let Ok(command) = rx.try_recv() {
-                if let WsCommand::Send { msg: value, .. } = command {
+                if let Some(value) = command.frame_value() {
                     match value.get(0).and_then(serde_json::Value::as_str) {
                         Some("connected") => saw_connected = true,
                         Some("error") => error = value.get(1).cloned(),
@@ -9361,7 +9368,7 @@ mod tests {
         let drain =
             |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
                 let mut v = Vec::new();
-                while let Ok(WsCommand::Send { msg: m, .. }) = drx.try_recv() {
+                while let Ok(Some(m)) = drx.try_recv().map(|c| c.frame_value()) {
                     v.push(m);
                 }
                 v
@@ -9456,7 +9463,7 @@ mod tests {
         drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
     ) -> serde_json::Value {
         let mut last = serde_json::Value::Null;
-        while let Ok(WsCommand::Send { msg: m, .. }) = drx.try_recv() {
+        while let Ok(Some(m)) = drx.try_recv().map(|c| c.frame_value()) {
             last = m;
         }
         last
@@ -9682,10 +9689,9 @@ mod tests {
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
     ) -> Vec<serde_json::Value> {
         std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|command| match command {
-                WsCommand::Send { msg, .. } => Some(msg),
-                _ => None,
-            })
+            // `frame_value` so a `SendPokePart` yields its frame: matching
+            // `Send { msg }` here silently dropped every poke part.
+            .filter_map(|command| command.frame_value())
             .collect()
     }
 
@@ -14164,7 +14170,10 @@ mod engine_tests {
 
         let mut frames = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
-            if let WsCommand::Send { msg: v, .. } = cmd {
+            // `frame_value`, not `Send { msg }`: a poke part is serialized by
+            // the writer task, so matching the variant dropped every one of
+            // them and this test's `has_del` assertion saw nothing.
+            if let Some(v) = cmd.frame_value() {
                 frames.push(v);
             }
         }
@@ -14660,7 +14669,7 @@ mod engine_tests {
 
         let mut starts = 0;
         let mut ends = 0;
-        while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
+        while let Ok(Some(v)) = rx.try_recv().map(|c| c.frame_value()) {
             match v[0].as_str() {
                 Some("pokeStart") => starts += 1,
                 Some("pokeEnd") => ends += 1,
@@ -15895,7 +15904,7 @@ mod engine_tests {
 
         let mut frames = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
-            if let WsCommand::Send { msg, .. } = cmd {
+            if let Some(msg) = cmd.frame_value() {
                 frames.push(
                     msg.get(0)
                         .and_then(|v| v.as_str())
@@ -16220,7 +16229,7 @@ mod engine_tests {
 
         // client1 received a deleteClients ack naming client2.
         let mut saw_ack = false;
-        while let Ok(WsCommand::Send { msg: v, .. }) = rx1.try_recv() {
+        while let Ok(Some(v)) = rx1.try_recv().map(|c| c.frame_value()) {
             if v[0] == "deleteClients"
                 && let Some(ids) = v[1]["clientIDs"].as_array()
                 && ids.iter().any(|x| x == "client2")

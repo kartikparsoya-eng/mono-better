@@ -416,7 +416,9 @@ async fn run_ws_writer(
                     crate::metrics::record_ws_queued_delta(-1);
                     // Symmetric byte accounting: subtract EXACTLY what the sink
                     // added for this command (only `Send` carries bytes).
-                    if let WsCommand::Send { est_bytes, .. } = c {
+                    if let WsCommand::Send { est_bytes, .. }
+                    | WsCommand::SendPokePart { est_bytes, .. } = c
+                    {
                         limits.bytes.fetch_sub(*est_bytes as i64, Ordering::SeqCst);
                         crate::metrics::record_ws_queued_bytes_delta(-(*est_bytes as i64));
                     }
@@ -427,6 +429,19 @@ async fn run_ws_writer(
                             tracing::error!("serialization error: {e}");
                             r#"["error",{"kind":"Internal","message":"serialization failed"}]"#.to_string()
                         });
+                        if ws_writer.send(Message::Text(text)).await.is_err() {
+                            break;
+                        }
+                        last_downstream_msg_time = Instant::now();
+                    }
+                    Some(WsCommand::SendPokePart { body, .. }) => {
+                        // TS stringifies the typed `['pokePart', body]` tuple at
+                        // the sink (types/streams.ts:129); this is that site.
+                        let text = serde_json::to_string(&("pokePart", &body))
+                            .unwrap_or_else(|e| {
+                                tracing::error!("serialization error: {e}");
+                                r#"["error",{"kind":"Internal","message":"serialization failed"}]"#.to_string()
+                            });
                         if ws_writer.send(Message::Text(text)).await.is_err() {
                             break;
                         }
@@ -540,7 +555,7 @@ async fn run_ws_writer(
     // `SinkLimits` Arc drops with this task.
     while let Ok(cmd) = rx.try_recv() {
         crate::metrics::record_ws_queued_delta(-1);
-        if let WsCommand::Send { est_bytes, .. } = cmd {
+        if let WsCommand::Send { est_bytes, .. } | WsCommand::SendPokePart { est_bytes, .. } = cmd {
             crate::metrics::record_ws_queued_bytes_delta(-(est_bytes as i64));
         }
     }
@@ -1062,10 +1077,13 @@ mod tests {
     /// syncer.ts:610/639 `ws.close(3000, message)`); a connection-level error
     /// or a normal close sends NO status (TS `Connection.close()` →
     /// `ws.close()`, workers/connection.ts:182, → peer sees 1005).
-    #[tokio::test]
-    async fn writer_close_codes_follow_the_ts_path() {
+    /// Drive `run_ws_writer` over a real WebSocket and collect what the peer
+    /// actually receives. Shared by the close-code test and the poke-part
+    /// serialization test — the writer's OUTPUT is the only place either can be
+    /// observed, since both are about bytes on the socket.
+    async fn writer_output(cmds: Vec<WsCommand>) -> Vec<Message> {
         use futures_util::StreamExt as _;
-        async fn run(cmds: Vec<WsCommand>) -> Vec<Message> {
+        {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
@@ -1106,6 +1124,63 @@ mod tests {
             let _ = server.await;
             out
         }
+    }
+
+    /// The `pokePart` frame the writer puts on the wire must be byte-identical
+    /// to the `Value`-route frame it replaced.
+    ///
+    /// `WsCommand::SendPokePart` exists so the JSON text is produced HERE
+    /// instead of on the serial client-group thread — TS's own shape
+    /// (`#push(['pokePart', body])` hands the typed tuple along and
+    /// types/streams.ts:129 stringifies it at the sink). This is the one place
+    /// the writer's actual output can be observed, so it is where the wiring
+    /// is pinned; `poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body`
+    /// (rust-cvr) pins the two serialization ROUTES against each other.
+    ///
+    /// NON-VACUOUS: point the writer arm at the wrong tag (`"poke"`) or drop
+    /// the arm's `est_bytes` accounting and this fails; before the variant
+    /// existed there was no writer-side poke-part path to observe at all.
+    #[tokio::test]
+    async fn writer_serializes_a_poke_part_exactly_as_the_value_route_did() {
+        let body = rust_cvr::client_handler::PokePartBody {
+            poke_id: "00:01".to_string(),
+            got_queries_patch: Some(vec![rust_cvr::client_handler::QueryPatchEntry {
+                op: "put".to_string(),
+                hash: "h1".to_string(),
+            }]),
+            desired_queries_patches: None,
+            rows_patch: Some(vec![rust_cvr::client_handler::RowPatchOp {
+                op: "put".to_string(),
+                table_name: "issue".to_string(),
+                value: Some(Arc::new(serde_json::json!({"id": "i1", "score": 1.0}))),
+                id: None,
+            }]),
+            last_mutation_id_changes: None,
+            mutations_patch: None,
+        };
+        let expected = serde_json::to_string(&serde_json::json!(["pokePart", &body])).unwrap();
+
+        let frames = writer_output(vec![
+            WsCommand::SendPokePart {
+                body,
+                est_bytes: 128,
+            },
+            WsCommand::Close("done".to_string()),
+        ])
+        .await;
+        match &frames[0] {
+            Message::Text(text) => assert_eq!(
+                text.as_str(),
+                expected,
+                "the writer's typed serialization must equal the Value route"
+            ),
+            other => panic!("expected the pokePart text frame first, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_close_codes_follow_the_ts_path() {
+        let run = writer_output;
         let err = ErrorBody::basic(crate::protocol::ErrorKind::Internal, "boom".to_string());
         // downstream fail → error frame + 1011
         let fr = run(vec![WsCommand::Fail(err.clone())]).await;

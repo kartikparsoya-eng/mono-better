@@ -100,6 +100,25 @@ pub trait WebSocketSink: Send + Sync {
     fn push_sized(&self, msg: Value, _est_bytes: usize) -> Result<(), String> {
         self.push(msg)
     }
+    /// Send a `pokePart` frame from its TYPED body, so the JSON text is
+    /// produced by whoever owns the socket rather than on the client-group
+    /// thread.
+    ///
+    /// This is TS's shape, not an optimization on top of it:
+    /// `this.#push(['pokePart', body])` (client-handler.ts:220) hands the typed
+    /// tuple to the outstream, and the `Transform` stringifies it AT THE SINK
+    /// (types/streams.ts:126-130). Building a `serde_json::Value` tree first —
+    /// a full allocation pass over every row patch in the part, on the serial
+    /// CG thread, then walked a second time by the writer — is the rust-only
+    /// step.
+    ///
+    /// The default keeps the `Value` route so a sink that only implements
+    /// `push`/`push_sized` (mocks, the in-process test sinks) needs no change;
+    /// `poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body`
+    /// pins that both routes emit the same bytes.
+    fn push_poke_part(&self, body: PokePartBody, est_bytes: usize) -> Result<(), String> {
+        self.push_sized(serde_json::json!(["pokePart", body]), est_bytes)
+    }
     fn fail(&self, e: String);
     fn cancel(&self);
 }
@@ -583,10 +602,7 @@ impl PokeHandler {
     fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
         if let Some(body) = state.body.take() {
             let est = state.body_est_bytes + POKE_PART_ENVELOPE_EST;
-            if let Err(error) = self
-                .downstream
-                .push_sized(serde_json::json!(["pokePart", body]), est)
-            {
+            if let Err(error) = self.downstream.push_poke_part(body, est) {
                 self.release_chain(state);
                 return Err(error);
             }
