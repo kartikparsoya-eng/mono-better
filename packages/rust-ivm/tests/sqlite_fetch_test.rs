@@ -526,9 +526,76 @@ fn test_sqlite_row_set_signature() {
         ast,
     }]);
 
-    let sig = engine.row_set_signature("q1");
-    assert!(sig.is_some(), "Row set signature should be set");
-    assert_ne!(sig.unwrap(), 0, "Signature should be non-zero for 5 rows");
+    // F-22 tightens this from `is_some() && != 0`. The signature is a SET
+    // signature: TS's `#trackRowSetSignatures` XORs one unit per non-EDIT
+    // change (pipeline-driver.ts:884-899). `!= 0` is the assertion shape that
+    // let the FxHasher-vs-h64 divergence ship — it passes for any non-zero
+    // value, including a wrong one — so pin the exact value, recomputed here
+    // from the fixture rows independently of the fold under test.
+    let unit = |table: &str, id: i64| {
+        let key: rust_ivm::ivm::data::Row = Arc::new(
+            [("id".to_string(), Value::F64(id as f64))]
+                .into_iter()
+                .collect(),
+        );
+        rust_ivm::row_signature_unit(table, &key)
+    };
+    let expected_users = (1..=5).fold(0u64, |acc, id| acc ^ unit("users", id));
+    assert_ne!(expected_users, 0, "5 distinct rows must not cancel out");
+    assert_eq!(
+        engine.row_set_signature("q1"),
+        Some(expected_users),
+        "the per-query fold plus its merge into `row_set_signatures` must \
+         equal the XOR of one `row_signature_unit` per hydrated row"
+    );
+
+    // A second query must accumulate into its OWN entry — the fold is keyed by
+    // query_id, and a merge that wrote the wrong key would show up here as
+    // either a cross-contaminated q1 or a missing q2.
+    let posts = make_source(
+        "posts",
+        HashMap::from([
+            ("id".to_string(), ColumnType::Number { optional: false }),
+            ("userId".to_string(), ColumnType::Number { optional: false }),
+            ("title".to_string(), ColumnType::String { optional: false }),
+            ("body".to_string(), ColumnType::String { optional: false }),
+        ]),
+        vec!["id".to_string()],
+    );
+    engine.register_source(posts.clone());
+    posts.borrow_mut().set_db_path(db_path);
+    engine.add_queries(&[QuerySpec {
+        query_id: "q2".to_string(),
+        ast: Ast {
+            schema: None,
+            table: "posts".to_string(),
+            alias: None,
+            where_clause: None,
+            related: vec![],
+            limit: None,
+            order_by: Some(vec![rust_ivm::builder::ast::OrderPart {
+                column: "id".to_string(),
+                direction: "asc".to_string(),
+            }]),
+            start: None,
+        },
+    }]);
+    let expected_posts = (1..=5).fold(0u64, |acc, id| acc ^ unit("posts", id));
+    assert_eq!(
+        engine.row_set_signature("q2"),
+        Some(expected_posts),
+        "the second query's signature must be its own rows' XOR"
+    );
+    assert_eq!(
+        engine.row_set_signature("q1"),
+        Some(expected_users),
+        "adding q2 must not touch q1's signature"
+    );
+    assert_ne!(
+        expected_users, expected_posts,
+        "the two tables' signatures must differ — `row_signature_unit` hashes \
+         the table name into the RowID"
+    );
 }
 
 #[test]

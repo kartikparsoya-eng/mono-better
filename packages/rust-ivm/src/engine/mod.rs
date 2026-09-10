@@ -781,6 +781,23 @@ impl Engine {
         Rc::strong_count(&self.table_specs)
     }
 
+    /// TEST-ONLY: total number of changes sitting in every pipeline
+    /// collector's NON-streaming `changes` buffer.
+    ///
+    /// Every pipeline in `Engine::pipelines` is built by
+    /// `add_queries_streaming`, which always calls
+    /// `CollectOutput::configure_streaming`, so `CollectOutput::push` takes
+    /// its streaming branch and appends to `row_changes`. `changes` is
+    /// therefore dead for an engine pipeline — the invariant the per-push
+    /// clear loop relies on. See `collector_streaming_invariant_test`.
+    #[doc(hidden)]
+    pub fn __test_collector_changes_total(&self) -> usize {
+        self.pipelines
+            .iter()
+            .map(|e| e.collector.borrow().changes.len())
+            .sum()
+    }
+
     /// Get the row-set signature for a query.
     /// Port of TS `rowSetSignature()`.
     pub fn row_set_signature(&self, query_id: &str) -> Option<u64> {
@@ -1138,8 +1155,16 @@ impl Engine {
 
             if let Some(source) = self.sources.get(table) {
                 for entry in &self.pipelines {
-                    clear_and_cap(&mut entry.collector.borrow_mut().changes);
-                    clear_and_cap(&mut entry.collector.borrow_mut().row_changes);
+                    {
+                        // Only `row_changes` is live — see the twin loop in
+                        // `push_source_change` for why `changes` is dead here.
+                        let mut collector = entry.collector.borrow_mut();
+                        debug_assert!(
+                            collector.changes.is_empty(),
+                            "an engine pipeline collector must be in streaming mode"
+                        );
+                        clear_and_cap(&mut collector.row_changes);
+                    }
                     for c in &entry.companions {
                         let mut output = c.output.borrow_mut();
                         clear_and_cap(&mut output.changes);
@@ -1185,19 +1210,43 @@ impl Engine {
     /// Delegates to add_queries_streaming — single code path.
     pub fn add_queries(&mut self, queries: &[QuerySpec]) -> Vec<QueryResult> {
         let mut by_qid: HashMap<String, Vec<RowChange>> = HashMap::new();
+        // Folded AS each change streams past, not in a second pass over the
+        // buffer: TS's `#trackRowSetSignatures` is a generator that folds the
+        // change and then yields it (`this.#rowSetSignatures.set(...)`
+        // immediately before `yield change`, pipeline-driver.ts:884-899), so it
+        // never traverses the changes twice. `self.row_set_signatures` cannot
+        // be touched from inside the callback — `add_queries_streaming` holds
+        // `&mut self` — so the fold lands in a local accumulator keyed by query
+        // and is merged below. XOR is associative, so `existing ^ u1 ^ u2` and
+        // `existing ^ (u1 ^ u2)` are the same value.
+        let mut sig_acc: HashMap<String, u64> = HashMap::new();
         let results = self.add_queries_streaming(queries, |rc| {
-            by_qid
-                .entry(rc.query_id.clone())
-                .or_default()
-                .push(rc.clone());
+            if rc.change_type != crate::ivm::change::ChangeType::Edit {
+                let unit = row_signature_unit(&rc.table, &rc.row_key);
+                match sig_acc.get_mut(&rc.query_id) {
+                    Some(sig) => *sig ^= unit,
+                    None => {
+                        sig_acc.insert(rc.query_id.clone(), unit);
+                    }
+                }
+            }
+            // `entry(k.clone())` took its key eagerly, cloning `query_id` for
+            // every row; look up first so the clone happens once per query.
+            match by_qid.get_mut(&rc.query_id) {
+                Some(changes) => changes.push(rc.clone()),
+                None => {
+                    by_qid.insert(rc.query_id.clone(), vec![rc.clone()]);
+                }
+            }
         });
-        for changes in by_qid.values() {
-            for rc in changes {
-                if rc.change_type != crate::ivm::change::ChangeType::Edit {
-                    let sig = *self.row_set_signatures.get(&rc.query_id).unwrap_or(&0);
-                    let unit = row_signature_unit(&rc.table, &rc.row_key);
-                    self.row_set_signatures
-                        .insert(rc.query_id.clone(), sig ^ unit);
+        for (query_id, folded) in sig_acc {
+            // TS's `get(queryID) ?? 0n` … `set(queryID, cur ^ unit)`
+            // (pipeline-driver.ts:889-895) re-uses the key REFERENCE.
+            // `0 ^ folded == folded`, so the absent case seeds with `folded`.
+            match self.row_set_signatures.get_mut(&query_id) {
+                Some(sig) => *sig ^= folded,
+                None => {
+                    self.row_set_signatures.insert(query_id, folded);
                 }
             }
         }
@@ -1739,9 +1788,40 @@ fn push_source_change(
             return None;
         }
         // Clear collectors (and companion monitors) for this push.
+        //
+        // TS has no clear step: `#push` calls `#startAccumulating()`
+        // (pipeline-driver.ts:1223), which constructs a FRESH `Streamer` per
+        // push, and `#stopAccumulating()` nulls it out — in a `finally`
+        // (:1216-1220), so an exception cannot leave accumulated rows visible
+        // to the next push either. Rust's `CollectOutput` is wired as the
+        // graph's terminal `Output` and cannot be swapped per push without
+        // rewiring the graph, so it is emptied in place instead; an emptied
+        // accumulator is observationally the fresh one TS builds. That is why
+        // `row_changes` must keep being cleared here — it is the port of TS's
+        // `finally`, not defensive caution.
+        //
+        // Only `row_changes` needs it. Every pipeline in `Engine::pipelines`
+        // is built by `add_queries_streaming`, which always calls
+        // `CollectOutput::configure_streaming`, so `CollectOutput::push` takes
+        // its streaming branch and appends to `row_changes`; `changes` is a
+        // second sink with no TS counterpart at all (TS's accumulator has
+        // exactly one, `stream()`) and is never written for an engine
+        // pipeline. Clearing it cost a SECOND `borrow_mut()` of the same cell
+        // per pipeline per source change — 100 pipelines x 1000 changes is
+        // 100K borrows to empty a Vec that is structurally empty. The
+        // `debug_assert` pins the invariant so a future non-streaming
+        // pipeline path fails loudly here rather than silently leaking a
+        // change into the next push's collect;
+        // `collector_streaming_invariant_test` pins it in release too.
         for entry in pipelines {
-            entry.collector.borrow_mut().changes.clear();
-            entry.collector.borrow_mut().row_changes.clear();
+            {
+                let mut collector = entry.collector.borrow_mut();
+                debug_assert!(
+                    collector.changes.is_empty(),
+                    "an engine pipeline collector must be in streaming mode"
+                );
+                collector.row_changes.clear();
+            }
             for c in &entry.companions {
                 let mut output = c.output.borrow_mut();
                 output.changes.clear();
