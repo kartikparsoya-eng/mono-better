@@ -32,10 +32,19 @@ use crate::builder::ast::{Ast, Condition};
 use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 
 /// Version-keyed row-count cache: `(snapshot_version, table -> COUNT(*))`.
-/// Shared across `plan_ast` calls so a connection-init burst of `addQuery`s (all
-/// at the same snapshot version) reuses one `COUNT(*)` per table instead of
-/// re-counting per query. Auto-invalidates when the version bumps (an advance
-/// changed the data) — no explicit advance hook needed.
+/// Auto-invalidates when the version bumps (an advance changed the data) — no
+/// explicit advance hook needed.
+///
+/// NOT actually shared between calls, despite what this comment used to claim
+/// ("shared across `plan_ast` calls so a connection-init burst … reuses one
+/// `COUNT(*)` per table"): the only constructor,
+/// [`create_snapshot_cost_model`], builds a FRESH cache per call, and
+/// `cost_model_with_cache` has no other caller. The sharing never happens.
+/// Harmless because this whole model is test-only (see
+/// [`create_snapshot_cost_model`]) — but a claim that describes behaviour the
+/// code does not have is a stale claim, and this model's earlier PROD
+/// reachability is the cost-model gap behind the 2026-08-29 144 s `tickets`
+/// hydrate.
 type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
 
 /// LEGACY filter-blind `COUNT(*)` cost model — **test-only reference**, NOT
@@ -47,6 +56,13 @@ type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
 /// the 2026-08-29 `tickets` mis-flip fix. The rust-only auto-fallback + the
 /// `RUST_IVM_PLANNER_COST_MODEL=count` env that once reached this in prod were
 /// removed 2026-08-31 (option-b: no divergent prod cost model).
+///
+/// `#[doc(hidden)]` so the test-only status is machine-visible and not just
+/// prose. (`#[cfg(test)]` would be wrong: the differential tests are
+/// INTEGRATION tests, which link the lib as an ordinary dependency and so
+/// cannot see `#[cfg(test)]` items.) Reachable today only from
+/// `tests/sqlite_cost_model_test.rs` and `tests/planner_runtime_test.rs`.
+#[doc(hidden)]
 pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> ConnectionCostModel {
     // Fresh per-call cache (tests + callers without a shared cache).
     cost_model_with_cache(conn, Rc::new(RefCell::new((String::new(), HashMap::new()))))
@@ -89,8 +105,15 @@ fn row_count(conn: &rusqlite::Connection, table: &str) -> Option<f64> {
 }
 
 /// Plan `ast_json` (TS-shape) with `cost_model` and return the ordered `flip`
-/// decisions (canonical traversal — see [`flip_order`]). The TS driver walks its
-/// own AST in the same order and sets `flip` per position.
+/// decisions (canonical traversal — see [`flip_order`]).
+///
+/// This used to say "the TS driver walks its own AST in the same order and sets
+/// `flip` per position". That driver was the napi bridge, DELETED in
+/// `a5e502ad9` — the contract had no counterparty left. Reachable today only
+/// from `tests/sqlite_cost_model_test.rs` and `tests/planner_runtime_test.rs`,
+/// which use it to prove the scanstatus model plans differently from the legacy
+/// COUNT(*) one; the engine plans through `Engine::plan_ast` instead.
+#[doc(hidden)]
 pub fn plan_ast_flips(
     ast_json: &serde_json::Value,
     cost_model: ConnectionCostModel,
@@ -102,7 +125,15 @@ pub fn plan_ast_flips(
 
 /// Ordered `flip` extraction: WHERE conditions pre-order (recursing into each
 /// correlated subquery's own where), then the `related` subqueries in order.
-/// The TS driver's `applyFlips` MUST use this exact order.
+///
+/// Unlike its callers above, this one IS live: `Engine::plan_ast` uses it for
+/// the `[rust-ivm][PLAN] flips=…` trace line (engine/mod.rs:653, gated on
+/// `RUST_IVM_PERF_TRACE`) and `Engine::planned_flips_for_test` returns it. The
+/// order is therefore what those two report, and what the differential tests
+/// compare positionally. It used to say "the TS driver's `applyFlips` MUST use
+/// this exact order" — that driver was the deleted napi bridge, so the MUST had
+/// no counterparty; the flips rust applies to the AST are set by the planner
+/// itself, not handed to a TS caller.
 pub fn flip_order(ast: &Ast) -> Vec<Option<bool>> {
     let mut flips = Vec::new();
     if let Some(ref where_clause) = ast.where_clause {
