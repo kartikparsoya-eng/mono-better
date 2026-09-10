@@ -417,7 +417,15 @@ pub struct Engine {
     /// shared with replication). Emitting `keyCmp[0]` where it differs from the
     /// client PK would store a rowKey missing a client PK column → client
     /// `toPrimaryKeyString` throws "Got undefined".
-    primary_keys: HashMap<String, Vec<String>>,
+    ///
+    /// Held behind an `Rc` because TS stores the *same* `Map` object in every
+    /// `Streamer` it constructs (`this.#primaryKeys = primaryKeys`,
+    /// pipeline-driver.ts:1265) — JS passes the map by reference, so the
+    /// faithful rust equivalent is a shared handle, not a per-`Streamer` deep
+    /// copy. Mutations go through `Rc::make_mut`, which preserves the exact
+    /// snapshot semantics the deep copies had: a holder created before the
+    /// mutation keeps the pre-mutation map.
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
     /// The client-declared PK OVERRIDE, retained so it can be re-applied to
     /// `primary_keys` and the sources after an engine rebuild (`build_engine`).
     /// Empty ⇒ no override (everything uses `keyCmp[0]`). Source of truth for
@@ -428,7 +436,8 @@ pub struct Engine {
     /// (returns at most one deterministic row). Port of TS `#tableSpecs`
     /// unique-key info.
     unique_keys: HashMap<String, Vec<Vec<String>>>,
-    table_specs: HashMap<String, TableSpecInfo>,
+    /// Shared, like [`Self::primary_keys`] — see that field.
+    table_specs: Rc<HashMap<String, TableSpecInfo>>,
     pipelines: Vec<PipelineEntry>,
     /// XOR signature of the row-set per query.
     row_set_signatures: HashMap<String, u64>,
@@ -471,10 +480,10 @@ impl Engine {
     pub fn new(primary_keys: HashMap<String, Vec<String>>) -> Self {
         Engine {
             sources: HashMap::new(),
-            primary_keys,
+            primary_keys: Rc::new(primary_keys),
             client_primary_keys: HashMap::new(),
             unique_keys: HashMap::new(),
-            table_specs: HashMap::new(),
+            table_specs: Rc::new(HashMap::new()),
             pipelines: Vec::new(),
             row_set_signatures: HashMap::new(),
             enable_not_exists: true, // server-side
@@ -697,7 +706,7 @@ impl Engine {
             if pk.is_empty() || !self.primary_keys.contains_key(table) {
                 continue;
             }
-            self.primary_keys.insert(table.clone(), pk.clone());
+            Rc::make_mut(&mut self.primary_keys).insert(table.clone(), pk.clone());
             if let Some(src) = self.sources.get(table) {
                 src.borrow_mut().set_primary_key(pk.clone());
             }
@@ -706,7 +715,7 @@ impl Engine {
 
     /// Set table spec info (for minRowVersion bumping in Streamer).
     pub fn set_table_spec(&mut self, table: &str, min_row_version: Option<String>) {
-        self.table_specs
+        Rc::make_mut(&mut self.table_specs)
             .insert(table.to_string(), TableSpecInfo { min_row_version });
     }
 
@@ -720,7 +729,7 @@ impl Engine {
     pub fn register_source(&mut self, source: Shared<dyn Source>) {
         let table_name = source.borrow().table_name().to_string();
         let pk = source.borrow().primary_key().to_vec();
-        self.primary_keys.insert(table_name.clone(), pk);
+        Rc::make_mut(&mut self.primary_keys).insert(table_name.clone(), pk);
         self.sources.insert(table_name, source);
     }
 
@@ -750,7 +759,25 @@ impl Engine {
     /// TS), rather than emitting an empty `{}` rowKey. Never called in prod.
     #[doc(hidden)]
     pub fn __test_drop_primary_key(&mut self, table: &str) {
-        self.primary_keys.remove(table);
+        Rc::make_mut(&mut self.primary_keys).remove(table);
+    }
+
+    /// TEST-ONLY: how many handles share the `primary_keys` map (the engine's
+    /// own, plus one per pipeline collector / in-flight hydrate or advance
+    /// stream). TS hands every `Streamer` the SAME `Map` object
+    /// (pipeline-driver.ts:1265), so the count is the direct observable for
+    /// "nobody deep-copied the table map": a copy shows up as a holder that
+    /// never appears here.
+    #[doc(hidden)]
+    pub fn __test_primary_keys_holders(&self) -> usize {
+        Rc::strong_count(&self.primary_keys)
+    }
+
+    /// TEST-ONLY: the [`Self::__test_primary_keys_holders`] twin for
+    /// `table_specs`.
+    #[doc(hidden)]
+    pub fn __test_table_specs_holders(&self) -> usize {
+        Rc::strong_count(&self.table_specs)
     }
 
     /// Get the row-set signature for a query.
@@ -1582,8 +1609,8 @@ impl Engine {
         }
         self.sources.clear();
         self.row_set_signatures.clear();
-        self.primary_keys.clear();
-        self.table_specs.clear();
+        Rc::make_mut(&mut self.primary_keys).clear();
+        Rc::make_mut(&mut self.table_specs).clear();
         self.unique_keys.clear();
     }
 
@@ -1702,8 +1729,8 @@ fn push_source_change(
     pipelines: &[PipelineHandle],
     table: &str,
     change: SourceChange,
-    primary_keys: &HashMap<String, Vec<String>>,
-    table_specs: &HashMap<String, crate::streamer::TableSpecInfo>,
+    primary_keys: &Rc<HashMap<String, Vec<String>>>,
+    table_specs: &Rc<HashMap<String, crate::streamer::TableSpecInfo>>,
     on_row_change: &mut impl FnMut(&RowChange),
 ) -> Option<ScalarResetError> {
     if let Some(source) = sources.get(table) {
@@ -1756,7 +1783,8 @@ fn push_source_change(
                     if cc.is_empty() {
                         Vec::new()
                     } else {
-                        let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
+                        let mut streamer =
+                            Streamer::new(Rc::clone(primary_keys), Rc::clone(table_specs));
                         streamer.accumulate(&entry.query_id, &c.schema, &cc);
                         streamer.stream_rows()
                     }
@@ -2165,7 +2193,7 @@ pub struct HydrateStream {
     /// `finish_hydrate` registers pipelines).
     done: bool,
     cancellation_token: CancellationToken,
-    primary_keys: HashMap<String, Vec<String>>,
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
     clock: HydrateClock,
     perf_timer: Instant,
 }
@@ -2354,8 +2382,8 @@ pub struct AdvanceStream {
     num_changes: usize,
     sources: HashMap<String, Shared<dyn Source>>,
     pipelines: Vec<PipelineHandle>,
-    primary_keys: HashMap<String, Vec<String>>,
-    table_specs: HashMap<String, TableSpecInfo>,
+    primary_keys: Rc<HashMap<String, Vec<String>>>,
+    table_specs: Rc<HashMap<String, TableSpecInfo>>,
     table_columns: HashMap<String, HashMap<String, crate::ivm::schema::ColumnType>>,
     cancellation_token: CancellationToken,
     advance_gate: Rc<crate::advance_gate::AdvanceGate>,

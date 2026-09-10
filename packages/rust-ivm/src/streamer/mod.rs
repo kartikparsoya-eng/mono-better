@@ -81,16 +81,19 @@ pub struct Streamer {
 }
 
 impl Streamer {
+    /// Port of the TS constructor (pipeline-driver.ts:1260-1268), which stores
+    /// the caller's maps BY REFERENCE (`this.#primaryKeys = primaryKeys`) — a
+    /// `new Streamer(...)` in TS costs nothing beyond the object. The rust twin
+    /// therefore takes shared handles: the maps are read-only inside `Streamer`,
+    /// and every construction site is on a per-change or per-node path where a
+    /// deep copy of the whole table map (one `String` + one `Vec<String>` per
+    /// table, ~150 tables in prod) would dominate the work being measured.
+    ///
+    /// This used to be `new(HashMap, HashMap)` + a `new_shared(Rc, Rc)`, and
+    /// only ONE of the four call sites used the sharing constructor; taking
+    /// `Rc` here removes the copying variant rather than leaving it around to
+    /// be picked again.
     pub fn new(
-        primary_keys: HashMap<String, Vec<String>>,
-        table_specs: HashMap<String, TableSpecInfo>,
-    ) -> Self {
-        Self::new_shared(Rc::new(primary_keys), Rc::new(table_specs))
-    }
-
-    /// `new` over already-shared maps (the per-push collector path creates a
-    /// `Streamer` per change).
-    pub fn new_shared(
         primary_keys: Rc<HashMap<String, Vec<String>>>,
         table_specs: Rc<HashMap<String, TableSpecInfo>>,
     ) -> Self {

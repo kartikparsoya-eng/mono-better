@@ -1363,18 +1363,24 @@ impl CollectOutput {
     /// Flatten pushed changes at the collector boundary. This is the point at
     /// which PipelineDriver drains its accumulator: the source overlay is
     /// still active, so lazy relationship fetches observe the correct frame.
+    ///
+    /// `primary_keys` / `table_specs` arrive already shared: TS hands the
+    /// PipelineDriver's own `#primaryKeys` / `#tableSpecs` Map objects to the
+    /// Streamer by reference (pipeline-driver.ts:1225-1230), so every pipeline
+    /// reads ONE map. Taking them by value here gave each pipeline its own
+    /// deep copy of the whole table map, retained for the pipeline's lifetime.
     pub fn configure_streaming(
         &mut self,
         query_id: String,
         schema: SourceSchema,
-        primary_keys: HashMap<String, Vec<String>>,
-        table_specs: HashMap<String, crate::streamer::TableSpecInfo>,
+        primary_keys: Rc<HashMap<String, Vec<String>>>,
+        table_specs: Rc<HashMap<String, crate::streamer::TableSpecInfo>>,
     ) {
         self.stream_config = Some(CollectStreamConfig {
             query_id: Rc::from(query_id.as_str()),
             schema: Rc::new(schema),
-            primary_keys: Rc::new(primary_keys),
-            table_specs: Rc::new(table_specs),
+            primary_keys,
+            table_specs,
         });
     }
 }
@@ -1383,7 +1389,7 @@ impl Output for CollectOutput {
     fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
         crate::ivm::trace::recv("source#1", &change);
         if let Some(config) = &self.stream_config {
-            let mut streamer = crate::streamer::Streamer::new_shared(
+            let mut streamer = crate::streamer::Streamer::new(
                 config.primary_keys.clone(),
                 config.table_specs.clone(),
             );
