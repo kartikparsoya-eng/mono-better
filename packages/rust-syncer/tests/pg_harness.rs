@@ -1790,6 +1790,21 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
         "a no-op flush must not advance the stored version"
     );
 
+    // The CVR the quiet advance RETURNS must be the ORIGINAL one, not the
+    // version the updater attempted. TS: `if (!flushed) return {cvr:
+    // this._orig, flushed: false}` (cvr.ts:201). This pins the returned value
+    // directly, upstream of the poke cookies checked below: the cookies are
+    // what a client sees, this is what the client group's own state becomes,
+    // and returning the attempted CVR would leave the group believing it is at
+    // a version the store never recorded — the next flush's
+    // `expected_current_version` would then miss.
+    assert_eq!(
+        rust_cvr::schema::types::version_string(&advanced.cvr.version),
+        stored_after.0,
+        "a quiet commit must return the ORIGINAL, durable CVR (TS cvr.ts:201), \
+         not the version the updater attempted"
+    );
+
     // No client cookie may reach the never-persisted "02" version.
     for cookie in &poke_end_cookies {
         assert!(

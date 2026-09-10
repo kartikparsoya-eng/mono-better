@@ -12871,7 +12871,6 @@ impl ViewSyncerService {
         last_active: i64,
         ttl_clock: TTLClock,
     ) -> Result<SyncResult, String> {
-        let cvr_for_reset = cvr.clone();
         // The pre-advance CVR version — only clients AT this version may receive
         // the advance delta (see the poke-target filter below).
         let cvr_version = cvr.version.clone();
@@ -12946,8 +12945,15 @@ impl ViewSyncerService {
         if let AdvanceOutcome::Reset { reason, msg } = outcome {
             // No poke was started (the pokers are built below, after a clean
             // advance), so there is nothing to cancel — just report the reset.
+            // `cvr` itself, not a defensive copy: this `return` is upstream of
+            // the `CVRQueryDrivenUpdater::new(cvr, ...)` that consumes it, and
+            // nothing between the top of this method and here takes `cvr` by
+            // `&mut`. It used to be a `cvr.clone()` taken at the TOP of every
+            // advance — one full CVR deep copy (both `BTreeMap`s, every
+            // `QueryRecord`'s AST) per replication commit, to serve a path that
+            // fires only on a reset.
             return Ok(SyncResult {
-                cvr: cvr_for_reset,
+                cvr,
                 version: String::new(),
                 query_patches: Vec::new(),
                 num_changes,
@@ -13048,7 +13054,14 @@ impl ViewSyncerService {
         let flushed_cvr = if store_flushed {
             Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
         } else {
-            let orig = updater.base.orig.clone();
+            // MOVED, not cloned: `updater` is dead after this arm (the
+            // `flush_to_store` borrow ended above and nothing below touches
+            // it), and the TS twin hands back the original BY REFERENCE —
+            // `return {cvr: this._orig, flushed: false}` (cvr.ts:201). Cloning
+            // deep-copied the whole CVR (both `BTreeMap`s, every
+            // `QueryRecord`'s AST) on what is the COMMON advance outcome on a
+            // busy replica — the `ADV_QUIET` counter below is how often.
+            let orig = updater.base.orig;
             // A quiet commit that DISCARDS a version bump is the
             // `Patches were sent but finalVersion ...` close: the pokers were
             // opened at `attempted_version`, any patch tagged with it was
