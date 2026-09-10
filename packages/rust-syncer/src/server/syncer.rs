@@ -92,10 +92,21 @@ impl CGServicesFactory for RealServicesFactory {
             "CG {cg_id}: loaded {} table specs from replica",
             tables.len()
         );
+        // ONE read-only open, ONE parse. `LoadedPermissions` carries BOTH
+        // halves ({permissions, hash}, load_permissions.rs:52-55), but this
+        // used to map straight to `loaded.permissions`, throw the hash away,
+        // and then recover it further down by RE-OPENING the replica and
+        // re-parsing the whole permissions document — with
+        // `rusqlite::Connection::open`, i.e. SQLITE_OPEN_READ_WRITE |
+        // SQLITE_OPEN_CREATE, two lines after a deliberate
+        // `open_replica_read_only`. This process must never write the replica:
+        // that open could take write locks, and it would CREATE the file if it
+        // were missing rather than failing.
+        let loaded = crate::db::lite_tables::open_replica_read_only(&self.config.replica_file)
+            .and_then(|conn| crate::load_permissions(&conn, &self.config.app_id));
+        let permissions_hash: Option<String> = loaded.as_ref().ok().and_then(|l| l.hash.clone());
         let load_result: Result<Option<serde_json::Value>, String> =
-            crate::db::lite_tables::open_replica_read_only(&self.config.replica_file)
-                .and_then(|conn| crate::load_permissions(&conn, &self.config.app_id))
-                .map(|loaded| loaded.permissions);
+            loaded.map(|loaded| loaded.permissions);
         match &load_result {
             Ok(Some(_)) => tracing::info!("CG {cg_id}: loaded read-permissions from replica"),
             Ok(None) => {
@@ -134,15 +145,12 @@ impl CGServicesFactory for RealServicesFactory {
                 "CG {cg_id}: failed to load permissions ({e}); denying all client queries (fail-closed)"
             ),
         }
-        // Re-read the hash separately for hot-reload detection. It shares the
-        // load path but we keep it even when `resolve_permissions` substitutes
-        // deny-all on error: a later successful read with a real hash then
-        // differs from this seed and triggers a self-healing reload.
-        let permissions_hash: Option<String> =
-            rusqlite::Connection::open(&self.config.replica_file)
-                .ok()
-                .and_then(|conn| crate::load_permissions(&conn, &self.config.app_id).ok())
-                .and_then(|loaded| loaded.hash);
+        // `permissions_hash` (read above, from the same single load) seeds
+        // hot-reload detection. It is kept even when `resolve_permissions`
+        // substitutes deny-all on error: a later successful read with a real
+        // hash then differs from this seed and triggers a self-healing reload.
+        // A failed load seeds `None`, which any later successful read also
+        // differs from, so the self-healing property holds either way.
         let permissions = crate::resolve_permissions(load_result);
         let app_id = self.config.app_id.clone();
         crate::SyncEngineConfig {
@@ -181,5 +189,64 @@ impl CGServicesFactory for RealServicesFactory {
             server_version: self.config.server_version.clone(),
             metrics: self.metrics.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// F-37: the permissions load must open the replica exactly ONCE, and
+    /// read-only.
+    ///
+    /// `LoadedPermissions` carries both halves (`{permissions, hash}`,
+    /// load_permissions.rs:52-55). The code used to map straight to
+    /// `loaded.permissions`, discard `loaded.hash`, and then recover the hash
+    /// by re-opening the replica and re-parsing the whole permissions
+    /// document — with `rusqlite::Connection::open`, which is
+    /// `SQLITE_OPEN_READ_WRITE | SQLITE_OPEN_CREATE`, two lines after a
+    /// deliberate `open_replica_read_only`. This process must never write the
+    /// replica: that open could take write locks, and on a missing file it
+    /// would CREATE an empty database instead of failing.
+    ///
+    /// A STRUCTURAL guard rather than a runtime one: exercising the real path
+    /// needs a fully populated `SyncerConfig` (no `Default`), a tokio handle,
+    /// metrics and connection sinks, and the property being pinned — which
+    /// open mode is used — is a property of the source, not of one run. Same
+    /// idiom as the `parity/` guards.
+    ///
+    /// NON-VACUOUS: restore the write-mode open, or the second
+    /// `load_permissions` parse, and the corresponding assertion fails.
+    #[test]
+    fn the_permissions_load_opens_the_replica_once_and_read_only() {
+        // Only the PRODUCTION half of this file. `include_str!` reads the raw
+        // source, so a needle spelled out in this test module would match its
+        // own text — which is exactly how the first version of this guard
+        // failed against the fixed code.
+        let src = include_str!("syncer.rs");
+        let prod = src
+            .split_once("#[cfg(test)]")
+            .expect("this file ends with a #[cfg(test)] module")
+            .0;
+
+        // The call form, with the open paren: the comment above the fix names
+        // the banned symbol in backticks, and must not itself trip the guard.
+        assert!(
+            !prod.contains("rusqlite::Connection::open("),
+            "`rusqlite::Connection::open` is SQLITE_OPEN_READ_WRITE|CREATE — \
+             the replica must only ever be opened through \
+             `open_replica_read_only` on this path"
+        );
+        assert_eq!(
+            prod.matches("crate::load_permissions(").count(),
+            1,
+            "exactly ONE permissions load: the hash and the permissions \
+             document come from the same `LoadedPermissions`, so a second load \
+             would also mean a second parse of the whole document"
+        );
+        // The hash must be taken from that same load, not re-read.
+        assert!(
+            prod.contains("loaded.as_ref().ok().and_then(|l| l.hash.clone())"),
+            "the permissions hash must come from the single load's \
+             `LoadedPermissions`"
+        );
     }
 }
