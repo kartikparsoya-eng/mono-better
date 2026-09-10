@@ -199,6 +199,7 @@ mod tests {
             .with_writer(buf.clone())
             .with_max_level(tracing::Level::INFO)
             .finish();
+        crate::ensure_permissive_global_subscriber();
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(
                 client_id = "c1",

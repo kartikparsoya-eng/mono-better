@@ -46,6 +46,60 @@ pub mod trace;
 pub mod ws_server;
 pub mod ws_sink;
 
+/// A global default subscriber that swallows every event but declares itself
+/// interested in ALL of them.
+///
+/// This is the piece that makes log capture reliable. `tracing` caches each
+/// callsite's `Interest` process-globally, and with no global default
+/// installed it computes that interest from `Dispatch::none()` — which is
+/// interested in nothing. The first thread to reach a callsite therefore
+/// caches it as disabled FOREVER, and a thread-local capture subscriber
+/// installed later is never offered the event. The symptom is a capture buffer
+/// missing exactly the lines whose callsites some other test happened to touch
+/// first, while lines from callsites this test reached first come through
+/// normally — which is why it looked like a subscriber-scoping bug rather than
+/// a caching one, and why it only appeared under `cargo test`'s parallelism.
+///
+/// Installing this once makes every callsite `Interest::always()`, so interest
+/// is never cached as disabled and each event is dispatched to whatever
+/// dispatcher is current on the emitting thread — the per-test
+/// `set_default`/`with_default` subscriber when there is one, this no-op
+/// otherwise.
+#[cfg(test)]
+struct AlwaysInterested;
+
+#[cfg(test)]
+impl tracing::Subscriber for AlwaysInterested {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Install [`AlwaysInterested`] as the process-global default, exactly once.
+#[cfg(test)]
+pub(crate) fn ensure_permissive_global_subscriber() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // A global default may already exist (another harness installed one);
+        // failing to set ours is fine as long as SOMETHING global is there.
+        let _ = tracing::subscriber::set_global_default(AlwaysInterested);
+    });
+}
+
 pub use auth::jwt::{JwtAuthValidator, decode_jwt_claims};
 pub use auth::load_permissions::{
     LoadedPermissions, PermissionsReload, deny_all_permissions, load_permissions,

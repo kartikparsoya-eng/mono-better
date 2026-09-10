@@ -6112,6 +6112,7 @@ mod tests {
                 .with_ansi(false)
                 .with_max_level(tracing::Level::ERROR)
                 .finish();
+            crate::ensure_permissive_global_subscriber();
             tracing::subscriber::with_default(subscriber, || {
                 rt.block_on(state.apply_client_deletions(
                     "clientA",
@@ -6896,6 +6897,7 @@ mod tests {
                 .with_ansi(false)
                 .with_max_level(tracing::Level::INFO)
                 .finish();
+            crate::ensure_permissive_global_subscriber();
             tracing::subscriber::with_default(subscriber, || {
                 // initConnection → first sync → pipelines (re)init → the line.
                 let accepted = rt.block_on(state.handle_desired_queries(
@@ -16270,6 +16272,7 @@ mod engine_tests {
             .with_max_level(tracing::Level::WARN)
             .finish();
         let mut forwarded: Vec<serde_json::Value> = Vec::new();
+        crate::ensure_permissive_global_subscriber();
         tracing::subscriber::with_default(subscriber, || {
             record_transform_error(err.clone(), &mut forwarded);
         });
@@ -16314,6 +16317,7 @@ mod engine_tests {
             .with_ansi(false)
             .with_max_level(tracing::Level::WARN)
             .finish();
+        crate::ensure_permissive_global_subscriber();
         tracing::subscriber::with_default(subscriber, f);
         String::from_utf8(buf.lock().unwrap().clone()).unwrap()
     }

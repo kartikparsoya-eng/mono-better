@@ -2072,6 +2072,7 @@ mod tests {
             "issue".to_string(),
             "users".to_string(),
         ];
+        crate::ensure_permissive_global_subscriber();
         tracing::subscriber::with_default(subscriber, || {
             IvmPipelines::log_vended_row_counts("q1", 1234.0, Some(&counts), &tables);
         });
