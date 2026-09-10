@@ -181,33 +181,50 @@ impl MemorySource {
         let mut data = data.borrow_mut();
         // Replace any existing row with the same primary key, so the in-memory
         // source stays consistent when tests mutate rows between hydrates.
-        if let Some(idx) = data.iter().position(|existing| {
+        //
+        // `data` is kept sorted by `comparator`, which orders by the primary
+        // index (the primary key), so a row with this PK can only sit at the
+        // insertion point — found by binary search. The equality predicate is
+        // unchanged; only the SEARCH narrowed from a full scan to O(log n).
+        // The scan made a bulk load O(n^2) comparisons, which TS does not pay:
+        // its `Index.data` is a `BTreeSet<Row>` (memory-source.ts:71), whose
+        // add is O(log n) and whose bulk path is `BTreeSet.fromSorted` (:245).
+        let pos = data.partition_point(|existing| comparator(existing, &r) == CmpOrdering::Less);
+        let same_pk = |existing: &Row| {
             pk.iter().all(|k| {
                 let a = existing.get(k).unwrap_or(&Value::Null);
                 let b = r.get(k).unwrap_or(&Value::Null);
                 values_equal(a, b)
             })
-        }) {
-            data[idx] = r;
+        };
+        if pos < data.len() && same_pk(&data[pos]) {
+            data[pos] = r;
             return;
         }
-        let pos = data.partition_point(|existing| comparator(existing, &r) == CmpOrdering::Less);
         data.insert(pos, r);
     }
 
     fn has(&self, row: &Row) -> bool {
         let data = self.data.borrow();
-        data.iter().any(|existing| {
-            self.primary_key.iter().all(|pk| {
-                let a = existing.get(pk).unwrap_or(&Value::Null);
+        // Binary search for the same reason as `add_row`: `data` is sorted by
+        // the primary-index comparator, so a row with this PK can only be at
+        // the insertion point. TS's `BTreeSet.has` is O(log n) too.
+        let pos =
+            data.partition_point(|existing| (self.comparator)(existing, row) == CmpOrdering::Less);
+        pos < data.len()
+            && self.primary_key.iter().all(|pk| {
+                let a = data[pos].get(pk).unwrap_or(&Value::Null);
                 let b = row.get(pk).unwrap_or(&Value::Null);
                 values_equal(a, b)
             })
-        })
     }
 
     /// Get a row by primary key.
     /// Port of TS `TableSource.getRow()`.
+    /// NOT binary-searched, unlike `add_row` / `has`: `pk` is an arbitrary
+    /// column/value slice that need not be the full primary key, nor in the
+    /// primary index's column order, so the sort order of `data` says nothing
+    /// about where a match lies. A linear scan is the only correct search here.
     pub fn get_row(&self, pk: &[(String, Value)]) -> Option<Row> {
         let data = self.data.borrow();
         data.iter()
