@@ -628,9 +628,9 @@ impl ConnectionFailureReason {
     /// Exhaustiveness fixture for `connection_failure_reasons_are_the_ts_vocabulary`
     /// — a rust-only test helper, NOT a port (TS never enumerates the reasons;
     /// `recordConnectionFailure` takes one at each call site). `#[cfg(test)]`
-    /// keeps it out of the M11 prod-reachability surface, where a `pub const
-    /// ALL` otherwise binds by name to the unrelated `ALL` in `ivm/db.ts` and
-    /// reads as a ported-but-unreachable item.
+    /// is therefore the truth, and it is also what keeps this out of the M11
+    /// prod-reachability surface: as a plain `pub const` the guard resolved it
+    /// against the ledger and counted it as a ported symbol prod cannot reach.
     #[cfg(test)]
     pub const ALL: [ConnectionFailureReason; 5] = [
         ConnectionFailureReason::Auth,

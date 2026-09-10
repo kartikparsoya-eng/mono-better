@@ -93,8 +93,11 @@ impl tracing::Subscriber for AlwaysInterested {
 /// Install [`AlwaysInterested`] as the process-global default, exactly once.
 #[cfg(test)]
 pub(crate) fn ensure_permissive_global_subscriber() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+    // Named for what it guards, not `ONCE`: the L1 content-derived ledger
+    // fuzzy-bound a bare `ONCE` to TS `config/zero-config.ts::warnOnce` and
+    // counted it as a misfiled symbol in lib.rs.
+    static PERMISSIVE_SUBSCRIBER_INIT: std::sync::Once = std::sync::Once::new();
+    PERMISSIVE_SUBSCRIBER_INIT.call_once(|| {
         // A global default may already exist (another harness installed one);
         // failing to set ours is fine as long as SOMETHING global is there.
         let _ = tracing::subscriber::set_global_default(AlwaysInterested);
