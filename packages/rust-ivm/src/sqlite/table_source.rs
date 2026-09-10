@@ -304,7 +304,14 @@ impl Iterator for LazyRowsIter {
         match stepped {
             Ok(Some(raw_row)) => {
                 let _t = crate::perf_trace::scope("source.row_mat");
-                let mut map: FxHashMap<String, Value> = FxHashMap::default();
+                // Reserve the row's width up front. Inserting into a
+                // zero-capacity map re-grows the table as it fills (hashbrown
+                // 3 → 7 → 14 → 28 …), and this runs once per fetched row on
+                // every hydrate: a 40-column table paid four extra
+                // allocations per row for nothing. TS has no twin because a JS
+                // object literal is built by the engine in one shot.
+                let mut map: FxHashMap<String, Value> =
+                    FxHashMap::with_capacity_and_hasher(column_names.len(), Default::default());
                 for (i, col) in column_names.iter().enumerate() {
                     let val = crate::sqlite::db::read_value_lossy(raw_row, i);
                     let value = sqlite_value_to_ivm(val, columns.get(col), table_name, col);
