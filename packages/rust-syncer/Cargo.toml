@@ -27,6 +27,7 @@ name = "rust-syncer"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot = "0.12"  # non-poisoning Mutex: see the fail-open note in auth/jwt.rs
 # Axis-2 CPU profiling (PROFILING.md): sampling profiler behind the
 # `profiling` feature — /debug/pprof/flamegraph on the status port.
 pprof = { version = "0.14", features = ["flamegraph"], optional = true }

@@ -21,14 +21,24 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex as StdMutex};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 /// Cached remote JWKS documents, keyed by URL. Mirrors the module-level
 /// `remoteKeyset` singleton in TS `jwt.ts` (jose's `createRemoteJWKSet`), which
 /// fetches once and refreshes in the background. We refresh on a fixed TTL.
-static JWKS_CACHE: LazyLock<StdMutex<HashMap<String, CachedJwks>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
+/// `parking_lot::Mutex`, not `std::sync::Mutex`: the std lock POISONS on a
+/// panic held across it, and every accessor read it with `.lock().ok()` and
+/// then degraded SILENTLY and permanently for the process. The worst of those
+/// was `within_refetch_cooldown`, whose `.unwrap_or(false)` answers "not on
+/// cooldown" — so a poisoned lock turns every unknown-`kid` token into another
+/// JWKS fetch, i.e. exactly the IdP-hammering storm the cooldown exists to
+/// prevent. Poisoning needs a panic inside a critical section that only does a
+/// map operation, so it is near-unreachable; the fix DELETES the failure mode
+/// instead of handling it. TS has no analogue — its JWKS cache is reached from
+/// a single-threaded event loop.
+static JWKS_CACHE: LazyLock<parking_lot::Mutex<HashMap<String, CachedJwks>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 /// How long a fetched JWKS is reused on the fast path before it is considered
 /// stale and a `kid`-miss is allowed to refetch.
@@ -242,7 +252,8 @@ impl JwtAuthValidator {
                 return Err(fetch_err);
             }
         };
-        if let Ok(mut cache) = JWKS_CACHE.lock() {
+        {
+            let mut cache = JWKS_CACHE.lock();
             cache.insert(
                 jwks_url.to_string(),
                 CachedJwks {
@@ -304,7 +315,7 @@ fn select_jwk<'a>(set: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
 /// Look up a key in the cached JWKS for `url`, if the cache entry is still
 /// fresh. Returns an owned clone so the cache lock isn't held during verify.
 fn lookup_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
-    let cache = JWKS_CACHE.lock().ok()?;
+    let cache = JWKS_CACHE.lock();
     let entry = cache.get(url)?;
     if entry.fetched_at.elapsed() >= JWKS_TTL {
         return None;
@@ -316,7 +327,7 @@ fn lookup_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
 /// refetch-failure stale-grace path, where any cached key beats failing
 /// closed during an IdP outage.
 fn lookup_stale_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
-    let cache = JWKS_CACHE.lock().ok()?;
+    let cache = JWKS_CACHE.lock();
     let entry = cache.get(url)?;
     select_jwk(&entry.set, kid).cloned()
 }
@@ -327,12 +338,11 @@ fn lookup_stale_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
 fn within_refetch_cooldown(url: &str) -> bool {
     JWKS_CACHE
         .lock()
-        .ok()
-        .and_then(|cache| {
-            cache
-                .get(url)
-                .map(|entry| entry.fetched_at.elapsed() < JWKS_REFETCH_COOLDOWN)
-        })
+        .get(url)
+        .map(|entry| entry.fetched_at.elapsed() < JWKS_REFETCH_COOLDOWN)
+        // No cache entry means this is the first fetch, which is NOT on
+        // cooldown. This is the only `false` default left: it can no longer be
+        // reached by a poisoned lock, only by a genuine cache miss.
         .unwrap_or(false)
 }
 
@@ -459,18 +469,80 @@ mod tests {
         }
     }
 
+    /// F-31: a panic that held the JWKS lock must not disable the refetch
+    /// cooldown.
+    ///
+    /// `JWKS_CACHE` was a `std::sync::Mutex`, which POISONS when a panic
+    /// unwinds through a held guard, and `within_refetch_cooldown` read it as
+    /// `.lock().ok().and_then(..).unwrap_or(false)`. `false` means "NOT on
+    /// cooldown", so one poisoning panic anywhere turns every unknown-`kid`
+    /// token into another JWKS fetch, for the rest of the process's life, with
+    /// no log line — precisely the IdP-hammering storm the cooldown exists to
+    /// prevent, and the comment calls it DoS protection. `parking_lot::Mutex`
+    /// cannot poison, so the failure mode is deleted rather than handled.
+    ///
+    /// NON-VACUOUS: restore
+    /// `static JWKS_CACHE: LazyLock<StdMutex<..>>` with
+    /// `.lock().ok().and_then(..).unwrap_or(false)` and the post-panic
+    /// assertion fails — the cooldown reports "not on cooldown".
+    #[test]
+    fn a_panic_holding_the_jwks_lock_cannot_disable_the_refetch_cooldown() {
+        use jsonwebtoken::jwk::JwkSet;
+        let url = "https://example.test/jwks-poison-unit";
+        JWKS_CACHE.lock().remove(url);
+        JWKS_CACHE.lock().insert(
+            url.to_string(),
+            CachedJwks {
+                fetched_at: Instant::now(),
+                set: JwkSet { keys: vec![] },
+            },
+        );
+        assert!(
+            within_refetch_cooldown(url),
+            "precondition: a just-fetched URL is on cooldown"
+        );
+
+        // Unwind a panic through a HELD guard. This is what poisons a
+        // `std::sync::Mutex`.
+        let panicked = std::thread::spawn(|| {
+            let _guard = JWKS_CACHE.lock();
+            panic!("poison the JWKS lock");
+        })
+        .join();
+        assert!(
+            panicked.is_err(),
+            "the probe thread must actually have panicked while holding the \
+             lock, or this test proves nothing"
+        );
+
+        assert!(
+            within_refetch_cooldown(url),
+            "after a panic held the lock, the cooldown MUST still report \
+             on-cooldown. A poisoned std::sync::Mutex read with `.ok()` and \
+             `.unwrap_or(false)` answers 'not on cooldown', which re-opens the \
+             unknown-kid refetch storm against the IdP"
+        );
+        // And the cache is still usable at all, not just for this one read.
+        assert!(
+            lookup_cached_jwk(url, None).is_none(),
+            "an empty key set still resolves no key — the point is that the \
+             lookup RUNS rather than failing open"
+        );
+        JWKS_CACHE.lock().remove(url);
+    }
+
     #[test]
     fn jwks_refetch_cooldown_gates_fetches() {
         use jsonwebtoken::jwk::JwkSet;
         let url = "https://example.test/jwks-cooldown-unit";
-        JWKS_CACHE.lock().unwrap().remove(url);
+        JWKS_CACHE.lock().remove(url);
 
         // No cache entry -> not on cooldown, so the first fetch is allowed.
         assert!(!within_refetch_cooldown(url));
 
         // A fresh fetch puts the URL on cooldown: a subsequent kid-miss must NOT
         // refetch (this is what stops an unknown-kid storm from hammering the IdP).
-        JWKS_CACHE.lock().unwrap().insert(
+        JWKS_CACHE.lock().insert(
             url.to_string(),
             CachedJwks {
                 fetched_at: Instant::now(),
@@ -483,7 +555,7 @@ mod tests {
         if let Some(old) =
             Instant::now().checked_sub(JWKS_REFETCH_COOLDOWN + Duration::from_secs(5))
         {
-            JWKS_CACHE.lock().unwrap().insert(
+            JWKS_CACHE.lock().insert(
                 url.to_string(),
                 CachedJwks {
                     fetched_at: old,
@@ -492,7 +564,7 @@ mod tests {
             );
             assert!(!within_refetch_cooldown(url));
         }
-        JWKS_CACHE.lock().unwrap().remove(url);
+        JWKS_CACHE.lock().remove(url);
     }
 
     /// TS-vs-Rust JWT parity: every token's accept/reject decision must match

@@ -214,10 +214,18 @@ pub struct PusherService {
     /// Push-auth-failure invalidation hook (TS pusher.ts:539 `isAuthErrorBody`
     /// → `failConnection`). Installed post-construction by the view-syncer
     /// (which owns the ConnectionContextManager); `None` until wired.
-    auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>>,
+    /// `parking_lot::Mutex`: the std lock POISONS, and every reader used
+    /// `.lock().ok().and_then(|g| g.clone())`, which yields `None` on a
+    /// poisoned lock — so a 401/403 relay response would SILENTLY stop
+    /// invalidating the connection context, with no log line. That is the
+    /// 2026-08-29 401-storm mechanism (see the push-relay auth-freshness fix),
+    /// so the fail-open branch is deleted rather than handled. Written once at
+    /// wiring time, read per push.
+    auth_fail_hook: std::sync::Arc<parking_lot::Mutex<Option<AuthFailHook>>>,
     /// TS `#connContextManager.validateConnection` after a successful push
     /// (pusher.ts:545-556); see [`ValidateHook`].
-    validate_hook: std::sync::Arc<std::sync::Mutex<Option<ValidateHook>>>,
+    /// Same treatment as [`Self::auth_fail_hook`].
+    validate_hook: std::sync::Arc<parking_lot::Mutex<Option<ValidateHook>>>,
     /// Queued-but-not-yet-POSTed pushes (enqueue increments, drainer decrements).
     depth: Arc<AtomicI64>,
     cap: i64,
@@ -239,11 +247,11 @@ impl PusherService {
         let (tx, mut rx) = mpsc::unbounded_channel::<QueuedPush>();
         let depth = Arc::new(AtomicI64::new(0));
         let drainer_depth = depth.clone();
-        let auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let auth_fail_hook: std::sync::Arc<parking_lot::Mutex<Option<AuthFailHook>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(None));
         let drainer_auth_fail_hook = auth_fail_hook.clone();
-        let validate_hook: std::sync::Arc<std::sync::Mutex<Option<ValidateHook>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let validate_hook: std::sync::Arc<parking_lot::Mutex<Option<ValidateHook>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(None));
         let drainer_validate_hook = validate_hook.clone();
         // Single sequential drainer: builds the reqwest client inside the
         // runtime (so its pool/timers bind to the reactor) and POSTs each queued
@@ -320,7 +328,7 @@ impl PusherService {
                                             client_id = %t.client_id,
                                             "Push auth failed; invalidating connection"
                                         );
-                                        let hook = drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                        let hook = drainer_auth_fail_hook.lock().clone();
                                         if let Some(hook) = hook {
                                             hook(&sel, t.revision);
                                         }
@@ -343,7 +351,7 @@ impl PusherService {
                                     } else {
                                         crate::services::view_syncer::connection_context_manager::ConnectionValidation::ClientFallback
                                     };
-                                    let hook = drainer_validate_hook.lock().ok().and_then(|g| g.clone());
+                                    let hook = drainer_validate_hook.lock().clone();
                                     if let Some(hook) = hook
                                         && let Err(e) = hook(&sel, t.revision, validation)
                                     {
@@ -368,7 +376,7 @@ impl PusherService {
                                                 response = %message,
                                                 "Push validation failed; invalidating connection"
                                             );
-                                            let hook = drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                            let hook = drainer_auth_fail_hook.lock().clone();
                                             if let Some(hook) = hook {
                                                 hook(&sel, t.revision);
                                             }
@@ -414,7 +422,7 @@ impl PusherService {
                                 // 2026-08-29 401 storm).
                                 if status == 401 || status == 403 {
                                     let hook =
-                                        drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                        drainer_auth_fail_hook.lock().clone();
                                     if let Some(hook) = hook {
                                         let sel = ConnectionSelector {
                                             client_id: t.client_id.clone(),
@@ -563,15 +571,11 @@ impl PusherService {
 
 impl PusherDispatch for PusherService {
     fn set_auth_fail_hook(&self, hook: AuthFailHook) {
-        if let Ok(mut guard) = self.auth_fail_hook.lock() {
-            *guard = Some(hook);
-        }
+        *self.auth_fail_hook.lock() = Some(hook);
     }
 
     fn set_validate_hook(&self, hook: ValidateHook) {
-        if let Ok(mut guard) = self.validate_hook.lock() {
-            *guard = Some(hook);
-        }
+        *self.validate_hook.lock() = Some(hook);
     }
 
     fn enqueue_push(

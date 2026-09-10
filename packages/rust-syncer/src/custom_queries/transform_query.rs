@@ -18,7 +18,7 @@
 
 use crate::services::view_syncer::connection_context_manager::ConnectionValidation;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex as StdMutex};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use rust_cvr::shards::ShardID;
@@ -31,13 +31,39 @@ use crate::custom::fetch::{get_backoff_delay_ms, url_match};
 /// typical short-lived auth token, so a re-auth re-transforms promptly).
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
+/// TS sweeps expired entries on a `setInterval(ttlMs * 2)` — every 10s for the
+/// 5s TTL — started lazily on the first `set()` and `unref`ed
+/// (shared/src/cache.ts:31-38, `#removeExpired`:56-63). It does NOT sweep per
+/// insert.
+const CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Cached per-query transform results, keyed by `url|auth|headers-digest|id`.
 /// Mirrors the TS per-connection `TimedCache`, but process-wide — so the key
 /// MUST encode the full request identity that scopes authorization (URL, token,
 /// AND the forwarded cookie/origin/custom headers). Omitting the headers would
 /// let one connection read another's authorization-scoped transform.
-static TRANSFORM_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, TransformedQuery)>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
+struct TransformCache {
+    entries: HashMap<String, (Instant, TransformedQuery)>,
+    /// When the expiry sweep last ran. TS's sweep is driven by a timer, so it
+    /// needs no such field; rust amortises the same cadence onto the insert
+    /// path (see `cache_set`).
+    last_swept: Instant,
+}
+
+/// `parking_lot::Mutex`, not `std::sync::Mutex`: the std lock POISONS on a
+/// panic held across it, and both accessors used to read it with `.ok()` and
+/// silently degrade — `cache_get` returning `None` forever, i.e. every custom
+/// query going to the network for the rest of the process's life, with no log
+/// line. Poisoning needs a panic inside a critical section that only does a map
+/// operation, so it is near-unreachable; the point is that the fix DELETES the
+/// failure mode rather than handling it. TS has no analogue: its cache is a
+/// plain `Map` on a single-threaded event loop.
+static TRANSFORM_CACHE: LazyLock<parking_lot::Mutex<TransformCache>> = LazyLock::new(|| {
+    parking_lot::Mutex::new(TransformCache {
+        entries: HashMap::new(),
+        last_swept: Instant::now(),
+    })
+});
 
 /// The per-connection context needed to reach the user's query API server.
 ///
@@ -618,14 +644,14 @@ fn get_cache_key(ctx: &CustomQueryContext, id: &str) -> String {
 }
 
 fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {
-    let mut cache = TRANSFORM_CACHE.lock().ok()?;
+    let mut cache = TRANSFORM_CACHE.lock();
     let key = get_cache_key(ctx, id);
-    match cache.get(&key) {
+    match cache.entries.get(&key) {
         Some((at, q)) if at.elapsed() < CACHE_TTL => Some(q.clone()),
-        // Expired → evict on read so a key that is never re-requested doesn't
-        // linger forever (TS `TimedCache` reclaims via a periodic sweep).
+        // Expired → evict on read, exactly as TS `TimedCache.get` does
+        // (`this.#cache.delete(key); return undefined`, cache.ts:47-50).
         Some(_) => {
-            cache.remove(&key);
+            cache.entries.remove(&key);
             None
         }
         None => None,
@@ -633,13 +659,28 @@ fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {
 }
 
 fn cache_set(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {
-    if let Ok(mut cache) = TRANSFORM_CACHE.lock() {
-        // Sweep expired entries before inserting. Without this the process-wide
-        // cache grows unbounded as rotating short-lived JWTs mint fresh keys that
-        // are never re-read (a leak TS's `TimedCache` interval cleanup avoids).
-        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
-        cache.insert(get_cache_key(ctx, id), (Instant::now(), q.clone()));
+    let mut cache = TRANSFORM_CACHE.lock();
+    // The sweep is what keeps the process-wide cache from growing unbounded as
+    // rotating short-lived JWTs mint fresh keys that are never re-read. It used
+    // to run on EVERY insert — a full O(n) scan of the whole process-wide map,
+    // while holding a lock shared by ~1000 CG threads, and `n` is exactly the
+    // population those rotating keys grow. TS runs the same scan on a timer at
+    // twice the TTL, so match that cadence: at most one sweep per
+    // `CACHE_SWEEP_INTERVAL`, which makes the insert path amortised O(1).
+    //
+    // Residual difference from TS, accepted deliberately: TS's `setInterval`
+    // fires even with no cache activity, so an idle process reclaims within
+    // 10s, whereas this sweep needs a subsequent insert. Reads still evict
+    // expired entries (`cache_get`), the retained set is bounded by what was
+    // inserted, and the alternative — a background timer task owning a global
+    // — would be a larger rust-only invention than the leak it prevents.
+    if cache.last_swept.elapsed() >= CACHE_SWEEP_INTERVAL {
+        cache.entries.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        cache.last_swept = Instant::now();
     }
+    cache
+        .entries
+        .insert(get_cache_key(ctx, id), (Instant::now(), q.clone()));
 }
 
 /// Test-only: seed the process-wide transform cache so a custom query resolves
@@ -650,6 +691,54 @@ fn cache_set(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {
 #[doc(hidden)]
 pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {
     cache_set(ctx, id, q);
+}
+
+/// TEST-ONLY: how many entries the transform cache currently holds, and how
+/// long since its last expiry sweep. Lets a test observe the sweep SCHEDULE
+/// (F-28) rather than only its effect.
+#[doc(hidden)]
+pub fn __test_transform_cache_state() -> (usize, std::time::Duration) {
+    let cache = TRANSFORM_CACHE.lock();
+    (cache.entries.len(), cache.last_swept.elapsed())
+}
+
+/// TEST-ONLY: drop every entry and reset the sweep clock, so a test starts from
+/// a known state despite the cache being process-wide.
+#[doc(hidden)]
+pub fn __test_reset_transform_cache() {
+    let mut cache = TRANSFORM_CACHE.lock();
+    cache.entries.clear();
+    cache.last_swept = Instant::now();
+}
+
+/// TEST-ONLY: backdate the sweep clock by `by`, so a test can place itself
+/// either side of `CACHE_SWEEP_INTERVAL` without sleeping.
+#[doc(hidden)]
+pub fn __test_backdate_transform_cache_sweep_clock(by: Duration) {
+    let mut cache = TRANSFORM_CACHE.lock();
+    cache.last_swept = cache
+        .last_swept
+        .checked_sub(by)
+        .expect("backdating past the process start is a test bug");
+}
+
+/// TEST-ONLY: insert an entry whose recorded timestamp is `age` in the past, so
+/// a test can make an entry EXPIRED (older than `CACHE_TTL`) without sleeping.
+#[doc(hidden)]
+pub fn __test_insert_aged(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery, age: Duration) {
+    let mut cache = TRANSFORM_CACHE.lock();
+    let at = Instant::now()
+        .checked_sub(age)
+        .expect("aging past the process start is a test bug");
+    cache
+        .entries
+        .insert(get_cache_key(ctx, id), (at, q.clone()));
+}
+
+/// TEST-ONLY: the sweep interval and TTL, so a test does not hard-code them.
+#[doc(hidden)]
+pub fn __test_cache_timings() -> (Duration, Duration) {
+    (CACHE_TTL, CACHE_SWEEP_INTERVAL)
 }
 
 #[cfg(test)]
@@ -724,6 +813,160 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The transform cache is PROCESS-WIDE, and so is its sweep clock, so the
+    /// three tests below cannot run concurrently with each other — one
+    /// resetting the clock invalidates another's backdating. libtest runs tests
+    /// in parallel by default, so serialize them explicitly rather than relying
+    /// on `--test-threads=1`.
+    static CACHE_TEST_GUARD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    fn probe_ctx(tag: &str) -> CustomQueryContext {
+        CustomQueryContext {
+            url: format!("https://example.test/{tag}"),
+            ..Default::default()
+        }
+    }
+
+    fn probe_query(id: &str) -> TransformedQuery {
+        TransformedQuery {
+            id: id.to_string(),
+            ast: serde_json::json!({"table": "issue"}),
+            hash: "h".to_string(),
+        }
+    }
+
+    /// F-28: the expiry sweep must run on a SCHEDULE, not on every insert.
+    ///
+    /// TS sweeps on a `setInterval(ttlMs * 2)` started lazily on the first
+    /// `set()` (shared/src/cache.ts:31-38, `#removeExpired`:56-63) — every 10s
+    /// for the 5s TTL. Rust ran `cache.retain(..)`, a full O(n) scan of the
+    /// whole PROCESS-WIDE map, on every insert, while holding a lock shared by
+    /// ~1000 CG threads; and `n` is exactly the population that rotating
+    /// short-lived JWTs grow. The sweep is now gated on
+    /// `CACHE_SWEEP_INTERVAL`, matching TS's cadence and making the insert path
+    /// amortised O(1).
+    ///
+    /// The observable is the sweep CLOCK: a sweep resets `last_swept`, so a
+    /// clock that stays backdated across an insert proves no sweep ran.
+    ///
+    /// NON-VACUOUS: make the sweep unconditional again (drop the
+    /// `if cache.last_swept.elapsed() >= CACHE_SWEEP_INTERVAL` guard, keeping
+    /// the `last_swept = Instant::now()`) and
+    /// `an_insert_inside_the_interval_does_not_sweep` fails; delete the sweep
+    /// block entirely and `an_insert_past_the_interval_sweeps` fails.
+    #[test]
+    fn an_insert_inside_the_interval_does_not_sweep() {
+        let _serial = CACHE_TEST_GUARD.lock();
+        let (_ttl, interval) = __test_cache_timings();
+        let ctx = probe_ctx("sweep-inside");
+        __test_reset_transform_cache();
+
+        // Sit just INSIDE the interval, so a correctly-scheduled sweep must
+        // decline to run.
+        let backdate = interval - Duration::from_secs(2);
+        __test_backdate_transform_cache_sweep_clock(backdate);
+
+        cache_set(&ctx, "q1", &probe_query("q1"));
+        cache_set(&ctx, "q2", &probe_query("q2"));
+        cache_set(&ctx, "q3", &probe_query("q3"));
+
+        let (len, since_sweep) = __test_transform_cache_state();
+        assert_eq!(len, 3, "the three entries must be cached");
+        assert!(
+            since_sweep >= backdate - Duration::from_secs(1),
+            "no sweep may have run: the clock should still read ~{backdate:?} \
+             since the last sweep, but reads {since_sweep:?} — a reset clock \
+             means the insert path swept, which is the O(n)-under-a-shared-lock \
+             behaviour this replaced"
+        );
+        __test_reset_transform_cache();
+    }
+
+    #[test]
+    fn an_insert_past_the_interval_sweeps() {
+        let _serial = CACHE_TEST_GUARD.lock();
+        let (ttl, interval) = __test_cache_timings();
+        let ctx = probe_ctx("sweep-past");
+        __test_reset_transform_cache();
+
+        // One EXPIRED entry (older than the TTL) and one fresh one.
+        __test_insert_aged(&ctx, "stale", &probe_query("stale"), ttl * 2);
+        cache_set(&ctx, "fresh", &probe_query("fresh"));
+        assert_eq!(
+            __test_transform_cache_state().0,
+            2,
+            "precondition: both entries are present before any sweep"
+        );
+
+        // Cross the interval, then insert: this insert must sweep.
+        __test_backdate_transform_cache_sweep_clock(interval + Duration::from_secs(1));
+        cache_set(&ctx, "trigger", &probe_query("trigger"));
+
+        let (len, since_sweep) = __test_transform_cache_state();
+        assert!(
+            since_sweep < Duration::from_secs(2),
+            "the sweep must have run and reset the clock; it reads \
+             {since_sweep:?} since the last sweep"
+        );
+        assert_eq!(
+            len, 2,
+            "the sweep must drop the EXPIRED entry and keep the two live ones \
+             (fresh + trigger); got {len}"
+        );
+        assert!(
+            cache_get(&ctx, "stale").is_none(),
+            "the expired entry must be gone"
+        );
+        assert!(
+            cache_get(&ctx, "fresh").is_some(),
+            "a live entry must survive the sweep"
+        );
+        __test_reset_transform_cache();
+    }
+
+    /// F-31: a panic that held the transform-cache lock must not kill the cache.
+    ///
+    /// It was a `std::sync::Mutex` read with `.lock().ok()?`, so one poisoning
+    /// panic made `cache_get` return `None` for every query for the rest of the
+    /// process's life — every custom query going to the network, silently and
+    /// permanently. `parking_lot::Mutex` cannot poison.
+    ///
+    /// NON-VACUOUS: restore the `StdMutex` + `.lock().ok()?` / `if let Ok(..)`
+    /// pair and the post-panic `cache_get` returns `None`, failing the last
+    /// assertion.
+    #[test]
+    fn a_panic_holding_the_transform_cache_lock_does_not_kill_the_cache() {
+        let _serial = CACHE_TEST_GUARD.lock();
+        let ctx = probe_ctx("poison");
+        __test_reset_transform_cache();
+        cache_set(&ctx, "q1", &probe_query("q1"));
+        assert!(
+            cache_get(&ctx, "q1").is_some(),
+            "precondition: the entry is cached"
+        );
+
+        let panicked = std::thread::spawn(|| {
+            let _guard = TRANSFORM_CACHE.lock();
+            panic!("poison the transform cache lock");
+        })
+        .join();
+        assert!(
+            panicked.is_err(),
+            "the probe thread must actually have panicked while holding the \
+             lock, or this test proves nothing"
+        );
+
+        assert!(
+            cache_get(&ctx, "q1").is_some(),
+            "after a panic held the lock, the cache MUST still serve. A \
+             poisoned std::sync::Mutex read with `.ok()?` returns None for \
+             every query, permanently, with no log line"
+        );
+        __test_reset_transform_cache();
+    }
+
     /// TS `HashedTransformResponse` (transform-query.ts:43-60) + the
     /// `validation` derivation in `#requestTransform` (:214-226): an UNCACHED
     /// transform carries `cached: false` and the API server's validation —
@@ -791,8 +1034,6 @@ mod tests {
             "got {v:?}"
         );
     }
-
-    use super::*;
 
     #[test]
     fn extract_transform_queries_handles_modern_and_legacy() {
@@ -1004,6 +1245,14 @@ mod tests {
     fn cached_queries_skip_the_network() {
         // Seed the cache so a query resolves without a request. The bogus URL
         // proves no network call happens (it would error otherwise).
+        //
+        // The cache is process-wide and libtest runs tests in parallel, so any
+        // test that depends on cache CONTENTS has to hold the same guard as
+        // the sweep tests — otherwise their `__test_reset_transform_cache()`
+        // wipes the entry seeded below and this test falls through to the
+        // network it is asserting never happens.
+        let _serial = CACHE_TEST_GUARD.lock();
+        __test_reset_transform_cache();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut ctx = ctx_at("http://127.0.0.1:1/cached-test");
         ctx.auth = Some("tok".to_string());

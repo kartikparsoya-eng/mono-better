@@ -2062,6 +2062,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parking_lot",
  "pprof",
  "rand 0.8.7",
  "regex",
