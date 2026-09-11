@@ -981,3 +981,47 @@ fn test_flush_records_signature_drift_only_when_changed() {
         );
     }
 }
+
+/// A new row whose received refCounts net to nothing (added and retracted in
+/// one batch) is recorded as `null` in `#receivedRows`. When a LATER batch of
+/// the same pass receives it again with the same net-zero counts, TS's
+/// `if (existing || previouslyReceived)` (cvr.ts:882) is a truthiness check:
+/// the `null` entry is falsy, so no `del` patch is sent for a row the client
+/// never got. Presence of the entry alone must not trigger the delete.
+#[test]
+fn test_received_null_previously_received_entry_sends_no_del() {
+    let cvr = make_test_cvr();
+    let mut updater = make_query_driven_updater(cvr, "v2");
+    updater.track_queries(&[], &[]);
+
+    let make_rows = || {
+        let id = RowID {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
+        };
+        let id_str = crate::row_key::row_id_string(&id);
+        let update = RowUpdate {
+            version: Some("rv1".to_string()),
+            contents: None,
+            // Added and removed within the batch: nets to zero.
+            ref_counts: [("hash1".to_string(), 0)].into_iter().collect(),
+        };
+        let mut rows = HashMap::new();
+        rows.insert(id_str, (id, update));
+        rows
+    };
+    let existing = HashMap::new();
+
+    let first = updater.received(make_rows(), &existing).unwrap();
+    assert!(
+        first.is_empty(),
+        "precondition: a never-synced row that nets to zero emits nothing: {first:?}"
+    );
+    let second = updater.received(make_rows(), &existing).unwrap();
+    assert!(
+        second.is_empty(),
+        "re-receipt of the same net-zero row must not emit a del (TS: the null \
+         receivedRows entry is falsy): {second:?}"
+    );
+}

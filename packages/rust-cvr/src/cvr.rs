@@ -1107,8 +1107,11 @@ impl CVRQueryDrivenUpdater {
                     Some(&self.removed_or_executed_query_ids),
                 ),
             };
-            // `existing || previouslyReceived` below only needs presence.
-            let was_previously_received = previously_received.is_some();
+            // TS `if (existing || previouslyReceived)` (cvr.ts:882) is a
+            // TRUTHINESS check: an entry whose merged refCounts are `null` is
+            // falsy there, so presence alone must not count — the retracted
+            // row was never sent, and re-receiving it must not emit a `del`.
+            let was_previously_received = previously_received.is_some_and(|o| o.is_some());
 
             self.received_rows.insert(id_str.clone(), merged.clone());
 
