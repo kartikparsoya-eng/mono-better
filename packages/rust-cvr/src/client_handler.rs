@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 // ─── wire patch types (client-handler.ts) ───
 
 /// Patches — sent to clients to update their view.
@@ -748,21 +748,23 @@ impl PokeHandler {
 
         match patch {
             RowPatch::Put { id: _, contents } => {
-                // TS: `normalizeMutationResult(ensureSafeJSON(patch.contents))`
-                // (client-handler.ts:410) — the mutations path is subject to the
-                // same unsafe-integer guard as the rows path.
+                // client-handler.ts:252-256: `v.parse(ensureSafeJSON(
+                // patch.contents), mutationRowSchema, 'passthrough')` — the
+                // same unsafe-integer guard as the rows path, then the row
+                // schema; either failure throws out of the poke.
                 ensure_safe_json(contents)?;
-                let normalized = normalize_mutation_result(contents);
-                let client_id = normalized
+                MutationRow::deserialize(&**contents)
+                    .map_err(|e| format!("mutationRowSchema: {e}"))?;
+                let client_id = contents
                     .get("clientID")
                     .and_then(|v| v.as_str())
                     .ok_or("clientID missing in mutation row")?
                     .to_string();
-                let mutation_id = normalized
+                let mutation_id = contents
                     .get("mutationID")
                     .and_then(|v| v.as_i64())
                     .ok_or("mutationID missing in mutation row")?;
-                let result = normalized.get("result").cloned().unwrap_or(Value::Null);
+                let result = contents.get("result").cloned().unwrap_or(Value::Null);
 
                 patches.push(MutationPatchEntry {
                     op: "put",
@@ -822,18 +824,98 @@ impl Drop for PokeHandler {
     }
 }
 
-/// Defense-in-depth: if `result` arrives as a JSON string, parse it.
-fn normalize_mutation_result(row: &Value) -> Value {
-    if let Value::Object(map) = row
-        && let Some(result) = map.get("result")
-        && let Value::String(s) = result
-        && let Ok(parsed) = serde_json::from_str::<Value>(s)
-    {
-        let mut cloned = map.clone();
-        cloned.insert("result".to_string(), parsed);
-        return Value::Object(cloned);
-    }
-    row.clone()
+// ─── mutationRowSchema (client-handler.ts:406-411) ───────────────────────────
+// `#addPatch` parses a `zero_mutations` row with
+// `v.parse(ensureSafeJSON(patch.contents), mutationRowSchema, 'passthrough')`
+// (client-handler.ts:252-256): unknown keys are kept, every known field is
+// checked, `.optional()` is absent-or-value, never `null`. Validation only —
+// the row is forwarded as JSON. The `mutationResultSchema` members are
+// zero-protocol/src/mutation.ts twins folded in here: rust-cvr has no
+// zero-protocol twin (rule 3).
+
+/// `mutationRowSchema` (client-handler.ts:406-411).
+#[derive(Debug, Deserialize)]
+pub struct MutationRow {
+    #[serde(rename = "clientGroupID")]
+    pub client_group_id: String,
+    #[serde(rename = "clientID")]
+    pub client_id: String,
+    #[serde(rename = "mutationID")]
+    pub mutation_id: serde_json::Number,
+    pub result: MutationResult,
+}
+
+/// `mutationOkSchema` (mutation.ts:132-135): `data` is `jsonSchema.optional()`,
+/// absent or any JSON value (`null` included).
+#[derive(Debug, Deserialize)]
+pub struct MutationOk {
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
+/// `v.literal('app')` (mutation.ts:120).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub enum AppErrorLiteral {
+    #[serde(rename = "app")]
+    App,
+}
+
+/// `appErrorSchema` (mutation.ts:119-124).
+#[derive(Debug, Deserialize)]
+pub struct AppError {
+    pub error: AppErrorLiteral,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+/// `v.union(v.literal('oooMutation'), v.literal('alreadyProcessed'))`
+/// (mutation.ts:126-130).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub enum ZeroErrorKind {
+    #[serde(rename = "oooMutation")]
+    OooMutation,
+    #[serde(rename = "alreadyProcessed")]
+    AlreadyProcessed,
+}
+
+/// `zeroErrorSchema` (mutation.ts:125-132).
+#[derive(Debug, Deserialize)]
+pub struct ZeroError {
+    pub error: ZeroErrorKind,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+/// `mutationErrorSchema` (mutation.ts:137).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum MutationError {
+    App(AppError),
+    Zero(ZeroError),
+}
+
+/// `mutationResultSchema` (mutation.ts:139-142). valita tries the members in
+/// order, and in passthrough mode `mutationOkSchema` — every field optional —
+/// accepts any object; `untagged` resolves the same way, so only a
+/// non-object `result` fails.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum MutationResult {
+    Ok(MutationOk),
+    Error(MutationError),
+}
+
+/// valita `.optional()` for serde: absent (serde `default`) or a value, never
+/// `null` — serde's own `Option` would read `null` as `None`. Rust-only
+/// adapter, the same one rust-syncer's `protocol::optional_no_null` is.
+fn optional_no_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// The largest integer JS can represent exactly (`Number.MAX_SAFE_INTEGER`).

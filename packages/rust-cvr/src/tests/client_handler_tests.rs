@@ -1416,25 +1416,86 @@ fn send_query_transform_failed_error_emits_exact_error_frame_and_fails() {
     );
 }
 
+/// `mutationRowSchema` (client-handler.ts:406-411) in valita passthrough
+/// mode: `result` must be an object — a JSON STRING holding an object fails
+/// every member of `mutationResultSchema` and the parse throws out of the
+/// poke. The rust-only "if `result` is a string, parse it" this replaced
+/// forwarded such a row as if it were well-formed.
 #[test]
-fn test_normalize_mutation_result_string() {
-    let row = serde_json::json!({
-        "clientID": "c1",
-        "mutationID": 1,
-        "result": "{\"ok\":true}",
+fn mutation_row_with_string_result_is_rejected_like_ts_mutation_row_schema() {
+    let (handler, _messages) = make_handler();
+    let poke = handler.start_poke(CVRVersion {
+        state_version: "v2".to_string(),
+        config_version: None,
     });
-    let normalized = normalize_mutation_result(&row);
-    assert!(normalized.get("result").unwrap().is_object());
-    assert_eq!(normalized["result"]["ok"], true);
+    let err = poke
+        .add_patch(&make_row_patch_put(
+            "app_0.mutations",
+            serde_json::json!({
+                "clientGroupID": "cg1",
+                "clientID": "clientA",
+                "mutationID": 5,
+                "result": "{\"ok\":true}",
+            }),
+        ))
+        .expect_err("a string result must fail mutationRowSchema");
+    assert!(err.starts_with("mutationRowSchema: "), "{err}");
 }
 
+/// `clientGroupID: v.string()` is required by `mutationRowSchema` even though
+/// the patch never forwards it; a row without it throws.
 #[test]
-fn test_normalize_mutation_result_object() {
-    let row = serde_json::json!({
-        "clientID": "c1",
-        "mutationID": 1,
-        "result": {"ok": true},
+fn mutation_row_without_client_group_id_is_rejected() {
+    let (handler, _messages) = make_handler();
+    let poke = handler.start_poke(CVRVersion {
+        state_version: "v2".to_string(),
+        config_version: None,
     });
-    let normalized = normalize_mutation_result(&row);
-    assert!(normalized.get("result").unwrap().is_object());
+    let err = poke
+        .add_patch(&make_row_patch_put(
+            "app_0.mutations",
+            serde_json::json!({
+                "clientID": "clientA",
+                "mutationID": 5,
+                "result": {"data": 1},
+            }),
+        ))
+        .expect_err("a row without clientGroupID must fail mutationRowSchema");
+    assert!(err.contains("clientGroupID"), "{err}");
+}
+
+/// Passthrough (client-handler.ts:255): unknown keys on the row survive the
+/// parse, and `result` is forwarded verbatim. `mutationOkSchema` is tried
+/// first and, with only optional fields, accepts any object — so a `result`
+/// whose `error` is outside `'app' | 'oooMutation' | 'alreadyProcessed'`
+/// is still accepted (verified against valita).
+#[test]
+fn mutation_row_passthrough_keeps_unknown_keys_and_forwards_any_object_result() {
+    let (handler, messages) = make_handler();
+    let poke = handler.start_poke(CVRVersion {
+        state_version: "v2".to_string(),
+        config_version: None,
+    });
+    poke.add_patch(&make_row_patch_put(
+        "app_0.mutations",
+        serde_json::json!({
+            "clientGroupID": "cg1",
+            "clientID": "clientA",
+            "mutationID": 5,
+            "result": {"error": "bogus", "x": 1},
+            "extra": true,
+        }),
+    ))
+    .expect("unknown keys pass through");
+    poke.end(CVRVersion {
+        state_version: "v2".to_string(),
+        config_version: Some(1),
+    })
+    .unwrap();
+    let msgs = messages.lock().unwrap();
+    let mp = &msgs[1][1]["mutationsPatch"];
+    assert_eq!(
+        mp[0]["mutation"]["result"],
+        serde_json::json!({"error": "bogus", "x": 1})
+    );
 }
