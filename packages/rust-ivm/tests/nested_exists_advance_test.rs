@@ -14,12 +14,11 @@
 //! Both in the same advance. The live view must gain the conversation,
 //! exactly as a fresh hydrate would.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{
     Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery, SimpleCondition, ValuePosition,
@@ -48,11 +47,11 @@ fn make_source(
     )))
 }
 
-fn row(pairs: &[(&str, &str)]) -> Arc<FxHashMap<String, Value>> {
+fn row(pairs: &[(&str, &str)]) -> Arc<RowMap> {
     Arc::new(
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), Value::Str((*v).into())))
+            .map(|(k, v)| (k.to_string().into(), Value::Str((*v).into())))
             .collect(),
     )
 }

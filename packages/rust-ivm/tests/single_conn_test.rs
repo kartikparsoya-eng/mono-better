@@ -163,10 +163,7 @@ fn test_nested_fetch_different_sources_no_deadlock() {
 
     // Fetch child rows with constraint (simulates join)
     let mut child_constraint = rust_ivm::ivm::constraint::Constraint::default();
-    child_constraint.insert(
-        "parentId".to_string(),
-        Value::Str(std::sync::Arc::from("p1")),
-    );
+    child_constraint.insert("parentId".into(), Value::Str(std::sync::Arc::from("p1")));
     let child_req = FetchRequest {
         constraint: Some(child_constraint),
         ..Default::default()

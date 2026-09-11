@@ -30,11 +30,11 @@ fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
     use rust_ivm::ivm::data::Value;
     use std::sync::Arc;
 
-    // `Row` is `Arc<FxHashMap<String, Value>>`; collecting into the alias
+    // `Row` is `Arc<FxHashMap<Arc<str>, Value>>`; collecting into the alias
     // infers the hasher, so the test needs no `rustc_hash` dependency.
     let row_key = |id: &str| -> rust_ivm::ivm::data::Row {
         Arc::new(
-            [("id".to_string(), Value::Str(Arc::from(id)))]
+            [("id".into(), Value::Str(Arc::from(id)))]
                 .into_iter()
                 .collect(),
         )
@@ -343,7 +343,7 @@ fn make_cvr() -> CVR {
 
 fn users_spec() -> IvmTableSpec {
     IvmTableSpec {
-        table: "users".to_string(),
+        table: "users".into(),
         column_order: Vec::new(),
         columns: HashMap::from([(
             "id".to_string(),
@@ -698,7 +698,7 @@ async fn hydrate_and_sync_emits_poke_frames() {
         patch: Patch::Row(RowPatch::Del {
             id: RowID {
                 schema: String::new(),
-                table: "users".to_string(),
+                table: "users".into(),
                 row_key: del_key,
             },
         }),

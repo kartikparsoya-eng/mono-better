@@ -3,11 +3,10 @@
 //! unarchiveChannel: isArchived true -> false
 //! Final state should be isArchived=false.
 
+use rust_ivm::ivm::data::RowMap;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -34,8 +33,13 @@ fn source(
     )))
 }
 
-fn row(pairs: Vec<(&str, Value)>) -> Arc<FxHashMap<String, Value>> {
-    Arc::new(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+fn row(pairs: Vec<(&str, Value)>) -> Arc<RowMap> {
+    Arc::new(
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k.to_string().into(), v))
+            .collect(),
+    )
 }
 
 fn channels_ast() -> Ast {

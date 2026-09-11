@@ -74,14 +74,8 @@ fn email_channels_related_type_in_filter_excludes_default_dm() {
             "channel_user_status",
             {
                 let mut m = strcols(&["id", "userId", "channelId"]);
-                m.insert(
-                    "isClosed".to_string(),
-                    ColumnType::Boolean { optional: false },
-                );
-                m.insert(
-                    "isDeleted".to_string(),
-                    ColumnType::Boolean { optional: false },
-                );
+                m.insert("isClosed".into(), ColumnType::Boolean { optional: false });
+                m.insert("isDeleted".into(), ColumnType::Boolean { optional: false });
                 m
             },
             vec!["id".to_string()],
@@ -96,7 +90,7 @@ fn email_channels_related_type_in_filter_excludes_default_dm() {
             {
                 let mut m = strcols(&["channelId"]);
                 m.insert(
-                    "lastActivityAt".to_string(),
+                    "lastActivityAt".into(),
                     ColumnType::Number { optional: false },
                 );
                 m

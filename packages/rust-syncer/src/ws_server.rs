@@ -1165,7 +1165,7 @@ mod tests {
             desired_queries_patches: None,
             rows_patch: Some(vec![rust_cvr::client_handler::RowPatchOp {
                 op: "put",
-                table_name: "issue".to_string(),
+                table_name: "issue".into(),
                 value: Some(Arc::new(serde_json::json!({"id": "i1", "score": 1.0}))),
                 id: None,
             }]),

@@ -12,13 +12,13 @@
 
 #![allow(dead_code)]
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rusqlite::Connection;
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{
     Ast, Condition, CorrelatedSubqueryCondition, OrderPart, RelatedSubquery, SimpleCondition,
@@ -67,9 +67,9 @@ fn columns(cols: &[&str]) -> HashMap<String, ColumnType> {
 }
 
 pub fn row(pairs: &[(&str, &str)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), Value::Str((*v).into())))
+        .map(|(k, v)| (Arc::from(*k), Value::Str((*v).into())))
         .collect();
     Arc::new(map)
 }
@@ -247,7 +247,7 @@ impl Fixture {
             let (_, comments) = issue_rows(i);
             let old = comments[0].clone();
             let mut edited = (*old).clone();
-            edited.insert("body".to_string(), Value::Str(format!("edited {i}").into()));
+            edited.insert("body".into(), Value::Str(format!("edited {i}").into()));
             let new: Row = Arc::new(edited);
             delivered +=
                 self.advance_one(("comment".to_string(), make_source_change_edit(old, new)));

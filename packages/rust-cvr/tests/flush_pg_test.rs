@@ -42,7 +42,7 @@ const TASK_ID: &str = "flush-task";
 fn row_id_from_json(v: &Value) -> RowID {
     RowID {
         schema: v["schema"].as_str().unwrap().to_string(),
-        table: v["table"].as_str().unwrap().to_string(),
+        table: v["table"].as_str().unwrap().into(),
         row_key: v["rowKey"].as_object().unwrap().clone(),
     }
 }
@@ -309,7 +309,7 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
         row_key.insert("id".to_string(), Value::Number(i.into()));
         let id = RowID {
             schema: "public".to_string(),
-            table: "issue".to_string(),
+            table: "issue".into(),
             row_key,
         };
         rows.insert(
@@ -533,7 +533,7 @@ async fn write_back_keeps_rows_applied_while_a_flush_transaction_is_in_flight() 
     let record = |id: &str, patch: &str| {
         let row_id = RowID {
             schema: String::new(),
-            table: "t".to_string(),
+            table: "t".into(),
             row_key: serde_json::json!({"id": id}).as_object().unwrap().clone(),
         };
         let rec = RowRecord {
@@ -971,7 +971,7 @@ async fn write_back_coalescing_persists_the_last_write_for_a_repeated_row() {
     let touch = |row_version: &str, patch: &str, refs: Value| {
         let row_id = RowID {
             schema: String::new(),
-            table: "t".to_string(),
+            table: "t".into(),
             row_key: serde_json::json!({"id": "a"}).as_object().unwrap().clone(),
         };
         let rec = RowRecord {

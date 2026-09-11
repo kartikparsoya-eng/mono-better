@@ -3,6 +3,7 @@
 //! records a metric (name, elapsed_ms, query_id) via its MetricsDelegate while
 //! forwarding the change unchanged. The whole operator was untested (triage).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,9 +22,9 @@ use rust_ivm::query::measure_push_operator::{MeasurePushOperator, MetricsDelegat
 fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
-fn id_row(id: &str) -> FxHashMap<String, Value> {
+fn id_row(id: &str) -> RowMap {
     let mut r = FxHashMap::default();
-    r.insert("id".to_string(), str_val(id));
+    r.insert("id".into(), str_val(id));
     r
 }
 fn make_source() -> Rc<RefCell<MemorySource>> {

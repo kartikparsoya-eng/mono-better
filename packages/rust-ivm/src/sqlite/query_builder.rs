@@ -59,7 +59,7 @@ impl From<&Value> for SqlParam {
 /// Port of TS `buildSelectQuery` (query-builder.ts:23).
 pub fn build_select_query(
     table_name: &str,
-    columns: &[String],
+    columns: &[impl AsRef<str>],
     column_types: &HashMap<String, ColumnType>,
     req: &FetchRequest,
     filters: Option<&Condition>,
@@ -90,7 +90,7 @@ pub fn build_select_query(
             // Strings per column, per fetch. Same code path, so the bytes —
             // including the client-observable separator rules above — are
             // unchanged by construction.
-            push_quoted_ident(&mut sql, col);
+            push_quoted_ident(&mut sql, col.as_ref());
         }
     }
     sql.push_str(" FROM ");
@@ -260,7 +260,7 @@ fn gather_start_constraints(
 
         for j in 0..=i {
             if j == i {
-                let val = from.get(i_field).unwrap_or(&Value::Null);
+                let val = from.get(i_field.as_str()).unwrap_or(&Value::Null);
                 let operator = if i_dir == "asc" {
                     if reverse { "<" } else { ">" }
                 } else if reverse {
@@ -279,7 +279,7 @@ fn gather_start_constraints(
                 ));
             } else {
                 let (j_field, _) = &order[j];
-                let val = from.get(j_field).unwrap_or(&Value::Null);
+                let val = from.get(j_field.as_str()).unwrap_or(&Value::Null);
                 let optional = column_is_optional(column_types, j_field);
                 group.push(nullable_aware_equality(
                     j_field,
@@ -297,7 +297,7 @@ fn gather_start_constraints(
     if start.basis == Basis::At {
         let mut group: Vec<String> = Vec::new();
         for (field, _) in order {
-            let val = from.get(field).unwrap_or(&Value::Null);
+            let val = from.get(field.as_str()).unwrap_or(&Value::Null);
             let optional = column_is_optional(column_types, field);
             group.push(nullable_aware_equality(
                 field,
@@ -646,8 +646,8 @@ mod literal_left_tests {
     #[test]
     fn start_constraints_match_typescript_nullable_rules() {
         let mut row = FxHashMap::default();
-        row.insert("optional".to_string(), Value::F64(0.0));
-        row.insert("required".to_string(), Value::F64(0.0));
+        row.insert("optional".into(), Value::F64(0.0));
+        row.insert("required".into(), Value::F64(0.0));
         let start = Start {
             row: Arc::new(row),
             basis: Basis::After,
@@ -688,8 +688,8 @@ mod literal_left_tests {
     #[test]
     fn null_start_constraints_match_typescript_nullable_rules() {
         let mut row = FxHashMap::default();
-        row.insert("optional".to_string(), Value::Null);
-        row.insert("required".to_string(), Value::Null);
+        row.insert("optional".into(), Value::Null);
+        row.insert("required".into(), Value::Null);
         let start = Start {
             row: Arc::new(row),
             basis: Basis::At,

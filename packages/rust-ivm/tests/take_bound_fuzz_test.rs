@@ -128,21 +128,21 @@ fn seed_db(path: &str) {
 fn items_spec(val_optional: bool) -> LiteAndZqlSpec {
     let mut columns = HashMap::new();
     columns.insert(
-        "id".to_string(),
+        "id".into(),
         ColumnSchema {
             r#type: "TEXT".to_string(),
             optional: false,
         },
     );
     columns.insert(
-        "val".to_string(),
+        "val".into(),
         ColumnSchema {
             r#type: "REAL".to_string(),
             optional: val_optional,
         },
     );
     columns.insert(
-        "_0_version".to_string(),
+        "_0_version".into(),
         ColumnSchema {
             r#type: "TEXT".to_string(),
             optional: false,
@@ -161,28 +161,22 @@ fn items_spec(val_optional: bool) -> LiteAndZqlSpec {
 
 fn source_columns(val_optional: bool) -> HashMap<String, ColumnType> {
     let mut c = HashMap::new();
-    c.insert("id".to_string(), ColumnType::String { optional: false });
+    c.insert("id".into(), ColumnType::String { optional: false });
     c.insert(
-        "val".to_string(),
+        "val".into(),
         ColumnType::Number {
             optional: val_optional,
         },
     );
-    c.insert(
-        "_0_version".to_string(),
-        ColumnType::String { optional: false },
-    );
+    c.insert("_0_version".into(), ColumnType::String { optional: false });
     c
 }
 
 fn query_ast(limit: Option<usize>, desc: bool, cursor: Option<Cursor>) -> Ast {
     let start = cursor.map(|c| {
         let mut row = FxHashMap::default();
-        row.insert(
-            "val".to_string(),
-            c.val.map(Value::F64).unwrap_or(Value::Null),
-        );
-        row.insert("id".to_string(), Value::Str(CURSOR_ID.into()));
+        row.insert("val".into(), c.val.map(Value::F64).unwrap_or(Value::Null));
+        row.insert("id".into(), Value::Str(CURSOR_ID.into()));
         Bound {
             row: Arc::new(row),
             exclusive: c.exclusive,

@@ -178,7 +178,12 @@ impl UnionFanIn {
                 for input in &self.inputs {
                     let constraint: Constraint = pk
                         .iter()
-                        .map(|k| (k.clone(), node.row.get(k).cloned().unwrap_or(Value::Null)))
+                        .map(|k| {
+                            (
+                                k.clone(),
+                                node.row.get(k.as_str()).cloned().unwrap_or(Value::Null),
+                            )
+                        })
                         .collect();
 
                     let req = FetchRequest {

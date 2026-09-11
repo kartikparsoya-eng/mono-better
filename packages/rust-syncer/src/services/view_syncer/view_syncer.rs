@@ -6768,7 +6768,7 @@ impl ViewSyncerService {
             };
             let id = RowID {
                 schema: row.schema.clone(),
-                table: row.table.clone(),
+                table: Arc::from(row.table.as_str()),
                 row_key: row_key.clone(),
             };
             let to_version = maybe_version_string(&row.patch_version)
@@ -7884,13 +7884,13 @@ impl ViewSyncerService {
 /// Convert a `rust_ivm` `RowChange` into the `(change_type, query_id, table,
 /// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Rust-only
 /// adapter between the two crates (AGENTS.md rule 5).
-/// The query id and table are borrowed from the `RowChange` (Rust-only,
-/// AGENTS.md rule 5): the processor takes them as `&str`, and the streamer
-/// already allocated them once per row; cloning them here allocated twice more.
+/// The query id is borrowed from the `RowChange` and the table is its shared
+/// `Arc<str>` handle (Rust-only, AGENTS.md rule 5): the processor stores the
+/// table in the `RowID`, so it takes the handle rather than a fresh copy.
 type RowChangeMaps<'a> = (
     RowChangeType,
     &'a str,
-    &'a str,
+    Arc<str>,
     serde_json::Map<String, serde_json::Value>,
     Option<serde_json::Map<String, serde_json::Value>>,
 );
@@ -7956,7 +7956,7 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMap
         }
         m
     });
-    Some((change_type, &*rc.query_id, &*rc.table, row_key, row))
+    Some((change_type, &*rc.query_id, rc.table.clone(), row_key, row))
 }
 
 /// XOR-fold a streamed `RowChange` into a per-query row-set-signature
@@ -8032,10 +8032,10 @@ const ZERO_VERSION_COLUMN: &str = "_0_version";
 fn row_to_contents(row: &rust_ivm::ivm::data::Row) -> serde_json::Value {
     let mut m = serde_json::Map::with_capacity(row.len());
     for (k, v) in row.iter() {
-        if k == ZERO_VERSION_COLUMN {
+        if &**k == ZERO_VERSION_COLUMN {
             continue;
         }
-        m.insert(k.clone(), value_to_serde_json(v));
+        m.insert(k.to_string(), value_to_serde_json(v));
     }
     serde_json::Value::Object(m)
 }

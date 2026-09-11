@@ -31,7 +31,7 @@ use rust_ivm::builder::ast::{
 };
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::change::ChangeType;
-use rust_ivm::ivm::data::{Row, Value, row as make_row};
+use rust_ivm::ivm::data::{Row, RowMap, Value};
 use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::{
@@ -75,17 +75,17 @@ fn rust_value_to_json(v: &Value) -> JsonValue {
 }
 
 fn json_to_row(obj: &serde_json::Map<String, JsonValue>) -> Row {
-    let mut map: FxHashMap<String, Value> = FxHashMap::default();
+    let mut map: RowMap = FxHashMap::default();
     for (k, v) in obj {
-        map.insert(k.clone(), json_to_rust_value(v));
+        map.insert(Arc::from(k.as_str()), json_to_rust_value(v));
     }
-    make_row(map)
+    Arc::new(map)
 }
 
 fn row_to_json(row: &Row) -> JsonValue {
     let mut map = serde_json::Map::new();
     for (k, v) in row.iter() {
-        map.insert(k.clone(), rust_value_to_json(v));
+        map.insert(k.to_string(), rust_value_to_json(v));
     }
     JsonValue::Object(map)
 }
@@ -265,14 +265,14 @@ fn json_to_ast(v: &JsonValue) -> Ast {
 
     let start = v.get("start").map(|s| {
         let row_json = s.get("row").unwrap_or(&JsonValue::Null);
-        let mut map: FxHashMap<String, Value> = FxHashMap::default();
+        let mut map: RowMap = FxHashMap::default();
         if let Some(obj) = row_json.as_object() {
             for (k, val) in obj {
-                map.insert(k.clone(), json_to_rust_value(val));
+                map.insert(Arc::from(k.as_str()), json_to_rust_value(val));
             }
         }
         Bound {
-            row: make_row(map),
+            row: Arc::new(map),
             exclusive: s
                 .get("exclusive")
                 .and_then(|e| e.as_bool())
@@ -496,9 +496,9 @@ fn handle_add_row(state: &mut ServerState, body: &JsonValue) -> Response<std::io
 
     match state.sources.get(&table) {
         Some(source) => {
-            let mut map: FxHashMap<String, Value> = FxHashMap::default();
+            let mut map: RowMap = FxHashMap::default();
             for (k, v) in row_json {
-                map.insert(k.clone(), json_to_rust_value(v));
+                map.insert(Arc::from(k.as_str()), json_to_rust_value(v));
             }
             source.borrow_mut().add_row(map);
             json_response(200, &serde_json::json!({"ok": true}))

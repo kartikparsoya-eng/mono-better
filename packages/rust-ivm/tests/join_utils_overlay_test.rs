@@ -31,7 +31,7 @@ use rustc_hash::FxHashMap;
 fn row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
     let mut r = FxHashMap::default();
     for (k, v) in pairs {
-        r.insert(k.to_string(), v.clone());
+        r.insert(k.to_string().into(), v.clone());
     }
     Arc::new(r)
 }

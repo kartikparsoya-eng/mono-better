@@ -139,7 +139,7 @@ fn existing_after_adds() -> RowRecordMap {
         .map(|i| {
             let id = RowID {
                 schema: String::new(),
-                table: TABLE.to_string(),
+                table: TABLE.into(),
                 row_key: row_key(i),
             };
             let key = rust_cvr::row_key::row_id_string(&id);
@@ -229,11 +229,14 @@ fn pass(label: &str, n_clients: usize, kind: RowChangeType, existing: &RowRecord
             (row_key(i), r)
         })
         .collect();
+    // The syncer hands over its `RowChange.table` handle; one shared `Arc`
+    // per table, cloned per row.
+    let table: Arc<str> = Arc::from(TABLE);
     measure(label, ROWS, || {
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
         for (key, r) in inputs {
             processor
-                .on_row_change(kind, QUERY, TABLE, key, r, existing)
+                .on_row_change(kind, QUERY, table.clone(), key, r, existing)
                 .expect("on_row_change");
         }
         processor.finish(existing).expect("finish");
@@ -284,11 +287,11 @@ fn clone_density_profile() {
 /// prints the measured value. Lower a ceiling when a change removes more;
 /// never raise one to make a regression pass.
 const CEILINGS: &[(&str, f64)] = &[
-    ("adds/1 client", 26.5),
-    ("adds/3 clients", 28.8),
-    ("edits/1 client", 39.7),
-    ("edits/3 clients", 50.8),
-    ("removes/1 client", 38.6),
+    ("adds/1 client", 23.2),
+    ("adds/3 clients", 23.3),
+    ("edits/1 client", 35.3),
+    ("edits/3 clients", 44.2),
+    ("removes/1 client", 34.2),
 ];
 
 #[test]

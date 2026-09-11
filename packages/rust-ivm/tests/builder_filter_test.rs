@@ -2,6 +2,7 @@
 //!
 //! Tests: createPredicate with null, IS/IS NOT, basic operators, like, and/or/empty/nested.
 
+use rust_ivm::ivm::data::RowMap;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -11,9 +12,9 @@ use rust_ivm::builder::like::get_like_predicate;
 use rust_ivm::ivm::data::{Row, Value};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -398,6 +399,6 @@ fn test_like_null_lhs_is_false_before_the_assert() {
     });
     let pred = create_predicate(&cond);
     let mut row = FxHashMap::default();
-    row.insert("name".to_string(), Value::Null);
+    row.insert("name".into(), Value::Null);
     assert!(!pred(&Arc::new(row)));
 }

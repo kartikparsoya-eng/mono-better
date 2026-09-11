@@ -9,12 +9,11 @@
 //! EXISTS=0 before the membership indexes, and never re-triggered), that is the
 //! persistent live-advance under-emission the same-advance matrix caught.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -37,11 +36,11 @@ fn str_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<RefCell<MemorySource
     )))
 }
 
-fn row(pairs: &[(&str, &str)]) -> Arc<FxHashMap<String, Value>> {
+fn row(pairs: &[(&str, &str)]) -> Arc<RowMap> {
     Arc::new(
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), Value::Str((*v).into())))
+            .map(|(k, v)| (k.to_string().into(), Value::Str((*v).into())))
             .collect(),
     )
 }

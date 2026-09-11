@@ -7,6 +7,7 @@
 //! in an inconsistent operator state, so it must be discarded rather than left
 //! registered for a later advance to run on.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,17 +22,17 @@ use rust_ivm::ivm::schema::ColumnType;
 
 fn make_source(name: &str, n_rows: usize) -> Rc<RefCell<MemorySource>> {
     let mut columns: HashMap<String, ColumnType> = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("v".to_string(), ColumnType::Number { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("v".into(), ColumnType::Number { optional: false });
     let src = Rc::new(RefCell::new(MemorySource::new(
         name,
         columns,
         vec!["id".to_string()],
     )));
     for i in 0..n_rows {
-        let mut row: FxHashMap<String, Value> = FxHashMap::default();
-        row.insert("id".to_string(), Value::F64(i as f64));
-        row.insert("v".to_string(), Value::F64((i * 10) as f64));
+        let mut row: RowMap = FxHashMap::default();
+        row.insert("id".into(), Value::F64(i as f64));
+        row.insert("v".into(), Value::F64((i * 10) as f64));
         src.borrow_mut().add_row(row);
     }
     src

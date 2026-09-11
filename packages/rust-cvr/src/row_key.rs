@@ -253,7 +253,7 @@ mod tests {
         let row_key = row_key_json.as_object().unwrap().clone();
         RowID {
             schema: schema.to_string(),
-            table: table.to_string(),
+            table: table.into(),
             row_key,
         }
     }
@@ -386,7 +386,7 @@ mod tests {
             let entries = normalized_key_order(&id.row_key);
             let mut arr = Vec::with_capacity(2 + entries.len() * 2);
             arr.push(Value::String(id.schema.clone()));
-            arr.push(Value::String(id.table.clone()));
+            arr.push(Value::String(id.table.to_string()));
             for (k, v) in entries {
                 arr.push(Value::String(k.clone()));
                 arr.push(v.clone());

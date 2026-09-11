@@ -8,6 +8,7 @@
 //! fetch must still reflect every prior push in the same advance: adds appear,
 //! edits show the NEW value, and removes disappear.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,17 +35,17 @@ fn clean_db(path: &str) {
     }
 }
 
-fn row(id: i64, name: &str) -> Arc<FxHashMap<String, Value>> {
+fn row(id: i64, name: &str) -> Arc<RowMap> {
     let mut m = FxHashMap::default();
-    m.insert("id".to_string(), Value::F64(id as f64));
-    m.insert("name".to_string(), Value::Str(name.into()));
+    m.insert("id".into(), Value::F64(id as f64));
+    m.insert("name".into(), Value::Str(name.into()));
     Arc::new(m)
 }
 
 fn columns() -> HashMap<String, ColumnType> {
     let mut c = HashMap::new();
-    c.insert("id".to_string(), ColumnType::Number { optional: false });
-    c.insert("name".to_string(), ColumnType::String { optional: false });
+    c.insert("id".into(), ColumnType::Number { optional: false });
+    c.insert("name".into(), ColumnType::String { optional: false });
     c
 }
 

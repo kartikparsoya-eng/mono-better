@@ -242,19 +242,16 @@ fn checkpoint_truncate(conn: &rusqlite::Connection) -> (i64, i64, i64) {
 
 fn specs() -> HashMap<String, HashMap<String, ColumnType>> {
     let mut cols = HashMap::new();
-    cols.insert("id".to_string(), ColumnType::Number { optional: false });
-    cols.insert(
-        "parent_id".to_string(),
-        ColumnType::Number { optional: false },
-    );
+    cols.insert("id".into(), ColumnType::Number { optional: false });
+    cols.insert("parent_id".into(), ColumnType::Number { optional: false });
     let mut t = HashMap::new();
-    t.insert("parent".to_string(), cols.clone());
-    t.insert("child_a".to_string(), cols.clone());
-    t.insert("child_b".to_string(), cols.clone());
-    t.insert("grandchild".to_string(), {
+    t.insert("parent".into(), cols.clone());
+    t.insert("child_a".into(), cols.clone());
+    t.insert("child_b".into(), cols.clone());
+    t.insert("grandchild".into(), {
         let mut g = HashMap::new();
-        g.insert("id".to_string(), ColumnType::Number { optional: false });
-        g.insert("a_id".to_string(), ColumnType::Number { optional: false });
+        g.insert("id".into(), ColumnType::Number { optional: false });
+        g.insert("a_id".into(), ColumnType::Number { optional: false });
         g
     });
     t

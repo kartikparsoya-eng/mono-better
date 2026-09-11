@@ -5,6 +5,7 @@
 //! `hydrate-empty` cases 1:1 (same seed rows, same sort `[['b','asc'],
 //! ['a','asc']]`, same expected entries + refCounts + callCounts).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -26,10 +27,10 @@ fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
 
-fn row(a: f64, b: &str) -> FxHashMap<String, Value> {
+fn row(a: f64, b: &str) -> RowMap {
     let mut r = FxHashMap::default();
-    r.insert("a".to_string(), num(a));
-    r.insert("b".to_string(), str_val(b));
+    r.insert("a".into(), num(a));
+    r.insert("b".into(), str_val(b));
     r
 }
 

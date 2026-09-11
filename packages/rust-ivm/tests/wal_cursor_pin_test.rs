@@ -49,8 +49,8 @@ fn checkpoint_truncate(conn: &rusqlite::Connection) -> (i64, i64, i64) {
 
 fn columns() -> HashMap<String, ColumnType> {
     let mut c = HashMap::new();
-    c.insert("id".to_string(), ColumnType::Number { optional: false });
-    c.insert("name".to_string(), ColumnType::String { optional: false });
+    c.insert("id".into(), ColumnType::Number { optional: false });
+    c.insert("name".into(), ColumnType::String { optional: false });
     c
 }
 

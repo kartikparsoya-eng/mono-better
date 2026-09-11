@@ -19,13 +19,12 @@
 //!
 //! Deterministic, single-threaded. Run: cargo test --test source_drift_teardown_test
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::memory_source::MemorySource;
@@ -33,9 +32,9 @@ use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::SourceChange;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -49,7 +48,7 @@ fn num(n: f64) -> Value {
 /// source.rs:379-400, which runs BEFORE any pipeline mutation.
 fn seeded_source() -> Rc<RefCell<MemorySource>> {
     let mut cols: HashMap<String, ColumnType> = HashMap::new();
-    cols.insert("id".to_string(), ColumnType::Number { optional: false });
+    cols.insert("id".into(), ColumnType::Number { optional: false });
     let source = Rc::new(RefCell::new(MemorySource::new(
         "users",
         cols,

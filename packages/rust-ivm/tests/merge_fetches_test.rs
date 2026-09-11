@@ -5,6 +5,7 @@
 //! the TS twin, so this pins it directly: union (not union-all) semantics —
 //! duplicates across branches collapse to one, output stays in comparator order.
 
+use rust_ivm::ivm::data::RowMap;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -13,8 +14,8 @@ use rust_ivm::ivm::data::{Node, SortOrder, Value, make_comparator};
 use rust_ivm::ivm::union_fan_in::merge_fetches;
 
 fn node(id: &str) -> Node {
-    let mut row: FxHashMap<String, Value> = FxHashMap::default();
-    row.insert("id".to_string(), Value::Str(Arc::from(id)));
+    let mut row: RowMap = FxHashMap::default();
+    row.insert("id".into(), Value::Str(Arc::from(id)));
     Node::new(Arc::new(row))
 }
 

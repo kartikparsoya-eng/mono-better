@@ -41,7 +41,7 @@ mod tests {
         let row_key = row_key_json.as_object().unwrap().clone();
         RowID {
             schema: schema.to_string(),
-            table: table.to_string(),
+            table: table.into(),
             row_key,
         }
     }

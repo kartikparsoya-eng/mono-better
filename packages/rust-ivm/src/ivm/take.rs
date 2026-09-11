@@ -14,11 +14,9 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change};
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key};
-use crate::ivm::data::{Comparator, Node, Row, Value, compare_values};
+use crate::ivm::data::{Comparator, Node, Row, RowMap, Value, compare_values};
 use crate::ivm::operator::{
     Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
 };
@@ -251,7 +249,7 @@ impl Take {
         if let Some(partition_key) = &self.partition_key {
             for col in partition_key {
                 let value = match (row, constraint) {
-                    (Some(row), _) => Some(row.get(col).unwrap_or(&Value::Null)),
+                    (Some(row), _) => Some(row.get(col.as_str()).unwrap_or(&Value::Null)),
                     (None, Some(c)) => Some(c.get(col).unwrap_or(&Value::Null)),
                     (None, None) => None,
                 };
@@ -282,7 +280,12 @@ impl Take {
             .and_then(|s| s.bound.clone());
         let constraint = self.partition_key.as_ref().map(|pk| {
             pk.iter()
-                .map(|k| (k.clone(), row.get(k).cloned().unwrap_or(Value::Null)))
+                .map(|k| {
+                    (
+                        k.clone(),
+                        row.get(k.as_str()).cloned().unwrap_or(Value::Null),
+                    )
+                })
                 .collect::<Constraint>()
         });
 
@@ -1003,7 +1006,7 @@ impl Input for Take {
                         }
                         let mut key = String::new();
                         for col in &partition_key {
-                            let value = node.row.get(col).unwrap_or(&Value::Null);
+                            let value = node.row.get(col.as_str()).unwrap_or(&Value::Null);
                             let _ = write!(
                                 key,
                                 "{}={};",
@@ -1060,19 +1063,17 @@ impl Output for TakeOutput {
 /// Make a partition key comparator.
 fn make_partition_key_comparator(partition_key: &PartitionKey) -> Comparator {
     let pk = partition_key.clone();
-    Rc::new(
-        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-            for col in &pk {
-                let av = a.get(col).unwrap_or(&Value::Null);
-                let bv = b.get(col).unwrap_or(&Value::Null);
-                let cmp = compare_values(av, bv);
-                if cmp != CmpOrdering::Equal {
-                    return cmp;
-                }
+    Rc::new(move |a: &RowMap, b: &RowMap| {
+        for col in &pk {
+            let av = a.get(col.as_str()).unwrap_or(&Value::Null);
+            let bv = b.get(col.as_str()).unwrap_or(&Value::Null);
+            let cmp = compare_values(av, bv);
+            if cmp != CmpOrdering::Equal {
+                return cmp;
             }
-            CmpOrdering::Equal
-        },
-    )
+        }
+        CmpOrdering::Equal
+    })
 }
 
 /// Check if a constraint matches a partition key.
@@ -1117,8 +1118,8 @@ mod bound_none_edit_tests {
 
     fn mk_row(id: f64, v: f64) -> Row {
         let mut m = FxHashMap::default();
-        m.insert("id".to_string(), Value::F64(id));
-        m.insert("v".to_string(), Value::F64(v));
+        m.insert("id".into(), Value::F64(id));
+        m.insert("v".into(), Value::F64(v));
         Arc::new(m)
     }
 

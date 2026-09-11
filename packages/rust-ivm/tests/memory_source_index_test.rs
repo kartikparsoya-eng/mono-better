@@ -22,6 +22,7 @@
 //! predicate — and these fail. Restoring the full `.iter().position(..)` scan
 //! also keeps them green, which is the point: they guard the refactor.
 
+use rust_ivm::ivm::data::RowMap;
 use std::collections::HashMap;
 
 use rustc_hash::FxHashMap;
@@ -40,10 +41,10 @@ fn source() -> MemorySource {
     MemorySource::new("t", columns, vec!["id".to_string()])
 }
 
-fn row(id: &str, name: &str) -> FxHashMap<String, Value> {
-    let mut m: FxHashMap<String, Value> = FxHashMap::default();
-    m.insert("id".to_string(), Value::Str(id.into()));
-    m.insert("name".to_string(), Value::Str(name.into()));
+fn row(id: &str, name: &str) -> RowMap {
+    let mut m: RowMap = FxHashMap::default();
+    m.insert("id".into(), Value::Str(id.into()));
+    m.insert("name".into(), Value::Str(name.into()));
     m
 }
 

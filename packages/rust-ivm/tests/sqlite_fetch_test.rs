@@ -84,11 +84,11 @@ fn create_test_db(path: &str) {
 
 fn make_columns() -> HashMap<String, ColumnType> {
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
-    columns.insert("email".to_string(), ColumnType::String { optional: false });
-    columns.insert("age".to_string(), ColumnType::Number { optional: false });
-    columns.insert("active".to_string(), ColumnType::Number { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
+    columns.insert("email".into(), ColumnType::String { optional: false });
+    columns.insert("age".into(), ColumnType::Number { optional: false });
+    columns.insert("active".into(), ColumnType::Number { optional: false });
     columns
 }
 
@@ -159,7 +159,7 @@ fn test_sqlite_fetch_with_constraint() {
     source.borrow_mut().set_db_path(db_path);
 
     let mut constraint = rustc_hash::FxHashMap::default();
-    constraint.insert("active".to_string(), Value::F64(1.0));
+    constraint.insert("active".into(), Value::F64(1.0));
 
     let req = rust_ivm::ivm::operator::FetchRequest {
         constraint: Some(constraint),
@@ -286,14 +286,11 @@ fn test_sqlite_engine_advance_add() {
 
     // Advance with a new user
     let new_row = Arc::new(rustc_hash::FxHashMap::from_iter([
-        ("id".to_string(), Value::F64(6.0)),
-        ("name".to_string(), Value::Str(Arc::from("Frank"))),
-        (
-            "email".to_string(),
-            Value::Str(Arc::from("frank@example.com")),
-        ),
-        ("age".to_string(), Value::F64(50.0)),
-        ("active".to_string(), Value::F64(1.0)),
+        ("id".into(), Value::F64(6.0)),
+        ("name".into(), Value::Str(Arc::from("Frank"))),
+        ("email".into(), Value::Str(Arc::from("frank@example.com"))),
+        ("age".into(), Value::F64(50.0)),
+        ("active".into(), Value::F64(1.0)),
     ]));
 
     let changes = engine.advance(&[("users".to_string(), make_source_change_add(new_row))]);
@@ -335,24 +332,18 @@ fn test_sqlite_engine_advance_edit() {
     }]);
 
     let old_row = Arc::new(rustc_hash::FxHashMap::from_iter([
-        ("id".to_string(), Value::F64(1.0)),
-        ("name".to_string(), Value::Str(Arc::from("Alice"))),
-        (
-            "email".to_string(),
-            Value::Str(Arc::from("alice@example.com")),
-        ),
-        ("age".to_string(), Value::F64(30.0)),
-        ("active".to_string(), Value::F64(1.0)),
+        ("id".into(), Value::F64(1.0)),
+        ("name".into(), Value::Str(Arc::from("Alice"))),
+        ("email".into(), Value::Str(Arc::from("alice@example.com"))),
+        ("age".into(), Value::F64(30.0)),
+        ("active".into(), Value::F64(1.0)),
     ]));
     let new_row = Arc::new(rustc_hash::FxHashMap::from_iter([
-        ("id".to_string(), Value::F64(1.0)),
-        ("name".to_string(), Value::Str(Arc::from("Alice Updated"))),
-        (
-            "email".to_string(),
-            Value::Str(Arc::from("alice@example.com")),
-        ),
-        ("age".to_string(), Value::F64(31.0)),
-        ("active".to_string(), Value::F64(1.0)),
+        ("id".into(), Value::F64(1.0)),
+        ("name".into(), Value::Str(Arc::from("Alice Updated"))),
+        ("email".into(), Value::Str(Arc::from("alice@example.com"))),
+        ("age".into(), Value::F64(31.0)),
+        ("active".into(), Value::F64(1.0)),
     ]));
 
     let changes = engine.advance(&[(
@@ -395,14 +386,11 @@ fn test_sqlite_engine_advance_remove() {
     }]);
 
     let remove_row = Arc::new(rustc_hash::FxHashMap::from_iter([
-        ("id".to_string(), Value::F64(3.0)),
-        ("name".to_string(), Value::Str(Arc::from("Charlie"))),
-        (
-            "email".to_string(),
-            Value::Str(Arc::from("charlie@example.com")),
-        ),
-        ("age".to_string(), Value::F64(35.0)),
-        ("active".to_string(), Value::F64(0.0)),
+        ("id".into(), Value::F64(3.0)),
+        ("name".into(), Value::Str(Arc::from("Charlie"))),
+        ("email".into(), Value::Str(Arc::from("charlie@example.com"))),
+        ("age".into(), Value::F64(35.0)),
+        ("active".into(), Value::F64(0.0)),
     ]));
 
     let changes = engine.advance(&[("users".to_string(), make_source_change_remove(remove_row))]);
@@ -533,11 +521,8 @@ fn test_sqlite_row_set_signature() {
     // value, including a wrong one — so pin the exact value, recomputed here
     // from the fixture rows independently of the fold under test.
     let unit = |table: &str, id: i64| {
-        let key: rust_ivm::ivm::data::Row = Arc::new(
-            [("id".to_string(), Value::F64(id as f64))]
-                .into_iter()
-                .collect(),
-        );
+        let key: rust_ivm::ivm::data::Row =
+            Arc::new([("id".into(), Value::F64(id as f64))].into_iter().collect());
         rust_ivm::row_signature_unit(table, &key)
     };
     let expected_users = (1..=5).fold(0u64, |acc, id| acc ^ unit("users", id));

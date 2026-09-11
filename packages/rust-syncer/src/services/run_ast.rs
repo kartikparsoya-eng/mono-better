@@ -90,7 +90,7 @@ pub(crate) fn ivm_value_to_json(v: &Value) -> serde_json::Value {
 pub(crate) fn ivm_row_to_json(row: &Row) -> serde_json::Value {
     let mut map = serde_json::Map::with_capacity(row.len());
     for (k, v) in row.iter() {
-        map.insert(k.clone(), ivm_value_to_json(v));
+        map.insert(k.to_string(), ivm_value_to_json(v));
     }
     serde_json::Value::Object(map)
 }

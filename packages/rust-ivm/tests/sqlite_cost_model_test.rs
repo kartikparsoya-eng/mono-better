@@ -78,16 +78,16 @@ fn specs() -> HashMap<String, HashMap<String, ColumnType>> {
     HashMap::from([
         (
             "parent".to_string(),
-            HashMap::from([("id".to_string(), n(false)), ("name".to_string(), s(true))]),
+            HashMap::from([("id".to_string(), n(false)), ("name".into(), s(true))]),
         ),
         (
             "child".to_string(),
             HashMap::from([
                 ("id".to_string(), n(false)),
                 ("parent_id".to_string(), n(true)),
-                ("kind".to_string(), s(true)),
-                ("email".to_string(), s(true)),
-                ("unsorted".to_string(), s(true)),
+                ("kind".into(), s(true)),
+                ("email".into(), s(true)),
+                ("unsorted".into(), s(true)),
             ]),
         ),
     ])
@@ -186,7 +186,7 @@ fn constraint_is_estimated_as_indexed_seek() {
     let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
 
     let mut constraint = rust_ivm::planner::PlannerConstraint::default();
-    constraint.insert("parent_id".to_string(), None);
+    constraint.insert("parent_id".into(), None);
 
     let scan = model("child", &[], None, None);
     let seek = model("child", &[], None, Some(&constraint));

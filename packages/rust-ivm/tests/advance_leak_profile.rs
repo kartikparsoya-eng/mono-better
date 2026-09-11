@@ -7,12 +7,11 @@
 //! Run: cargo test -p rust-ivm --test advance_leak_profile -- --nocapture --ignored
 //! dhat writes dhat-heap.json (view at https://nnethercote.github.io/dh_view/dh_view.html)
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{
     Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery, SimpleCondition, ValuePosition,
@@ -39,17 +38,17 @@ fn str_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<RefCell<MemorySource
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, &str)]) {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), Value::Str((*v).into())))
+        .map(|(k, v)| (k.to_string().into(), Value::Str((*v).into())))
         .collect();
     source.borrow_mut().add_row(map);
 }
 
 fn make_row(pairs: &[(&str, &str)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), Value::Str((*v).into())))
+        .map(|(k, v)| (k.to_string().into(), Value::Str((*v).into())))
         .collect();
     Arc::new(map)
 }

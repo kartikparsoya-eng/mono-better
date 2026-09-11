@@ -515,7 +515,7 @@ fn test_received_new_row() {
 
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let id_str = crate::row_key::row_id_string(&id);
@@ -562,7 +562,7 @@ fn test_received_no_bump_changed_row_returns_err_not_panic() {
 
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let id_str = crate::row_key::row_id_string(&id);
@@ -617,7 +617,7 @@ fn test_received_unref_row() {
 
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let id_str = crate::row_key::row_id_string(&id);
@@ -674,7 +674,7 @@ fn test_received_null_then_reref_drops_stale_existing_refs() {
 
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let id_str = crate::row_key::row_id_string(&id);
@@ -770,7 +770,7 @@ fn test_unref_empty_row_version_bumps_patch_version() {
 
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let id_str = crate::row_key::row_id_string(&id);
@@ -838,7 +838,7 @@ fn test_delete_unreferenced_rows() {
     // Existing row referenced by the removed query
     let id = RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
     };
     let existing = vec![RowRecord {
@@ -997,7 +997,7 @@ fn test_received_null_previously_received_entry_sends_no_del() {
     let make_rows = || {
         let id = RowID {
             schema: "s".to_string(),
-            table: "t".to_string(),
+            table: "t".into(),
             row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
         };
         let id_str = crate::row_key::row_id_string(&id);

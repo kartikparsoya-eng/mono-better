@@ -1,6 +1,7 @@
 //! Tests for UnionFanIn — port of TS `union-fan-in.test.ts` (v1.7.0).
 //! Tests schema creation, fetch merge (sorted + dedup), and push propagation.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -36,9 +37,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }
@@ -121,7 +122,7 @@ fn mock_input(schema: SourceSchema, data: Vec<Node>) -> (Shared<dyn Input>, Rc<R
 
 fn make_node(id: &str) -> Node {
     let mut row = FxHashMap::default();
-    row.insert("id".to_string(), str_val(id));
+    row.insert("id".into(), str_val(id));
     Node::new(Arc::new(row))
 }
 
@@ -456,7 +457,7 @@ fn test_fetch_with_constraint() {
     ufi.borrow_mut().add_input(input2);
 
     let mut constraint = rust_ivm::ivm::constraint::Constraint::default();
-    constraint.insert("id".to_string(), str_val("b"));
+    constraint.insert("id".into(), str_val("b"));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -567,7 +568,7 @@ fn test_relationship_merging_from_inputs() {
     );
     input1_schema
         .relationships
-        .insert("rel1".to_string(), child_schema.clone());
+        .insert("rel1".into(), child_schema.clone());
     input1_schema.relationship_order.push("rel1".to_string());
 
     let mut input2_schema = make_schema(
@@ -577,7 +578,7 @@ fn test_relationship_merging_from_inputs() {
     );
     input2_schema
         .relationships
-        .insert("rel2".to_string(), child_schema);
+        .insert("rel2".into(), child_schema);
     input2_schema.relationship_order.push("rel2".to_string());
 
     let (input1, _) = mock_input(input1_schema, vec![]);
@@ -614,7 +615,7 @@ fn test_relationship_conflict() {
     );
     input1_schema
         .relationships
-        .insert("sharedRel".to_string(), child_schema.clone());
+        .insert("sharedRel".into(), child_schema.clone());
     input1_schema
         .relationship_order
         .push("sharedRel".to_string());
@@ -626,7 +627,7 @@ fn test_relationship_conflict() {
     );
     input2_schema
         .relationships
-        .insert("sharedRel".to_string(), child_schema);
+        .insert("sharedRel".into(), child_schema);
     input2_schema
         .relationship_order
         .push("sharedRel".to_string());

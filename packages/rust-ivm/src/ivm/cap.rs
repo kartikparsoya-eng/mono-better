@@ -152,7 +152,7 @@ impl Cap {
             (Some(pk), Some(row), _) => {
                 let mut parts = Vec::new();
                 for col in pk {
-                    let v = row.get(col).unwrap_or(&Value::Null);
+                    let v = row.get(col.as_str()).unwrap_or(&Value::Null);
                     parts.push(value_to_string(v));
                 }
                 format!("[\"cap\",{}]", parts.join(","))
@@ -173,7 +173,7 @@ impl Cap {
         let parts: Vec<String> = self
             .primary_key
             .iter()
-            .map(|k| value_to_string(row.get(k).unwrap_or(&Value::Null)))
+            .map(|k| value_to_string(row.get(k.as_str()).unwrap_or(&Value::Null)))
             .collect();
         format!("[{}]", parts.join(","))
     }
@@ -232,7 +232,7 @@ impl Cap {
                         .iter()
                         .map(|k| {
                             crate::ivm::cap::value_to_string(
-                                node.row.get(k).unwrap_or(&Value::Null),
+                                node.row.get(k.as_str()).unwrap_or(&Value::Null),
                             )
                         })
                         .collect();
@@ -359,7 +359,7 @@ impl Output for CapOutput {
                     assert!(
                         pk_cols
                             .iter()
-                            .all(|c| old_node.row.get(c) == node.row.get(c)),
+                            .all(|c| old_node.row.get(c.as_str()) == node.row.get(c.as_str())),
                         "Unexpected change of partition key"
                     );
                 }
@@ -456,7 +456,7 @@ impl Output for CapOutput {
                         for col in pk_cols {
                             c.insert(
                                 col.clone(),
-                                node.row.get(col).cloned().unwrap_or(Value::Null),
+                                node.row.get(col.as_str()).cloned().unwrap_or(Value::Null),
                             );
                         }
                         c

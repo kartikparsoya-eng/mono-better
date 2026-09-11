@@ -3,6 +3,7 @@
 //! Tests: take, first.
 
 use rust_ivm::ivm::data::Node;
+use rust_ivm::ivm::data::RowMap;
 use rust_ivm::ivm::stream::from_vec;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -16,8 +17,8 @@ fn node_stream(vals: &[i64]) -> Box<dyn Iterator<Item = Node>> {
     let nodes: Vec<Node> = vals
         .iter()
         .map(|v| {
-            let mut m: FxHashMap<String, rust_ivm::ivm::data::Value> = FxHashMap::default();
-            m.insert("n".to_string(), rust_ivm::ivm::data::Value::F64(*v as f64));
+            let mut m: RowMap = FxHashMap::default();
+            m.insert("n".into(), rust_ivm::ivm::data::Value::F64(*v as f64));
             Node::new(Arc::new(m))
         })
         .collect();

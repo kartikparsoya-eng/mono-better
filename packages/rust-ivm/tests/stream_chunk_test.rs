@@ -3,17 +3,18 @@
 //! bounded frame size, query-switch flushing.
 
 use rust_ivm::ivm::change::ChangeType;
+use rust_ivm::ivm::data::RowMap;
 use rust_ivm::ivm::data::Value;
 use rust_ivm::streamer::{Chunker, CollectSink, RowChange, StreamFrame};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 fn make_row_change(qid: &str, table: &str, val: f64) -> RowChange {
-    let mut key: FxHashMap<String, Value> = FxHashMap::default();
-    key.insert("id".to_string(), Value::F64(val));
-    let mut row: FxHashMap<String, Value> = FxHashMap::default();
-    row.insert("id".to_string(), Value::F64(val));
-    row.insert("name".to_string(), Value::Str(Arc::from("test")));
+    let mut key: RowMap = FxHashMap::default();
+    key.insert("id".into(), Value::F64(val));
+    let mut row: RowMap = FxHashMap::default();
+    row.insert("id".into(), Value::F64(val));
+    row.insert("name".into(), Value::Str(Arc::from("test")));
     RowChange {
         change_type: ChangeType::Add,
         query_id: qid.into(),

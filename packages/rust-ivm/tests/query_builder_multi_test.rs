@@ -23,11 +23,11 @@ fn required_columns(columns: &[String]) -> HashMap<String, ColumnType> {
 #[test]
 fn test_multi_constraints_single_column_in_list() {
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), str_val("i1"));
+    mc1.insert("id".into(), str_val("i1"));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), str_val("i2"));
+    mc2.insert("id".into(), str_val("i2"));
     let mut mc3 = Constraint::default();
-    mc3.insert("id".to_string(), str_val("i3"));
+    mc3.insert("id".into(), str_val("i3"));
 
     let mc: MultiConstraint = vec![mc1, mc2, mc3];
 
@@ -57,11 +57,11 @@ fn test_multi_constraints_single_column_in_list() {
 #[test]
 fn test_multi_constraints_compound_key_values() {
     let mut mc1 = Constraint::default();
-    mc1.insert("a".to_string(), str_val("x"));
-    mc1.insert("b".to_string(), Value::F64(1.0));
+    mc1.insert("a".into(), str_val("x"));
+    mc1.insert("b".into(), Value::F64(1.0));
     let mut mc2 = Constraint::default();
-    mc2.insert("a".to_string(), str_val("y"));
-    mc2.insert("b".to_string(), Value::F64(2.0));
+    mc2.insert("a".into(), str_val("y"));
+    mc2.insert("b".into(), Value::F64(2.0));
 
     let mc: MultiConstraint = vec![mc1, mc2];
 
@@ -95,19 +95,19 @@ fn test_multi_constraints_compound_key_values() {
 #[test]
 fn test_multi_constraints_with_constraint_and_start_and_reverse() {
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), str_val("i1"));
+    mc1.insert("id".into(), str_val("i1"));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), str_val("i2"));
+    mc2.insert("id".into(), str_val("i2"));
     let mut mc3 = Constraint::default();
-    mc3.insert("id".to_string(), str_val("i3"));
+    mc3.insert("id".into(), str_val("i3"));
 
     let mc: MultiConstraint = vec![mc1, mc2, mc3];
 
     let mut constraint = Constraint::default();
-    constraint.insert("org".to_string(), str_val("acme"));
+    constraint.insert("org".into(), str_val("acme"));
 
     let mut start_row = rustc_hash::FxHashMap::default();
-    start_row.insert("rank".to_string(), Value::F64(100.0));
+    start_row.insert("rank".into(), Value::F64(100.0));
 
     let req = FetchRequest {
         constraint: Some(constraint),
@@ -158,14 +158,14 @@ fn test_multi_constraints_with_constraint_and_start_and_reverse() {
 #[test]
 fn test_multi_constraints_multiple_independent_lists() {
     let mut mc1a = Constraint::default();
-    mc1a.insert("id".to_string(), str_val("i1"));
+    mc1a.insert("id".into(), str_val("i1"));
     let mut mc1b = Constraint::default();
-    mc1b.insert("id".to_string(), str_val("i2"));
+    mc1b.insert("id".into(), str_val("i2"));
 
     let mut mc2a = Constraint::default();
-    mc2a.insert("org".to_string(), str_val("acme"));
+    mc2a.insert("org".into(), str_val("acme"));
     let mut mc2b = Constraint::default();
-    mc2b.insert("org".to_string(), str_val("beta"));
+    mc2b.insert("org".into(), str_val("beta"));
 
     let req = FetchRequest {
         multi_constraints: vec![vec![mc1a, mc1b], vec![mc2a, mc2b]],
@@ -227,9 +227,9 @@ fn test_multi_constraints_empty_skipped() {
 #[test]
 fn test_multi_constraints_no_order() {
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), str_val("i1"));
+    mc1.insert("id".into(), str_val("i1"));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), str_val("i2"));
+    mc2.insert("id".into(), str_val("i2"));
 
     let req = FetchRequest {
         multi_constraints: vec![vec![mc1, mc2]],

@@ -4,20 +4,19 @@
 //! (TS data.ts drainStreams — fully consumes a node's nested relationship
 //! streams).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 use rust_ivm::ivm::data::{Node, SortOrder, Value, drain_streams, make_partial_bound_comparator};
 use rust_ivm::ivm::stream::{RelStream, from_vec};
 
-fn row(pairs: &[(&str, Value)]) -> FxHashMap<String, Value> {
+fn row(pairs: &[(&str, Value)]) -> RowMap {
     pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect()
 }
 

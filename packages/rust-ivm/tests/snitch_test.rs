@@ -4,6 +4,7 @@
 //! `push` messages gated by its `logTypes`, and re-emits fetched nodes + forwards
 //! pushes to its downstream output unchanged.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -23,9 +24,9 @@ fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
 
-fn id_row(id: &str) -> FxHashMap<String, Value> {
+fn id_row(id: &str) -> RowMap {
     let mut r = FxHashMap::default();
-    r.insert("id".to_string(), str_val(id));
+    r.insert("id".into(), str_val(id));
     r
 }
 

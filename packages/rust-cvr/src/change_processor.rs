@@ -8,6 +8,7 @@
 //! `FnMut(&RowChange)` callback — same thread, no FFI boundary.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::client_handler::MultiPoker;
 use crate::client_handler::PatchToVersion;
@@ -108,14 +109,16 @@ impl<'a> ChangeProcessor<'a> {
         &mut self,
         change_type: RowChangeType,
         query_id: &str,
-        table: &str,
+        // Shared with the caller's `RowChange` (an `Arc<str>` in rust-ivm) so
+        // the id carries the handle instead of a copy (rule 5).
+        table: Arc<str>,
         row_key: Map<String, Value>,
         row: Option<Map<String, Value>>,
         existing_rows: &RowRecordMap,
     ) -> Result<(), String> {
         let row_id = RowID {
             schema: String::new(),
-            table: table.to_string(),
+            table,
             row_key,
         };
         let id_str = row_id_string(&row_id);
@@ -443,7 +446,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "hash1",
-                "t",
+                "t".into(),
                 key,
                 Some(row),
                 &existing_rows,
@@ -481,7 +484,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -533,7 +536,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -543,7 +546,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Remove,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 None,
                 &existing_rows,
@@ -601,7 +604,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -611,7 +614,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q2",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -630,7 +633,7 @@ mod tests {
         let key = {
             let row_id = RowID {
                 schema: String::new(),
-                table: "users".to_string(),
+                table: "users".into(),
                 row_key: row_key.clone(),
             };
             row_id_string(&row_id)
@@ -680,7 +683,7 @@ mod tests {
                 .on_row_change(
                     RowChangeType::Add,
                     "q1",
-                    "users",
+                    "users".into(),
                     row_key.clone(),
                     Some(row.clone()),
                     &existing_rows,
@@ -730,7 +733,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -784,7 +787,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Add,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row.clone()),
                 &existing_rows,
@@ -801,7 +804,7 @@ mod tests {
             .on_row_change(
                 RowChangeType::Edit,
                 "q1",
-                "users",
+                "users".into(),
                 row_key.clone(),
                 Some(row2.clone()),
                 &existing_rows,
@@ -817,7 +820,7 @@ mod tests {
         let key = {
             let row_id = RowID {
                 schema: String::new(),
-                table: "users".to_string(),
+                table: "users".into(),
                 row_key: row_key.clone(),
             };
             row_id_string(&row_id)

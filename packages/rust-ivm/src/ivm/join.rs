@@ -450,7 +450,7 @@ pub fn build_join_constraint(
 ) -> Option<Constraint> {
     let mut constraint = Constraint::default();
     for (from, to) in from_key.iter().zip(to_key.iter()) {
-        let val = row.get(from).cloned().unwrap_or(Value::Null);
+        let val = row.get(from.as_str()).cloned().unwrap_or(Value::Null);
         if val.is_null() {
             return None;
         }
@@ -466,8 +466,8 @@ pub fn is_join_match(
     child_key: &CompoundKey,
 ) -> bool {
     for (pk, ck) in parent_key.iter().zip(child_key.iter()) {
-        let pv = parent_row.get(pk).unwrap_or(&Value::Null);
-        let cv = child_row.get(ck).unwrap_or(&Value::Null);
+        let pv = parent_row.get(pk.as_str()).unwrap_or(&Value::Null);
+        let cv = child_row.get(ck.as_str()).unwrap_or(&Value::Null);
         if !values_equal(pv, cv) {
             return false;
         }
@@ -477,8 +477,8 @@ pub fn is_join_match(
 
 pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &CompoundKey) -> bool {
     for k in key {
-        let av = a.get(k).unwrap_or(&Value::Null);
-        let bv = b.get(k).unwrap_or(&Value::Null);
+        let av = a.get(k.as_str()).unwrap_or(&Value::Null);
+        let bv = b.get(k.as_str()).unwrap_or(&Value::Null);
         // TS uses compareValues (null === null → 0, i.e. equal).
         // NOT valuesEqual (which treats null as never equal — that's for joins).
         if compare_values(av, bv) != CmpOrdering::Equal {

@@ -5,6 +5,7 @@
 //! - `relationship` = the name of the relationship in the parent entry
 //! - `format` = the format OF this relationship (singular at top level, nested formats inside)
 
+use rust_ivm::ivm::data::RowMap;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::change::{make_add_change, make_remove_change};
@@ -21,9 +22,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -480,7 +481,7 @@ fn test_view_child_change() {
     let mut format = default_format();
     format
         .relationships
-        .insert("comments".to_string(), default_format());
+        .insert("comments".into(), default_format());
 
     let root = empty_root_entry();
 
@@ -694,7 +695,7 @@ fn test_view_add_with_nested_relationship() {
     let mut format = default_format();
     format
         .relationships
-        .insert("comments".to_string(), default_format());
+        .insert("comments".into(), default_format());
 
     let root = empty_root_entry();
 

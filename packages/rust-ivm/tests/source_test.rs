@@ -2,12 +2,11 @@
 //! Covers: simple fetch, constraint null semantics, fetch-start reverse,
 //! multiConstraints (IN lists), push errors, per-output sorts, JSON type.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::change::Change;
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
@@ -18,9 +17,9 @@ use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::SourceChange;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -42,9 +41,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }
@@ -181,7 +180,7 @@ fn test_constraint_null_semantics() {
 
     // Constraint b=true → rows with a=1, a=3
     let mut c = Constraint::default();
-    c.insert("b".to_string(), bool_val(true));
+    c.insert("b".into(), bool_val(true));
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -191,7 +190,7 @@ fn test_constraint_null_semantics() {
 
     // Constraint b=false → row with a=2
     let mut c = Constraint::default();
-    c.insert("b".to_string(), bool_val(false));
+    c.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -202,7 +201,7 @@ fn test_constraint_null_semantics() {
 
     // Constraint c=1 → row with a=3
     let mut c = Constraint::default();
-    c.insert("c".to_string(), num(1.0));
+    c.insert("c".into(), num(1.0));
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -213,7 +212,7 @@ fn test_constraint_null_semantics() {
 
     // Constraint c=null → no rows (null !== null)
     let mut c = Constraint::default();
-    c.insert("c".to_string(), Value::Null);
+    c.insert("c".into(), Value::Null);
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -223,7 +222,7 @@ fn test_constraint_null_semantics() {
 
     // Constraint c=0 → no rows
     let mut c = Constraint::default();
-    c.insert("c".to_string(), num(0.0));
+    c.insert("c".into(), num(0.0));
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -233,8 +232,8 @@ fn test_constraint_null_semantics() {
 
     // Constraint b=true AND c=1 → row with a=3
     let mut c = Constraint::default();
-    c.insert("b".to_string(), bool_val(true));
-    c.insert("c".to_string(), num(1.0));
+    c.insert("b".into(), bool_val(true));
+    c.insert("c".into(), num(1.0));
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -245,8 +244,8 @@ fn test_constraint_null_semantics() {
 
     // Constraint b=true AND d=null → no rows (null !== null)
     let mut c = Constraint::default();
-    c.insert("b".to_string(), bool_val(true));
-    c.insert("d".to_string(), Value::Null);
+    c.insert("b".into(), bool_val(true));
+    c.insert("d".into(), Value::Null);
     let req = FetchRequest {
         constraint: Some(c),
         ..Default::default()
@@ -337,11 +336,11 @@ fn test_mc_single_key_in_list() {
     let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), num(4.0));
+    mc1.insert("id".into(), num(4.0));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), num(1.0));
+    mc2.insert("id".into(), num(1.0));
     let mut mc3 = Constraint::default();
-    mc3.insert("id".to_string(), num(3.0));
+    mc3.insert("id".into(), num(3.0));
     let mc: MultiConstraint = vec![mc1, mc2, mc3];
 
     let req = FetchRequest {
@@ -362,9 +361,9 @@ fn test_mc_no_matches() {
     let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), num(99.0));
+    mc1.insert("id".into(), num(99.0));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), num(100.0));
+    mc2.insert("id".into(), num(100.0));
     let mc: MultiConstraint = vec![mc1, mc2];
 
     let req = FetchRequest {
@@ -399,12 +398,12 @@ fn test_mc_empty_entry_ignored() {
     let mc2: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(2.0));
+            c.insert("id".into(), num(2.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(4.0));
+            c.insert("id".into(), num(4.0));
             c
         },
     ];
@@ -428,13 +427,13 @@ fn test_mc_two_anded() {
     let mc1: MultiConstraint = (1..=4)
         .map(|i| {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(i as f64));
+            c.insert("id".into(), num(i as f64));
             c
         })
         .collect();
     let mc2: MultiConstraint = {
         let mut c = Constraint::default();
-        c.insert("org".to_string(), s("o-even"));
+        c.insert("org".into(), s("o-even"));
         vec![c]
     };
 
@@ -455,11 +454,11 @@ fn test_mc_with_constraint_anded() {
 
     // active=true AND id IN (1,2,3,4,5) → 1,3,4,5 (excludes 2)
     let mut constraint = Constraint::default();
-    constraint.insert("active".to_string(), bool_val(true));
+    constraint.insert("active".into(), bool_val(true));
     let mc: MultiConstraint = (1..=5)
         .map(|i| {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(i as f64));
+            c.insert("id".into(), num(i as f64));
             c
         })
         .collect();
@@ -490,7 +489,7 @@ fn test_mc_with_reverse() {
         .iter()
         .map(|&i| {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(i as f64));
+            c.insert("id".into(), num(i as f64));
             c
         })
         .collect();
@@ -517,7 +516,7 @@ fn test_mc_with_start_after() {
         .iter()
         .map(|&i| {
             let mut c = Constraint::default();
-            c.insert("id".to_string(), num(i as f64));
+            c.insert("id".into(), num(i as f64));
             c
         })
         .collect();
@@ -543,7 +542,7 @@ fn test_mc_null_entries_never_match() {
 
     let mc: MultiConstraint = vec![{
         let mut c = Constraint::default();
-        c.insert("id".to_string(), Value::Null);
+        c.insert("id".into(), Value::Null);
         c
     }];
 
@@ -579,14 +578,14 @@ fn test_mc_compound_key() {
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(1.0));
-            c.insert("b".to_string(), s("val1"));
+            c.insert("a".into(), num(1.0));
+            c.insert("b".into(), s("val1"));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(3.0));
-            c.insert("b".to_string(), s("val3"));
+            c.insert("a".into(), num(3.0));
+            c.insert("b".into(), s("val3"));
             c
         },
     ];
@@ -825,7 +824,7 @@ fn test_overlay_vs_constraint_c1() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(true));
+    constraint.insert("b".into(), bool_val(true));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -850,7 +849,7 @@ fn test_overlay_vs_constraint_c2() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(true));
+    constraint.insert("b".into(), bool_val(true));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -876,7 +875,7 @@ fn test_overlay_vs_constraint_c3() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(true));
+    constraint.insert("b".into(), bool_val(true));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -903,7 +902,7 @@ fn test_overlay_vs_constraint_c4() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -930,8 +929,8 @@ fn test_overlay_vs_constraint_c5() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("a".to_string(), num(4.0));
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("a".into(), num(4.0));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -963,17 +962,17 @@ fn test_overlay_vs_mc_add_matching() {
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(1.0));
+            c.insert("a".into(), num(1.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(2.0));
+            c.insert("a".into(), num(2.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(3.0));
+            c.insert("a".into(), num(3.0));
             c
         },
     ];
@@ -1003,12 +1002,12 @@ fn test_overlay_vs_mc_add_outside_dropped() {
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(1.0));
+            c.insert("a".into(), num(1.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(4.0));
+            c.insert("a".into(), num(4.0));
             c
         },
     ];
@@ -1039,12 +1038,12 @@ fn test_overlay_vs_mc_remove_matching() {
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(1.0));
+            c.insert("a".into(), num(1.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(2.0));
+            c.insert("a".into(), num(2.0));
             c
         },
     ];
@@ -1074,12 +1073,12 @@ fn test_overlay_vs_mc_edit_remove_in_add_out() {
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(1.0));
+            c.insert("a".into(), num(1.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(5.0));
+            c.insert("a".into(), num(5.0));
             c
         },
     ];
@@ -1110,23 +1109,23 @@ fn test_overlay_vs_mc_two_anded() {
     let mc1: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(3.0));
+            c.insert("a".into(), num(3.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(4.0));
+            c.insert("a".into(), num(4.0));
             c
         },
         {
             let mut c = Constraint::default();
-            c.insert("a".to_string(), num(5.0));
+            c.insert("a".into(), num(5.0));
             c
         },
     ];
     let mc2: MultiConstraint = vec![{
         let mut c = Constraint::default();
-        c.insert("b".to_string(), bool_val(true));
+        c.insert("b".into(), bool_val(true));
         c
     }];
     let req = FetchRequest {
@@ -1191,7 +1190,7 @@ fn test_constraint_c1() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), s("1000"));
+    constraint.insert("b".into(), s("1000"));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1224,7 +1223,7 @@ fn test_constraint_c1_reverse() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), s("1000"));
+    constraint.insert("b".into(), s("1000"));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1251,7 +1250,7 @@ fn test_constraint_c2() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1277,7 +1276,7 @@ fn test_constraint_c2_reverse() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1308,7 +1307,7 @@ fn test_constraint_c3() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1336,7 +1335,7 @@ fn test_constraint_c3_reverse() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1364,7 +1363,7 @@ fn test_constraint_c4() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {
@@ -1389,7 +1388,7 @@ fn test_constraint_c4_reverse() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("b".to_string(), bool_val(false));
+    constraint.insert("b".into(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
         start: Some(Start {

@@ -201,7 +201,7 @@ fn pg_cvr_store_deletes_rows() {
         RowRecord {
             id: RowID {
                 schema: "public".to_string(),
-                table: "issue".to_string(),
+                table: "issue".into(),
                 row_key,
             },
             row_version: "rv1".to_string(),
@@ -960,7 +960,7 @@ fn pg_repro_catchup_from_cg_thread() {
             let rec = RowRecord {
                 id: RowID {
                     schema: "public".to_string(),
-                    table: "issue".to_string(),
+                    table: "issue".into(),
                     row_key: key.clone(),
                 },
                 row_version: "r1".to_string(),
@@ -1090,7 +1090,7 @@ fn pg_repro_failed_flush_does_not_hang() {
             let rec = RowRecord {
                 id: RowID {
                     schema: "public".to_string(),
-                    table: "issue".to_string(),
+                    table: "issue".into(),
                     row_key: key,
                 },
                 row_version: "r1".to_string(),

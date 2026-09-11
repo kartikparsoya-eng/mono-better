@@ -3,6 +3,7 @@
 //! source.ts` (exercised by `memory-source.test.ts`). These accessors were
 //! whole-untested (triage: source.rs get_row L274, all_rows L287, gen_push L360).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,9 +35,9 @@ fn make_source() -> Rc<RefCell<MemorySource>> {
 }
 
 fn add_row(src: &Rc<RefCell<MemorySource>>, id: &str, n: &str) {
-    let mut r: FxHashMap<String, Value> = FxHashMap::default();
-    r.insert("id".to_string(), str_val(id));
-    r.insert("n".to_string(), str_val(n));
+    let mut r: RowMap = FxHashMap::default();
+    r.insert("id".into(), str_val(id));
+    r.insert("n".into(), str_val(n));
     src.borrow_mut().add_row(r);
 }
 
@@ -50,14 +51,14 @@ fn get_row_by_primary_key_hit_and_miss() {
 
     let got = src
         .borrow()
-        .get_row(&[("id".to_string(), str_val("a"))])
+        .get_row(&[("id".into(), str_val("a"))])
         .expect("row a present");
     assert_eq!(got.get("n"), Some(&str_val("alpha")));
 
     // Missing PK => None.
     assert!(
         src.borrow()
-            .get_row(&[("id".to_string(), str_val("zzz"))])
+            .get_row(&[("id".into(), str_val("zzz"))])
             .is_none(),
         "absent primary key returns None"
     );
@@ -73,19 +74,13 @@ fn get_row_requires_all_provided_columns_to_match() {
     // Correct id but wrong n => no match.
     assert!(
         src.borrow()
-            .get_row(&[
-                ("id".to_string(), str_val("a")),
-                ("n".to_string(), str_val("WRONG")),
-            ])
+            .get_row(&[("id".into(), str_val("a")), ("n".into(), str_val("WRONG")),])
             .is_none()
     );
     // Both columns matching => hit.
     assert!(
         src.borrow()
-            .get_row(&[
-                ("id".to_string(), str_val("a")),
-                ("n".to_string(), str_val("alpha")),
-            ])
+            .get_row(&[("id".into(), str_val("a")), ("n".into(), str_val("alpha")),])
             .is_some()
     );
 }
@@ -142,9 +137,9 @@ fn gen_push_applies_change_and_delivers_to_output() {
     let collector: OutputHandle = Rc::new(RefCell::new(Collector { seen: seen.clone() }));
     input.borrow().set_output(collector);
 
-    let mut r: FxHashMap<String, Value> = FxHashMap::default();
-    r.insert("id".to_string(), str_val("x"));
-    r.insert("n".to_string(), str_val("xray"));
+    let mut r: RowMap = FxHashMap::default();
+    r.insert("id".into(), str_val("x"));
+    r.insert("n".into(), str_val("xray"));
     let produced: Vec<Change> = src
         .borrow_mut()
         .gen_push(SourceChange::Add { row: Arc::new(r) });
@@ -160,7 +155,7 @@ fn gen_push_applies_change_and_delivers_to_output() {
     // And the row is now retrievable via get_row.
     let got = src
         .borrow()
-        .get_row(&[("id".to_string(), str_val("x"))])
+        .get_row(&[("id".into(), str_val("x"))])
         .expect("pushed row is present");
     assert_eq!(got.get("n"), Some(&str_val("xray")));
 }

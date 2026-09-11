@@ -52,18 +52,12 @@ fn mutations_source() -> TableSource {
     // `result` column is Postgres JSON → zqlValueType 'json' → ColumnType::Json.
     let mut columns = HashMap::new();
     columns.insert(
-        "clientGroupID".to_string(),
+        "clientGroupID".into(),
         ColumnType::String { optional: false },
     );
-    columns.insert(
-        "clientID".to_string(),
-        ColumnType::String { optional: false },
-    );
-    columns.insert(
-        "mutationID".to_string(),
-        ColumnType::Number { optional: false },
-    );
-    columns.insert("result".to_string(), ColumnType::Json { optional: false });
+    columns.insert("clientID".into(), ColumnType::String { optional: false });
+    columns.insert("mutationID".into(), ColumnType::Number { optional: false });
+    columns.insert("result".into(), ColumnType::Json { optional: false });
 
     TableSource::new(
         Rc::new(RefCell::new(conn)),
@@ -122,9 +116,9 @@ fn untyped_result_column_falls_through_to_string() {
     .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
     // result intentionally NOT typed json (the bug condition)
-    columns.insert("result".to_string(), ColumnType::String { optional: false });
+    columns.insert("result".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(
         Rc::new(RefCell::new(conn)),

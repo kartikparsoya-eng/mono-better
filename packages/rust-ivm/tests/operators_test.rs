@@ -1,11 +1,10 @@
 //! Tests for individual operators — Take, Skip, Cap, Exists, FlippedJoin, FanOut/FanIn.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Bound, Condition, OrderPart, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -15,9 +14,9 @@ use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::make_source_change_edit;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -40,8 +39,8 @@ fn test_take_limit() {
     for i in 1..=5 {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("name".to_string(), Value::Str(format!("user{}", i).into())),
+                ("id".into(), Value::F64(i as f64)),
+                ("name".into(), Value::Str(format!("user{}", i).into())),
             ]
             .into_iter()
             .collect(),
@@ -78,8 +77,8 @@ fn test_skip_pagination() {
     for i in 1..=5 {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("name".to_string(), Value::Str(format!("user{}", i).into())),
+                ("id".into(), Value::F64(i as f64)),
+                ("name".into(), Value::Str(format!("user{}", i).into())),
             ]
             .into_iter()
             .collect(),
@@ -129,8 +128,8 @@ fn test_filter_not_equal() {
     for (id, name) in [(1.0, "Alice"), (2.0, "Bob"), (3.0, "Alice")] {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(id)),
-                ("name".to_string(), Value::Str(name.into())),
+                ("id".into(), Value::F64(id)),
+                ("name".into(), Value::Str(name.into())),
             ]
             .into_iter()
             .collect(),
@@ -180,8 +179,8 @@ fn test_filter_greater_than() {
     for i in 1..=5 {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("age".to_string(), Value::F64((20 + i) as f64)),
+                ("id".into(), Value::F64(i as f64)),
+                ("age".into(), Value::F64((20 + i) as f64)),
             ]
             .into_iter()
             .collect(),
@@ -228,9 +227,9 @@ fn test_filter_and() {
     ] {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(id)),
-                ("name".to_string(), Value::Str(name.into())),
-                ("age".to_string(), Value::F64(age)),
+                ("id".into(), Value::F64(id)),
+                ("name".into(), Value::Str(name.into())),
+                ("age".into(), Value::F64(age)),
             ]
             .into_iter()
             .collect(),
@@ -291,8 +290,8 @@ fn test_filter_or() {
     for (id, name) in [(1.0, "Alice"), (2.0, "Bob"), (3.0, "Carol")] {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(id)),
-                ("name".to_string(), Value::Str(name.into())),
+                ("id".into(), Value::F64(id)),
+                ("name".into(), Value::Str(name.into())),
             ]
             .into_iter()
             .collect(),
@@ -344,8 +343,8 @@ fn test_advance_edit() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(1.0)),
-            ("name".to_string(), Value::Str("Alice".into())),
+            ("id".into(), Value::F64(1.0)),
+            ("name".into(), Value::Str("Alice".into())),
         ]
         .into_iter()
         .collect(),
@@ -388,8 +387,8 @@ fn test_multiple_queries_hydrate() {
     for i in 1..=10 {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("name".to_string(), Value::Str(format!("user{}", i).into())),
+                ("id".into(), Value::F64(i as f64)),
+                ("name".into(), Value::Str(format!("user{}", i).into())),
             ]
             .into_iter()
             .collect(),

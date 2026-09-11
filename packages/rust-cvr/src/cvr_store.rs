@@ -2373,7 +2373,7 @@ mod tests {
         let mut pending = PendingWrites::default();
         let id = RowID {
             schema: "s".to_string(),
-            table: "t".to_string(),
+            table: "t".into(),
             row_key: serde_json::Map::new(),
         };
         let id_str = crate::row_key::row_id_string(&id);
@@ -2401,7 +2401,7 @@ mod tests {
         let mut pending = PendingWrites::default();
         let id = RowID {
             schema: "s".to_string(),
-            table: "t".to_string(),
+            table: "t".into(),
             row_key: serde_json::Map::new(),
         };
         let id_str = crate::row_key::row_id_string(&id);
@@ -2423,7 +2423,7 @@ mod tests {
 
         let existing_id = RowID {
             schema: "public".to_string(),
-            table: "issue".to_string(),
+            table: "issue".into(),
             row_key: serde_json::json!({"id": "1"}).as_object().unwrap().clone(),
         };
         let existing_record = RowRecord {
@@ -2452,7 +2452,7 @@ mod tests {
         // `existing === undefined && !row?.refCounts` prune.
         let absent_id = RowID {
             schema: "public".to_string(),
-            table: "issue".to_string(),
+            table: "issue".into(),
             row_key: serde_json::json!({"id": "ghost"})
                 .as_object()
                 .unwrap()
@@ -2464,7 +2464,7 @@ mod tests {
         store.put_row_record(&RowRecord {
             id: RowID {
                 schema: "public".to_string(),
-                table: "issue".to_string(),
+                table: "issue".into(),
                 row_key: serde_json::json!({"id": "ghost2"})
                     .as_object()
                     .unwrap()
@@ -2514,7 +2514,7 @@ mod tests {
         // A tombstone for a row the (unloadable) CVR may well contain.
         store.del_row_record(&RowID {
             schema: "public".to_string(),
-            table: "issue".to_string(),
+            table: "issue".into(),
             row_key: serde_json::json!({"id": "1"}).as_object().unwrap().clone(),
         });
 

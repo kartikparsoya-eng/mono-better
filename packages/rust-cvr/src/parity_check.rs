@@ -405,7 +405,7 @@ fn make_row_id_from_json(v: &Value) -> RowID {
         .expect("rowKey missing");
     RowID {
         schema,
-        table,
+        table: table.into(),
         row_key: row_key.clone(),
     }
 }
@@ -546,7 +546,7 @@ fn build_row_patch_from_spec(spec: &Value) -> RowPatch {
             .and_then(Value::as_str)
             .unwrap()
             .to_string(),
-        table: id.get("table").and_then(Value::as_str).unwrap().to_string(),
+        table: id.get("table").and_then(Value::as_str).unwrap().into(),
         row_key: id
             .get("rowKey")
             .and_then(Value::as_object)

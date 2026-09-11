@@ -144,13 +144,13 @@ pub fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
     let mut key_map = serde_json::Map::with_capacity(row_key.len());
     for (k, v) in row_key.iter() {
         key_map.insert(
-            k.clone(),
+            k.to_string(),
             serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
         );
     }
     let id = rust_cvr::schema::types::RowID {
         schema: String::new(),
-        table: table.to_string(),
+        table: Arc::from(table),
         row_key: key_map,
     };
     // Delegate to the 1:1 port of TS `rowIDSignatureUnit` so there is exactly
@@ -340,7 +340,7 @@ impl Output for CompanionOutput {
             ChangeType::Add | ChangeType::Edit => {
                 // TS: newValue = change.node.row[childField] ?? null — never
                 // undefined for ADD/EDIT.
-                let v = match change.node().row.get(&self.child_field) {
+                let v = match change.node().row.get(self.child_field.as_str()) {
                     None | Some(Value::Null) => None,
                     Some(x) => Some(x.clone()),
                 };
@@ -1770,7 +1770,7 @@ fn sqlite_value_to_row(
                     "",
                     k,
                 );
-                (k.clone(), val)
+                (Arc::from(k.as_str()), val)
             })
             .collect(),
     );
@@ -2085,6 +2085,7 @@ mod advance_reset_message_tests {
 mod scalar_reset_tests {
     use super::*;
     use crate::ivm::data::Node;
+    use crate::ivm::data::RowMap;
     use crate::ivm::memory_source::MemorySource;
     use crate::ivm::schema::ColumnType;
 
@@ -2110,8 +2111,8 @@ mod scalar_reset_tests {
         };
         let row: Row = Arc::new(
             [
-                ("id".to_string(), Value::Str(Arc::from("u1"))),
-                ("name".to_string(), Value::Str(Arc::from("Alicia"))),
+                ("id".into(), Value::Str(Arc::from("u1"))),
+                ("name".into(), Value::Str(Arc::from("Alicia"))),
             ]
             .into_iter()
             .collect(),
@@ -2135,7 +2136,7 @@ mod scalar_reset_tests {
         )));
         let sources = HashMap::from([("unqueried".to_string(), source)]);
         let missing_row = Arc::new(
-            [("id".to_string(), Value::Str(Arc::from("missing")))]
+            [("id".into(), Value::Str(Arc::from("missing")))]
                 .into_iter()
                 .collect(),
         );
@@ -2180,10 +2181,10 @@ mod scalar_reset_tests {
             let table = case["table"].as_str().unwrap();
             let want: u64 = case["unit"].as_str().unwrap().parse().unwrap();
             // Build the ivm Row from the fixture rowKey (ivm Value ← plain JSON).
-            let mut map: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+            let mut map: RowMap = rustc_hash::FxHashMap::default();
             for (k, v) in case["rowKey"].as_object().unwrap() {
                 map.insert(
-                    k.clone(),
+                    Arc::from(k.as_str()),
                     serde_json::from_value::<Value>(v.clone()).unwrap(),
                 );
             }

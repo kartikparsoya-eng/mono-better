@@ -67,7 +67,7 @@ fn test_database_storage_set_get_del() {
 
     storage
         .borrow_mut()
-        .set("mykey".to_string(), Value::Str("myvalue".into()));
+        .set("mykey".into(), Value::Str("myvalue".into()));
 
     let result = storage.borrow().get("mykey");
     assert!(result.is_some());
@@ -89,15 +89,9 @@ fn test_database_storage_scan() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage
-        .borrow_mut()
-        .set("alpha".to_string(), Value::F64(1.0));
-    storage
-        .borrow_mut()
-        .set("beta".to_string(), Value::F64(2.0));
-    storage
-        .borrow_mut()
-        .set("gamma".to_string(), Value::F64(3.0));
+    storage.borrow_mut().set("alpha".into(), Value::F64(1.0));
+    storage.borrow_mut().set("beta".into(), Value::F64(2.0));
+    storage.borrow_mut().set("gamma".into(), Value::F64(3.0));
 
     let all = storage.borrow().scan(None);
     assert_eq!(all.len(), 3);
@@ -115,9 +109,7 @@ fn test_database_storage_number_values() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage
-        .borrow_mut()
-        .set("count".to_string(), Value::F64(42.0));
+    storage.borrow_mut().set("count".into(), Value::F64(42.0));
     let result = storage.borrow().get("count");
     match result {
         Some(Value::F64(n)) => assert_eq!(n, 42.0),
@@ -133,9 +125,7 @@ fn test_database_storage_bool_values() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage
-        .borrow_mut()
-        .set("flag".to_string(), Value::Bool(true));
+    storage.borrow_mut().set("flag".into(), Value::Bool(true));
     let result = storage.borrow().get("flag");
     match result {
         Some(Value::Bool(b)) => assert!(b),

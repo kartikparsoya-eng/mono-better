@@ -14,7 +14,7 @@ use rust_ivm::ivm::stream::{from_vec, skip_yields};
 
 fn node(id: f64) -> Node {
     let mut r = FxHashMap::default();
-    r.insert("id".to_string(), Value::F64(id));
+    r.insert("id".into(), Value::F64(id));
     Node::new(Arc::new(r))
 }
 
@@ -33,7 +33,7 @@ fn asc_id_comparator() -> rust_ivm::ivm::data::Comparator {
 
 fn start(id: f64, basis: Basis) -> Start {
     let mut r = FxHashMap::default();
-    r.insert("id".to_string(), Value::F64(id));
+    r.insert("id".into(), Value::F64(id));
     Start {
         row: Arc::new(r),
         basis,

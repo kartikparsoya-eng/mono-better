@@ -127,7 +127,7 @@ fn create_storage_returns_working_storage() {
     // `create_storage` exists on both BuilderDelegate and QueryDelegate — pin the
     // QueryDelegate impl (the one the query runtime calls).
     let storage = QueryDelegate::create_storage(&mut d);
-    storage.borrow_mut().set("k".to_string(), Value::F64(7.0));
+    storage.borrow_mut().set("k".into(), Value::F64(7.0));
     assert_eq!(storage.borrow().get("k"), Some(Value::F64(7.0)));
     storage.borrow_mut().del("k");
     assert_eq!(storage.borrow().get("k"), None);

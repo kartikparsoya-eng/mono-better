@@ -5,7 +5,7 @@
 //! entries preserve identity. The `View`/`Entry` output types are the `view.ts`
 //! twin and live in `view.rs`.
 
-use crate::ivm::data::{Comparator, Node, Row, Value};
+use crate::ivm::data::{Comparator, Node, Row, RowMap, Value};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
 use crate::ivm::view::{Entry, Format, View};
@@ -780,16 +780,16 @@ fn make_new_meta_entry(row: &Row, schema: &SourceSchema, with_ids: bool, rc: usi
 }
 
 /// Generate a stable ID from a row's primary key.
-fn make_id(row: &FxHashMap<String, Value>, schema: &SourceSchema) -> Option<String> {
+fn make_id(row: &RowMap, schema: &SourceSchema) -> Option<String> {
     if schema.primary_key.len() == 1 {
         let pk = &schema.primary_key[0];
-        let val = row.get(pk).unwrap_or(&Value::Null);
+        let val = row.get(pk.as_str()).unwrap_or(&Value::Null);
         Some(value_to_json_string(val))
     } else {
         let parts: Vec<String> = schema
             .primary_key
             .iter()
-            .map(|k| value_to_json_string(row.get(k).unwrap_or(&Value::Null)))
+            .map(|k| value_to_json_string(row.get(k.as_str()).unwrap_or(&Value::Null)))
             .collect();
         Some(format!("[{}]", parts.join(",")))
     }
@@ -806,11 +806,7 @@ fn value_to_json_string(v: &Value) -> String {
 /// Binary search returning a number.
 /// - If found at index `i`: returns `i` (>= 0).
 /// - If not found, insertion point is `low`: returns `~low` (< 0).
-fn binary_search(
-    view: &[Rc<Entry>],
-    target: &FxHashMap<String, Value>,
-    comparator: &Comparator,
-) -> i64 {
+fn binary_search(view: &[Rc<Entry>], target: &RowMap, comparator: &Comparator) -> i64 {
     let mut low: i64 = 0;
     let mut high: i64 = view.len() as i64 - 1;
     while low <= high {

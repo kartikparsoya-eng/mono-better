@@ -3,6 +3,7 @@
 //! children positioning, remove-non-existent panic, multiple entries
 //! with nested relationships and compound PKs.
 
+use rust_ivm::ivm::data::RowMap;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::{Node, Row, SortOrder, Value, make_comparator};
@@ -15,9 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -471,7 +472,7 @@ fn make_schema_with_children() -> SourceSchema {
 fn format_with_children() -> Format {
     let mut fmt = default_format();
     fmt.relationships
-        .insert("children".to_string(), default_format());
+        .insert("children".into(), default_format());
     fmt
 }
 
@@ -667,7 +668,7 @@ fn make_event_format(singular_athletes: bool) -> Format {
     // nested-per-structural-level shape here compensated for the NEW-5 bug.
     let mut fmt = default_format();
     fmt.relationships.insert(
-        "athletes".to_string(),
+        "athletes".into(),
         Format {
             singular: singular_athletes,
             relationships: FxHashMap::default(),

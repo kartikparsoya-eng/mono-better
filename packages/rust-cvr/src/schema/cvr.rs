@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::schema::types::RowID;
 use crate::schema::types::RowRecord;
@@ -115,7 +116,7 @@ pub fn rows_row_to_row_record(row: &RowsRow) -> Result<RowRecord, RowRecordError
     Ok(RowRecord {
         id: RowID {
             schema: row.schema.clone(),
-            table: row.table.clone(),
+            table: Arc::from(row.table.as_str()),
             row_key: row_key_map,
         },
         row_version: row.row_version.clone(),
@@ -137,7 +138,7 @@ pub fn row_record_to_rows_row(client_group_id: &str, record: &RowRecord) -> Rows
     RowsRow {
         client_group_id: client_group_id.to_string(),
         schema: record.id.schema.clone(),
-        table: record.id.table.clone(),
+        table: record.id.table.to_string(),
         row_key: serde_json::Value::Object(record.id.row_key.clone()),
         row_version: record.row_version.clone(),
         patch_version: version_string(&record.patch_version),
@@ -176,7 +177,7 @@ mod tests {
         let record = RowRecord {
             id: RowID {
                 schema: "public".to_string(),
-                table: "issue".to_string(),
+                table: "issue".into(),
                 row_key,
             },
             row_version: "01".to_string(),
@@ -208,7 +209,7 @@ mod tests {
         let record = RowRecord {
             id: RowID {
                 schema: "public".to_string(),
-                table: "issue".to_string(),
+                table: "issue".into(),
                 row_key,
             },
             row_version: "01".to_string(),

@@ -234,7 +234,7 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
             for r in &tx.received {
                 let id = RowID {
                     schema: r.id.schema.clone(),
-                    table: r.id.table.clone(),
+                    table: Arc::from(r.id.table.as_str()),
                     row_key: r.id.row_key.clone(),
                 };
                 let id_str = row_id_string(&id);
@@ -403,7 +403,7 @@ async fn load_existing_rows(pool: &PgPool, cvr_id: &str) -> RowRecordMap {
             .clone();
         let id = RowID {
             schema: r.get::<String, _>("schema"),
-            table: r.get::<String, _>("table"),
+            table: Arc::from(r.get::<String, _>("table")),
             row_key,
         };
         let ref_counts: RefCounts =

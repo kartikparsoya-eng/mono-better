@@ -5,11 +5,10 @@
 //! 1. Add row with leftAt=null -> should be in view
 //! 2. Edit row: leftAt=null -> leftAt=1000 -> should be REMOVED from view
 
+use rust_ivm::ivm::data::RowMap;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -54,8 +53,13 @@ fn num_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<std::cell::RefCell<M
     )))
 }
 
-fn row(pairs: Vec<(&str, Value)>) -> Arc<FxHashMap<String, Value>> {
-    Arc::new(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+fn row(pairs: Vec<(&str, Value)>) -> Arc<RowMap> {
+    Arc::new(
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k.to_string().into(), v))
+            .collect(),
+    )
 }
 
 fn org_members_ast() -> Ast {

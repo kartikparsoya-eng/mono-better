@@ -2,9 +2,9 @@
 //!
 //! Tests: normalizeUndefined, compareValues, valuesEqual, comparator.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cmp::Ordering;
 
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use rust_ivm::ivm::data::{SortOrder, Value, compare_values, make_comparator, values_equal};
@@ -192,9 +192,9 @@ fn test_values_equal_null_never_equal() {
 // ---------------------------------------------------------------------------
 
 fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }

@@ -22,7 +22,7 @@ use crate::builder::ast::{
 };
 use crate::builder::builder::{BuilderDelegate, build_pipeline, complete_ordering_ast};
 use crate::ivm::catch::{Catch, CaughtChange, CaughtNode};
-use crate::ivm::data::{Row, Value, row as make_row};
+use crate::ivm::data::{Row, RowMap, Value, row as make_row};
 use crate::ivm::memory_source::MemorySource;
 use crate::ivm::operator::{FetchRequest, Shared};
 use crate::ivm::schema::ColumnType;
@@ -66,17 +66,17 @@ pub fn rust_value_to_json(v: &Value) -> JsonValue {
 }
 
 pub fn json_to_row(obj: &serde_json::Map<String, JsonValue>) -> Row {
-    let mut map: FxHashMap<String, Value> = FxHashMap::default();
+    let mut map: RowMap = FxHashMap::default();
     for (k, v) in obj {
-        map.insert(k.clone(), json_to_rust_value(v));
+        map.insert(Arc::from(k.as_str()), json_to_rust_value(v));
     }
-    make_row(map)
+    Arc::new(map)
 }
 
 pub fn row_to_json(row: &Row) -> JsonValue {
     let mut map = serde_json::Map::new();
     for (k, v) in row.iter() {
-        map.insert(k.clone(), rust_value_to_json(v));
+        map.insert(k.to_string(), rust_value_to_json(v));
     }
     JsonValue::Object(map)
 }
@@ -251,14 +251,14 @@ pub fn json_to_ast(v: &JsonValue) -> Ast {
     });
     let start = v.get("start").map(|s| {
         let row_json = s.get("row").unwrap_or(&JsonValue::Null);
-        let mut map: FxHashMap<String, Value> = FxHashMap::default();
+        let mut map: RowMap = FxHashMap::default();
         if let Some(obj) = row_json.as_object() {
             for (k, val) in obj {
-                map.insert(k.clone(), json_to_rust_value(val));
+                map.insert(Arc::from(k.as_str()), json_to_rust_value(val));
             }
         }
         Bound {
-            row: make_row(map),
+            row: Arc::new(map),
             exclusive: s
                 .get("exclusive")
                 .and_then(|e| e.as_bool())
@@ -424,9 +424,9 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
         if let Some(rows) = spec.get("rows").and_then(|r| r.as_array()) {
             for row_json in rows {
                 if let Some(obj) = row_json.as_object() {
-                    let mut m: FxHashMap<String, Value> = FxHashMap::default();
+                    let mut m: RowMap = FxHashMap::default();
                     for (k, v) in obj {
-                        m.insert(k.clone(), json_to_rust_value(v));
+                        m.insert(Arc::from(k.as_str()), json_to_rust_value(v));
                     }
                     source.borrow_mut().add_row(m);
                 }

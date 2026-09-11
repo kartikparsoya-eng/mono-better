@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
 use crate::cvr::RefCounts;
@@ -478,7 +479,11 @@ pub enum QueryPatch {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RowID {
     pub schema: String,
-    pub table: String,
+    /// `Arc<str>`, not `String`: the poke path builds one `RowPatchOp` per
+    /// connected client from this id (TS `makeRowPatch` destructures
+    /// `id.table` by reference, client-handler.ts:416-419), so the table
+    /// name is shared instead of copied per client per row (rule 5).
+    pub table: Arc<str>,
     #[serde(rename = "rowKey")]
     pub row_key: RowKey,
 }

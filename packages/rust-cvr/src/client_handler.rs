@@ -203,7 +203,9 @@ pub struct RowPatchOp {
     // struct is the permissive superset that carries exactly those two.
     pub op: &'static str,
     #[serde(rename = "tableName")]
-    pub table_name: String,
+    /// Shared with the `RowID` it came from (serde `rc` serializes through
+    /// the Arc) — no per-client copy of the table name.
+    pub table_name: Arc<str>,
     // Arc-shared with the originating `RowPatch::Put` (serde's `rc` feature
     // serializes through the Arc transparently) — no per-client deep clone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -425,9 +427,9 @@ impl PokeHandler {
                         RowPatch::Del { id } => &id.table,
                     };
 
-                    if table == &self.zero_clients_table {
+                    if &**table == self.zero_clients_table.as_str() {
                         self.update_lmids(&mut state, rp)?;
-                    } else if table == &self.zero_mutations_table {
+                    } else if &**table == self.zero_mutations_table.as_str() {
                         self.add_mutation_patch(&mut state, rp)?;
                     } else {
                         let body = state

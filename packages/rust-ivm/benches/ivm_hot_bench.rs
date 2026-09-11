@@ -8,19 +8,19 @@
 //!   SQLITE3_LIB_DIR=$(scripts/build-wal2-static-lib.sh) SQLITE3_STATIC=1 \
 //!   SQLITE3_INCLUDE_DIR=$SQLITE3_LIB_DIR cargo bench
 
+use rust_ivm::ivm::data::RowMap;
 use std::sync::Arc;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rustc_hash::FxHashMap;
 
 use rust_ivm::engine::row_signature_unit;
 use rust_ivm::ivm::data::{SortOrder, Value, make_comparator};
 
-fn row(pairs: &[(&str, Value)]) -> Arc<FxHashMap<String, Value>> {
+fn row(pairs: &[(&str, Value)]) -> Arc<RowMap> {
     Arc::new(
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
+            .map(|(k, v)| (k.to_string().into(), v.clone()))
             .collect(),
     )
 }

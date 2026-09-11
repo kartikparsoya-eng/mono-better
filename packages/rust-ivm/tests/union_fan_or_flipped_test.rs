@@ -13,6 +13,7 @@
 //! asserts the deduplicated union — it fails (empty) before the wiring fix and
 //! passes after.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -44,9 +45,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let mut m: FxHashMap<String, Value> = FxHashMap::default();
+    let mut m: RowMap = FxHashMap::default();
     for (k, v) in pairs {
-        m.insert(k.to_string(), v.clone());
+        m.insert(k.to_string().into(), v.clone());
     }
     source.borrow_mut().add_row(m);
 }

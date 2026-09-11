@@ -25,7 +25,9 @@ use rustc_hash::FxHashMap;
 use crate::builder::ast::Condition;
 use crate::builder::debug_delegate::SharedDebug;
 use crate::ivm::change::{Change, make_add_change, make_edit_change, make_remove_change};
-use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, compare_values, make_comparator};
+use crate::ivm::data::{
+    Comparator, Node, Row, RowMap, SortOrder, Value, compare_values, make_comparator,
+};
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, OutputHandle, Shared, Start};
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
@@ -66,7 +68,7 @@ struct LazyRows {
     /// Shared with the source (Rust-only, AGENTS.md rule 5): a fetch runs once
     /// per parent row under a join, and owning these cloned a `Vec<String>`,
     /// a column-type map and a `String` on every one of them.
-    column_names: Rc<Vec<String>>,
+    column_names: Rc<Vec<Arc<str>>>,
     columns: Rc<HashMap<String, ColumnType>>,
     table_name: Arc<str>,
     /// Optional debug delegate (port of TS `#fetch`'s `connection.debug`,
@@ -92,7 +94,7 @@ impl LazyRows {
         conn: Rc<RefCell<Connection>>,
         sql: String,
         params: Vec<SqlParam>,
-        column_names: Rc<Vec<String>>,
+        column_names: Rc<Vec<Arc<str>>>,
         columns: Rc<HashMap<String, ColumnType>>,
         table_name: Arc<str>,
         debug: Option<SharedDebug>,
@@ -319,11 +321,16 @@ impl Iterator for LazyRowsIter {
                 // every hydrate: a 40-column table paid four extra
                 // allocations per row for nothing. TS has no twin because a JS
                 // object literal is built by the engine in one shot.
-                let mut map: FxHashMap<String, Value> =
+                let mut map: RowMap =
                     FxHashMap::with_capacity_and_hasher(column_names.len(), Default::default());
                 for (i, col) in column_names.iter().enumerate() {
-                    let value =
-                        sqlite_value_to_ivm(raw_row.get_ref(i), columns.get(col), table_name, col);
+                    let value = sqlite_value_to_ivm(
+                        raw_row.get_ref(i),
+                        columns.get(&**col),
+                        table_name,
+                        col,
+                    );
+                    // `Arc` clone of the interned column name, not a `String`.
                     map.insert(col.clone(), value);
                 }
                 let row: Row = Arc::new(map);
@@ -422,7 +429,7 @@ impl Iterator for GenerateWithYields {
 fn stream_query(
     db: Rc<RefCell<Connection>>,
     query: SqlQuery,
-    column_names: Rc<Vec<String>>,
+    column_names: Rc<Vec<Arc<str>>>,
     columns: Rc<HashMap<String, ColumnType>>,
     table_name: Arc<str>,
     debug: Option<SharedDebug>,
@@ -604,7 +611,7 @@ pub struct TableSource {
     // and every fetch's row cursor, which used to clone them.
     table_name: Arc<str>,
     columns: Rc<HashMap<String, ColumnType>>,
-    column_names: Rc<Vec<String>>,
+    column_names: Rc<Vec<Arc<str>>>,
     primary_key: Rc<Vec<String>>,
     primary_index_sort: SortOrder,
     db: SharedSnapshotDb,
@@ -667,10 +674,12 @@ impl TableSource {
         primary_key: Vec<String>,
         should_yield: Rc<dyn Fn() -> bool>,
     ) -> Self {
-        let column_names: Vec<String> = if column_order.is_empty() {
-            columns.keys().cloned().collect()
+        // Interned once per source: every fetched row's map borrows these
+        // `Arc<str>` keys (rule 5), see `RowMap`.
+        let column_names: Vec<Arc<str>> = if column_order.is_empty() {
+            columns.keys().map(|k| Arc::from(k.as_str())).collect()
         } else {
-            column_order
+            column_order.into_iter().map(Arc::from).collect()
         };
         let primary_index_sort: SortOrder = Arc::new(
             primary_key
@@ -765,7 +774,7 @@ impl TableSource {
                         for (index, column) in self.column_names.iter().enumerate() {
                             let value = sqlite_value_to_ivm(
                                 raw.get_ref(index),
-                                self.columns.get(column),
+                                self.columns.get(&**column),
                                 &self.table_name,
                                 column,
                             );
@@ -895,7 +904,8 @@ impl TableSource {
                 let conn = c.borrow();
                 conn.split_edit_keys.as_ref().is_some_and(|keys| {
                     keys.iter().any(|k| {
-                        old_row.get(k).unwrap_or(&Value::Null) != row.get(k).unwrap_or(&Value::Null)
+                        old_row.get(k.as_str()).unwrap_or(&Value::Null)
+                            != row.get(k.as_str()).unwrap_or(&Value::Null)
                     })
                 })
             });
@@ -1015,7 +1025,7 @@ impl TableSource {
         let params: Vec<SqlParam> = self
             .primary_key
             .iter()
-            .map(|k| SqlParam::from(row.get(k).unwrap_or(&Value::Null)))
+            .map(|k| SqlParam::from(row.get(k.as_str()).unwrap_or(&Value::Null)))
             .collect();
 
         // Propagate, never swallow. A prepare/execution failure must NOT be
@@ -1131,7 +1141,7 @@ impl TableSource {
 pub struct TableSourceInput {
     db: SharedSnapshotDb,
     table_name: Arc<str>,
-    column_names: Rc<Vec<String>>,
+    column_names: Rc<Vec<Arc<str>>>,
     columns: Rc<HashMap<String, ColumnType>>,
     /// The source's primary key, shared (see `TableSource`); `schema.primary_key`
     /// is the owned copy the schema struct requires.
@@ -1503,13 +1513,13 @@ mod value_parity_tests {
     #[test]
     fn applied_change_obeys_ts_sql_null_start_semantics() {
         let row = Arc::new(FxHashMap::from_iter([
-            ("c".to_string(), Value::Null),
-            ("id".to_string(), Value::Str("r35".into())),
+            ("c".into(), Value::Null),
+            ("id".into(), Value::Str("r35".into())),
         ]));
         let start = Start {
             row: Arc::new(FxHashMap::from_iter([
-                ("c".to_string(), Value::Null),
-                ("id".to_string(), Value::Str("r23".into())),
+                ("c".into(), Value::Null),
+                ("id".into(), Value::Str("r23".into())),
             ])),
             basis: Basis::At,
         };
@@ -1583,7 +1593,7 @@ mod advance_gate_fetch_tests {
         stream_query(
             db,
             q,
-            Rc::new(vec!["id".to_string()]),
+            Rc::new(vec!["id".into()]),
             Rc::new(HashMap::new()),
             Arc::from("t"),
             None,
@@ -1633,11 +1643,7 @@ mod advance_gate_fetch_tests {
         let rows: Vec<Row> = stream_query(
             db,
             q,
-            Rc::new(vec![
-                "id".to_string(),
-                "name".to_string(),
-                "flag".to_string(),
-            ]),
+            Rc::new(vec!["id".into(), "name".into(), "flag".into()]),
             Rc::new(columns),
             Arc::from("u"),
             None,
@@ -1681,13 +1687,13 @@ mod advance_gate_fetch_tests {
         );
 
         let row = source
-            .get_row(&[("id".to_string(), Value::Str("i1".into()))])
+            .get_row(&[("id".into(), Value::Str("i1".into()))])
             .expect("row by primary key");
         assert_eq!(row.get("title"), Some(&Value::Str("caught up".into())));
         assert_eq!(row.get("active"), Some(&Value::Bool(true)));
         assert!(
             source
-                .get_row(&[("id".to_string(), Value::Str("missing".into()))])
+                .get_row(&[("id".into(), Value::Str("missing".into()))])
                 .is_none()
         );
     }
@@ -1728,7 +1734,7 @@ mod advance_gate_fetch_tests {
             for id in ["i1", "i2", "i3"] {
                 assert!(
                     source
-                        .get_row(&[("id".to_string(), Value::Str(id.into()))])
+                        .get_row(&[("id".into(), Value::Str(id.into()))])
                         .is_some(),
                     "row {id} must still be readable through the cached statement"
                 );
@@ -1753,7 +1759,7 @@ mod advance_gate_fetch_tests {
         let mut source = source;
         source.set_db(Rc::new(RefCell::new(next)));
         let row = source
-            .get_row(&[("id".to_string(), Value::Str("i1".into()))])
+            .get_row(&[("id".into(), Value::Str("i1".into()))])
             .expect("row after snapshot swap");
         assert_eq!(row.get("title"), Some(&Value::Str("after-swap".into())));
         assert_eq!(
@@ -1810,7 +1816,7 @@ mod advance_gate_fetch_tests {
         let _ = stream_query(
             db,
             q,
-            Rc::new(vec!["no_such_col".to_string()]),
+            Rc::new(vec!["no_such_col".into()]),
             Rc::new(HashMap::new()),
             Arc::from("t"),
             None,
@@ -1829,7 +1835,7 @@ mod advance_gate_fetch_tests {
         let _ = stream_query(
             db,
             q,
-            Rc::new(vec!["id".to_string()]),
+            Rc::new(vec!["id".into()]),
             Rc::new(HashMap::new()),
             Arc::from("t"),
             None,
@@ -1862,7 +1868,7 @@ mod advance_gate_fetch_tests {
             let _ = stream_query(
                 Rc::new(RefCell::new(reader)),
                 q,
-                Rc::new(vec!["id".to_string()]),
+                Rc::new(vec!["id".into()]),
                 Rc::new(HashMap::new()),
                 Arc::from("t"),
                 None,
@@ -1890,7 +1896,7 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string()],
         );
         let mut values = FxHashMap::default();
-        values.insert("id".to_string(), Value::F64(1.0));
+        values.insert("id".into(), Value::F64(1.0));
         let row = Arc::new(values);
         let conn = db.borrow();
         let _ = source.check_exists(&conn, &row);

@@ -1,12 +1,11 @@
 //! End-to-end tests for the Rust IVM engine.
 //! Tests hydrate, join, filter, advance (push), and parallel behavior.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, RelatedSubquery, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -15,9 +14,9 @@ use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::source::{make_source_change_add, make_source_change_remove};
 
 fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -45,24 +44,24 @@ fn test_hydrate_single_table() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(1.0)),
-            ("name".to_string(), Value::Str("Alice".into())),
+            ("id".into(), Value::F64(1.0)),
+            ("name".into(), Value::Str("Alice".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(2.0)),
-            ("name".to_string(), Value::Str("Bob".into())),
+            ("id".into(), Value::F64(2.0)),
+            ("name".into(), Value::Str("Bob".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(3.0)),
-            ("name".to_string(), Value::Str("Carol".into())),
+            ("id".into(), Value::F64(3.0)),
+            ("name".into(), Value::Str("Carol".into())),
         ]
         .into_iter()
         .collect(),
@@ -98,8 +97,8 @@ fn test_hydrate_with_filter() {
     for (id, name) in [(1.0, "Alice"), (2.0, "Bob"), (3.0, "Carol")] {
         source.borrow_mut().add_row(
             [
-                ("id".to_string(), Value::F64(id)),
-                ("name".to_string(), Value::Str(name.into())),
+                ("id".into(), Value::F64(id)),
+                ("name".into(), Value::Str(name.into())),
             ]
             .into_iter()
             .collect(),
@@ -146,16 +145,16 @@ fn test_hydrate_with_join() {
     let users = make_source("users", &["id"]);
     users.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(1.0)),
-            ("name".to_string(), Value::Str("Alice".into())),
+            ("id".into(), Value::F64(1.0)),
+            ("name".into(), Value::Str("Alice".into())),
         ]
         .into_iter()
         .collect(),
     );
     users.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(2.0)),
-            ("name".to_string(), Value::Str("Bob".into())),
+            ("id".into(), Value::F64(2.0)),
+            ("name".into(), Value::Str("Bob".into())),
         ]
         .into_iter()
         .collect(),
@@ -165,18 +164,18 @@ fn test_hydrate_with_join() {
     let posts = make_source("posts", &["id"]);
     posts.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(10.0)),
-            ("author_id".to_string(), Value::F64(1.0)),
-            ("title".to_string(), Value::Str("Hello".into())),
+            ("id".into(), Value::F64(10.0)),
+            ("author_id".into(), Value::F64(1.0)),
+            ("title".into(), Value::Str("Hello".into())),
         ]
         .into_iter()
         .collect(),
     );
     posts.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(11.0)),
-            ("author_id".to_string(), Value::F64(2.0)),
-            ("title".to_string(), Value::Str("World".into())),
+            ("id".into(), Value::F64(11.0)),
+            ("author_id".into(), Value::F64(2.0)),
+            ("title".into(), Value::Str("World".into())),
         ]
         .into_iter()
         .collect(),
@@ -243,8 +242,8 @@ fn test_advance_add() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(1.0)),
-            ("name".to_string(), Value::Str("Alice".into())),
+            ("id".into(), Value::F64(1.0)),
+            ("name".into(), Value::Str("Alice".into())),
         ]
         .into_iter()
         .collect(),
@@ -284,8 +283,8 @@ fn test_advance_remove() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
         [
-            ("id".to_string(), Value::F64(1.0)),
-            ("name".to_string(), Value::Str("Alice".into())),
+            ("id".into(), Value::F64(1.0)),
+            ("name".into(), Value::Str("Alice".into())),
         ]
         .into_iter()
         .collect(),

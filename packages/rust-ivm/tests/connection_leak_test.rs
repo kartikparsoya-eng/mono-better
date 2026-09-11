@@ -10,11 +10,10 @@
 //! These tests fail against the pre-fix code (counts accumulate per cycle)
 //! and pass with the splice-on-destroy fix.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -35,9 +34,9 @@ fn make_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<RefCell<MemorySourc
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(map);
 }

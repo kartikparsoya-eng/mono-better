@@ -6,6 +6,7 @@
 //! branches collapse to a single downstream push ("does not duplicate
 //! pushes").
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -51,10 +52,10 @@ fn a_sort() -> SortOrder {
     Arc::new(vec![["a".to_string(), "asc".to_string()]])
 }
 
-fn row_ab(a: f64, b: &str) -> FxHashMap<String, Value> {
+fn row_ab(a: f64, b: &str) -> RowMap {
     let mut r = FxHashMap::default();
-    r.insert("a".to_string(), num_val(a));
-    r.insert("b".to_string(), str_val(b));
+    r.insert("a".into(), num_val(a));
+    r.insert("b".into(), str_val(b));
     r
 }
 

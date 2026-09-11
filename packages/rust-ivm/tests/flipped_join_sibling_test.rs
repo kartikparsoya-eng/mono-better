@@ -1,6 +1,7 @@
 //! Tests for FlippedJoin sibling relationships — port of TS `flipped-join.sibling.test.ts` (v1.7.0).
 //! Tests multiple FlippedJoins on the same parent source (sibling relationships).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -36,9 +37,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }
@@ -198,8 +199,8 @@ fn test_sibling_push_new_issue_existing_owner() {
     );
 
     let change = make_source_change_add(Arc::new(FxHashMap::from_iter([
-        ("id".to_string(), str_val("i2")),
-        ("ownerId".to_string(), str_val("o1")),
+        ("id".into(), str_val("i2")),
+        ("ownerId".into(), str_val("o1")),
     ])));
     setup.issues.borrow_mut().push(change);
 
@@ -219,8 +220,8 @@ fn test_sibling_push_new_comment() {
     );
 
     let change = make_source_change_add(Arc::new(FxHashMap::from_iter([
-        ("id".to_string(), str_val("c2")),
-        ("issueId".to_string(), str_val("i1")),
+        ("id".into(), str_val("c2")),
+        ("issueId".into(), str_val("i1")),
     ])));
     setup.comments.borrow_mut().push(change);
 
@@ -240,7 +241,7 @@ fn test_sibling_push_new_owner() {
     );
 
     let change = make_source_change_add(Arc::new(FxHashMap::from_iter([(
-        "id".to_string(),
+        "id".into(),
         str_val("o2"),
     )])));
     setup.owners.borrow_mut().push(change);

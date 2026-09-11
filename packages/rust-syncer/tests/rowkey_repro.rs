@@ -91,7 +91,7 @@ fn emitted_rowkey_cols(client_pks: Option<HashMap<String, Vec<String>>>) -> Vec<
                 && &*rc.table == "channel_user_status"
                 && !rc.is_hidden
             {
-                let mut c: Vec<String> = rc.row_key.keys().cloned().collect();
+                let mut c: Vec<String> = rc.row_key.keys().map(|k| k.to_string()).collect();
                 c.sort();
                 cols = c;
             }

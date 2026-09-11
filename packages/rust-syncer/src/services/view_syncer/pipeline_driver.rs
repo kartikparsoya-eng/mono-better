@@ -2081,7 +2081,7 @@ mod tests {
 
         // 3. A reset signal must produce NOTHING.
         let reset: Box<dyn std::any::Any + Send> = Box::new(ScalarResetError {
-            table: "issue".to_string(),
+            table: "issue".into(),
             resolved: "1".to_string(),
             new: "2".to_string(),
         });
@@ -2106,7 +2106,7 @@ mod tests {
     #[test]
     fn scalar_reset_message_classifies_only_scalar_reset_panics() {
         let reset: Box<dyn std::any::Any + Send> = Box::new(ScalarResetError {
-            table: "issue".to_string(),
+            table: "issue".into(),
             resolved: "1".to_string(),
             new: "2".to_string(),
         });
@@ -2156,7 +2156,7 @@ mod tests {
 
     fn users_spec() -> IvmTableSpec {
         IvmTableSpec {
-            table: "users".to_string(),
+            table: "users".into(),
             column_order: Vec::new(),
             columns: HashMap::from([
                 (

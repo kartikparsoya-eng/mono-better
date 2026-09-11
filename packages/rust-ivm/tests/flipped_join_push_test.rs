@@ -2,12 +2,11 @@
 //! Port of TS `flipped-join.push.test.ts` (v1.7.0).
 //! Tests incremental changes (add/remove/edit) through FlippedJoin.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
@@ -19,9 +18,9 @@ use rust_ivm::ivm::source::{
 };
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -43,9 +42,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }

@@ -1,12 +1,12 @@
 //! End-to-end tests for TableSource — the production SQLite-backed source.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rusqlite::Connection;
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use rust_ivm::ivm::data::Value;
@@ -27,9 +27,9 @@ fn create_db_with_table(table_name: &str, columns: &[(&str, &str)]) -> Rc<RefCel
 }
 
 fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -47,8 +47,8 @@ fn test_table_source_fetch_all() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
     let input = source.connect(None, None, None, None, None);
@@ -74,15 +74,15 @@ fn test_table_source_fetch_with_constraint() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
     let input = source.connect(None, None, None, None, None);
 
     // Fetch with constraint: id = 2
     let mut constraint = rustc_hash::FxHashMap::default();
-    constraint.insert("id".to_string(), Value::F64(2.0));
+    constraint.insert("id".into(), Value::F64(2.0));
     let req = rust_ivm::ivm::operator::FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -114,9 +114,9 @@ fn test_table_source_fetch_with_filter() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
-    columns.insert("age".to_string(), ColumnType::Number { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
+    columns.insert("age".into(), ColumnType::Number { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
 
@@ -158,8 +158,8 @@ fn test_table_source_fetch_with_order() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
 
@@ -196,8 +196,8 @@ fn test_table_source_push_add() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
@@ -238,8 +238,8 @@ fn test_table_source_push_remove() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
@@ -273,8 +273,8 @@ fn test_table_source_push_edit() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
@@ -313,8 +313,8 @@ fn test_table_source_fetch_with_multi_constraint() {
         .unwrap();
 
     let mut columns = HashMap::new();
-    columns.insert("id".to_string(), ColumnType::Number { optional: false });
-    columns.insert("name".to_string(), ColumnType::String { optional: false });
+    columns.insert("id".into(), ColumnType::Number { optional: false });
+    columns.insert("name".into(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
     let input = source.connect(None, None, None, None, None);
@@ -323,12 +323,12 @@ fn test_table_source_fetch_with_multi_constraint() {
     let mc: rust_ivm::ivm::constraint::MultiConstraint = vec![
         {
             let mut c = rustc_hash::FxHashMap::default();
-            c.insert("id".to_string(), Value::F64(1.0));
+            c.insert("id".into(), Value::F64(1.0));
             c
         },
         {
             let mut c = rustc_hash::FxHashMap::default();
-            c.insert("id".to_string(), Value::F64(3.0));
+            c.insert("id".into(), Value::F64(3.0));
             c
         },
     ];

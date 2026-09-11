@@ -1,12 +1,11 @@
 //! Tests for MemorySource and merge_sorted_streams.
 //! Port of TS `memory-source.test.ts` and `source.test.ts` (v1.7.0).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
 use rust_ivm::ivm::data::{Node, Row, Value};
@@ -17,9 +16,9 @@ use rust_ivm::ivm::source::SourceChange;
 use rust_ivm::ivm::stream::{NodeStream, from_vec};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -41,9 +40,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }
@@ -340,7 +339,7 @@ fn test_memory_source_fetch_with_constraint() {
 
     let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
-    constraint.insert("id".to_string(), Value::F64(3.0));
+    constraint.insert("id".into(), Value::F64(3.0));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -367,11 +366,11 @@ fn test_memory_source_fetch_with_multi_constraints() {
     let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
-    mc1.insert("id".to_string(), Value::F64(2.0));
+    mc1.insert("id".into(), Value::F64(2.0));
     let mut mc2 = Constraint::default();
-    mc2.insert("id".to_string(), Value::F64(5.0));
+    mc2.insert("id".into(), Value::F64(5.0));
     let mut mc3 = Constraint::default();
-    mc3.insert("id".to_string(), Value::F64(8.0));
+    mc3.insert("id".into(), Value::F64(8.0));
 
     let mc: MultiConstraint = vec![mc1, mc2, mc3];
 
@@ -743,11 +742,11 @@ fn test_memory_source_fetch_with_multi_constraints_compound_key() {
     let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
-    mc1.insert("a".to_string(), Value::F64(1.0));
-    mc1.insert("b".to_string(), str_val("val1"));
+    mc1.insert("a".into(), Value::F64(1.0));
+    mc1.insert("b".into(), str_val("val1"));
     let mut mc2 = Constraint::default();
-    mc2.insert("a".to_string(), Value::F64(3.0));
-    mc2.insert("b".to_string(), str_val("val3"));
+    mc2.insert("a".into(), Value::F64(3.0));
+    mc2.insert("b".into(), str_val("val3"));
 
     let mc: MultiConstraint = vec![mc1, mc2];
     let req = FetchRequest {

@@ -5,11 +5,10 @@
 //! interrupt wiring / row lookups), so an accessor drifting from the state it
 //! mirrors would surface as wrong syncer behavior, not a local test failure.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -30,9 +29,9 @@ fn make_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<RefCell<MemorySourc
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(map);
 }
@@ -120,19 +119,19 @@ fn get_row_by_primary_key() {
     let engine = make_engine();
 
     let row = engine
-        .get_row("users", &[("id".to_string(), Value::F64(1.0))])
+        .get_row("users", &[("id".into(), Value::F64(1.0))])
         .expect("row exists");
     assert_eq!(row.get("id"), Some(&Value::F64(1.0)));
 
     assert!(
         engine
-            .get_row("users", &[("id".to_string(), Value::F64(999.0))])
+            .get_row("users", &[("id".into(), Value::F64(999.0))])
             .is_none(),
         "absent PK returns None"
     );
     assert!(
         engine
-            .get_row("nope", &[("id".to_string(), Value::F64(1.0))])
+            .get_row("nope", &[("id".into(), Value::F64(1.0))])
             .is_none(),
         "unknown table returns None, not a panic"
     );

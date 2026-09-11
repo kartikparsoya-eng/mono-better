@@ -22,7 +22,7 @@ use rust_syncer::services::view_syncer::pipeline_driver::{
 
 fn users_spec() -> IvmTableSpec {
     IvmTableSpec {
-        table: "users".to_string(),
+        table: "users".into(),
         columns: HashMap::from([(
             "id".to_string(),
             IvmColumnSchema {

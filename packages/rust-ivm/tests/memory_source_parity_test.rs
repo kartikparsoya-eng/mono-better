@@ -4,20 +4,19 @@
 //! `getRow`/`push` — rust yields per-connection results with no coop token,
 //! plus the labeled Go-IVM split-edit adaptation).
 
+use rust_ivm::ivm::data::RowMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::SourceChange;
 
-fn row(pairs: &[(&str, Value)]) -> FxHashMap<String, Value> {
+fn row(pairs: &[(&str, Value)]) -> RowMap {
     pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect()
 }
 
@@ -46,14 +45,10 @@ fn get_row_and_all_rows_reflect_storage() {
     ]));
 
     let got = source
-        .get_row(&[("id".to_string(), Value::F64(1.0))])
+        .get_row(&[("id".into(), Value::F64(1.0))])
         .expect("row 1");
     assert_eq!(got.get("name"), Some(&Value::Str("a".into())));
-    assert!(
-        source
-            .get_row(&[("id".to_string(), Value::F64(9.0))])
-            .is_none()
-    );
+    assert!(source.get_row(&[("id".into(), Value::F64(9.0))]).is_none());
     assert_eq!(source.all_rows().len(), 2);
 
     // Same-PK add replaces (keeps the in-memory source consistent).
@@ -63,7 +58,7 @@ fn get_row_and_all_rows_reflect_storage() {
     ]));
     assert_eq!(source.all_rows().len(), 2, "replace, not duplicate");
     let got = source
-        .get_row(&[("id".to_string(), Value::F64(1.0))])
+        .get_row(&[("id".into(), Value::F64(1.0))])
         .expect("row 1");
     assert_eq!(got.get("name"), Some(&Value::Str("a2".into())));
 }
@@ -92,9 +87,7 @@ fn gen_push_add_edit_remove_through_a_connection() {
         "Add must reach the output"
     );
     assert!(
-        source
-            .get_row(&[("id".to_string(), Value::F64(1.0))])
-            .is_some(),
+        source.get_row(&[("id".into(), Value::F64(1.0))]).is_some(),
         "push writes through to storage"
     );
 
@@ -117,7 +110,7 @@ fn gen_push_add_edit_remove_through_a_connection() {
     );
     assert_eq!(
         source
-            .get_row(&[("id".to_string(), Value::F64(1.0))])
+            .get_row(&[("id".into(), Value::F64(1.0))])
             .unwrap()
             .get("name"),
         Some(&Value::Str("a2".into()))
@@ -137,9 +130,7 @@ fn gen_push_add_edit_remove_through_a_connection() {
         "Remove reaches the output"
     );
     assert!(
-        source
-            .get_row(&[("id".to_string(), Value::F64(1.0))])
-            .is_none(),
+        source.get_row(&[("id".into(), Value::F64(1.0))]).is_none(),
         "remove deletes from storage"
     );
 }

@@ -124,7 +124,7 @@ fn cvr_flush_roundtrip_bench() {
         RowRecord {
             id: RowID {
                 schema: "public".to_string(),
-                table: "issue".to_string(),
+                table: "issue".into(),
                 row_key,
             },
             row_version: "rv1".to_string(),

@@ -16,13 +16,12 @@
 //! (~78KB per planAst round) exceeds the budget within a single cycle, so the
 //! test fails loudly against any regression of that class.
 
+use rust_ivm::ivm::data::RowMap;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -201,13 +200,11 @@ fn one_cycle(db_path: &str, cycle: i64) {
         let users = make_source("users", &["id"]);
         let posts = make_source("posts", &["id", "user_id"]);
         for i in 0..50i64 {
-            let row: FxHashMap<String, Value> = [("id".to_string(), Value::F64(i as f64))]
-                .into_iter()
-                .collect();
+            let row: RowMap = [("id".into(), Value::F64(i as f64))].into_iter().collect();
             users.borrow_mut().add_row(row);
-            let row: FxHashMap<String, Value> = [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("user_id".to_string(), Value::F64((i % 10) as f64)),
+            let row: RowMap = [
+                ("id".into(), Value::F64(i as f64)),
+                ("user_id".into(), Value::F64((i % 10) as f64)),
             ]
             .into_iter()
             .collect();
@@ -223,9 +220,9 @@ fn one_cycle(db_path: &str, cycle: i64) {
             }]);
         }
         for i in 50..80i64 {
-            let row: FxHashMap<String, Value> = [
-                ("id".to_string(), Value::F64(i as f64)),
-                ("user_id".to_string(), Value::F64((i % 10) as f64)),
+            let row: RowMap = [
+                ("id".into(), Value::F64(i as f64)),
+                ("user_id".into(), Value::F64((i % 10) as f64)),
             ]
             .into_iter()
             .collect();
@@ -243,11 +240,8 @@ fn one_cycle(db_path: &str, cycle: i64) {
         let mut specs: HashMap<String, HashMap<String, ColumnType>> = HashMap::new();
         for t in ["parent", "child"] {
             let mut cols = HashMap::new();
-            cols.insert("id".to_string(), ColumnType::Number { optional: false });
-            cols.insert(
-                "parent_id".to_string(),
-                ColumnType::Number { optional: false },
-            );
+            cols.insert("id".into(), ColumnType::Number { optional: false });
+            cols.insert("parent_id".into(), ColumnType::Number { optional: false });
             specs.insert(t.to_string(), cols);
         }
         let ast = rust_ivm::replay::json_to_ast(&planner_exists_ast());

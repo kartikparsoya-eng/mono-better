@@ -29,7 +29,9 @@ use crate::ivm::stream::{NodeStream, StreamItem};
 fn get_cache_key(node: &Node, parent_join_key: &[String]) -> String {
     let values: Vec<String> = parent_join_key
         .iter()
-        .map(|k| crate::ivm::data::js_stringify_value(node.row.get(k).unwrap_or(&Value::Null)))
+        .map(|k| {
+            crate::ivm::data::js_stringify_value(node.row.get(k.as_str()).unwrap_or(&Value::Null))
+        })
         .collect();
     values.join("\x00")
 }

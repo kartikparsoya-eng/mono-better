@@ -253,7 +253,7 @@ mod value_parity_tests {
     #[test]
     fn a_relationship_name_is_allocated_once_and_shared() {
         let row: Row = Arc::new(
-            [("id".to_string(), Value::Str(Arc::from("i1")))]
+            [("id".into(), Value::Str(Arc::from("i1")))]
                 .into_iter()
                 .collect(),
         );
@@ -416,12 +416,19 @@ mod value_parity_tests {
     }
 }
 
-/// A row of data. TS: `type Row = Record<string, Value>`.
-pub type Row = Arc<FxHashMap<String, Value>>;
+/// The map behind a `Row`. Keys are `Arc<str>`, not `String`: a row is built once per fetched SQLite
+/// row from the source's interned column names (`TableSource.column_names`),
+/// so a cell insert is an `Arc` clone instead of a `String` allocation, and a
+/// row key / bumped copy shares the same handles (rule 5). `Arc<str>:
+/// Borrow<str>` keeps every `.get("literal")` lookup unchanged.
+pub type RowMap = FxHashMap<Arc<str>, Value>;
+
+/// A row of data. TS: `type Row = Record<string, Value>`, shared by `Arc`.
+pub type Row = Arc<RowMap>;
 
 /// Create a row from key-value pairs.
 pub fn row(pairs: impl IntoIterator<Item = (String, Value)>) -> Row {
-    Arc::new(pairs.into_iter().collect())
+    Arc::new(pairs.into_iter().map(|(k, v)| (Arc::from(k), v)).collect())
 }
 
 /// Ordering specification: list of `[columnName, "asc"|"desc"]`.
@@ -434,8 +441,7 @@ pub type SortOrder = Arc<Vec<[String; 2]>>;
 /// comparator only reads columns, so borrowing the map directly lets hot callers
 /// like `binary_search` pass `&entry.row` with no `Arc::new(row.clone())` per
 /// probe. `Row` derefs to `FxHashMap`, so owned/`Arc` rows coerce at call sites.
-pub type Comparator =
-    Rc<dyn Fn(&FxHashMap<String, Value>, &FxHashMap<String, Value>) -> CmpOrdering + 'static>;
+pub type Comparator = Rc<dyn Fn(&RowMap, &RowMap) -> CmpOrdering + 'static>;
 
 /// Make a comparator from a sort order — port of TS `makeComparator`.
 pub fn make_comparator(order: SortOrder, reverse: bool) -> Comparator {
@@ -446,20 +452,18 @@ pub fn make_comparator(order: SortOrder, reverse: bool) -> Comparator {
         .iter()
         .map(|o| (o[0].clone(), o[1] == "asc"))
         .collect();
-    Rc::new(
-        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-            for (field, ascending) in &cols {
-                let a_val = a.get(field).unwrap_or(&Value::Null);
-                let b_val = b.get(field).unwrap_or(&Value::Null);
-                let cmp = compare_values(a_val, b_val);
-                if cmp != CmpOrdering::Equal {
-                    let result = if *ascending { cmp } else { cmp.reverse() };
-                    return if reverse { result.reverse() } else { result };
-                }
+    Rc::new(move |a: &RowMap, b: &RowMap| {
+        for (field, ascending) in &cols {
+            let a_val = a.get(field.as_str()).unwrap_or(&Value::Null);
+            let b_val = b.get(field.as_str()).unwrap_or(&Value::Null);
+            let cmp = compare_values(a_val, b_val);
+            if cmp != CmpOrdering::Equal {
+                let result = if *ascending { cmp } else { cmp.reverse() };
+                return if reverse { result.reverse() } else { result };
             }
-            CmpOrdering::Equal
-        },
-    )
+        }
+        CmpOrdering::Equal
+    })
 }
 
 /// Make a partial-bound comparator — comparison stops at the first
@@ -469,23 +473,21 @@ pub fn make_partial_bound_comparator(order: SortOrder, reverse: bool) -> Compara
         .iter()
         .map(|o| (o[0].clone(), o[1] == "asc"))
         .collect();
-    Rc::new(
-        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-            for (field, ascending) in &cols {
-                if !b.contains_key(field) {
-                    return CmpOrdering::Equal;
-                }
-                let a_val = a.get(field).unwrap_or(&Value::Null);
-                let b_val = b.get(field).unwrap_or(&Value::Null);
-                let cmp = compare_values(a_val, b_val);
-                if cmp != CmpOrdering::Equal {
-                    let result = if *ascending { cmp } else { cmp.reverse() };
-                    return if reverse { result.reverse() } else { result };
-                }
+    Rc::new(move |a: &RowMap, b: &RowMap| {
+        for (field, ascending) in &cols {
+            if !b.contains_key(field.as_str()) {
+                return CmpOrdering::Equal;
             }
-            CmpOrdering::Equal
-        },
-    )
+            let a_val = a.get(field.as_str()).unwrap_or(&Value::Null);
+            let b_val = b.get(field.as_str()).unwrap_or(&Value::Null);
+            let cmp = compare_values(a_val, b_val);
+            if cmp != CmpOrdering::Equal {
+                let result = if *ascending { cmp } else { cmp.reverse() };
+                return if reverse { result.reverse() } else { result };
+            }
+        }
+        CmpOrdering::Equal
+    })
 }
 
 /// A node flowing through the pipeline — port of TS `Node`.

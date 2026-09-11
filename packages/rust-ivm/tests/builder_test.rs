@@ -1,5 +1,6 @@
 //! Tests for builder features: LIKE/ILIKE, IN/NOT IN, IS/IS NOT, EXISTS, transformFilters.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -19,9 +20,9 @@ use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -40,9 +41,9 @@ fn make_source(name: &str, pk: &[&str]) -> Rc<RefCell<MemorySource>> {
 
 fn add_rows(source: &Rc<RefCell<MemorySource>>, rows: &[(&str, Value, &str, Value)]) {
     for (c1, v1, c2, v2) in rows {
-        let mut m: FxHashMap<String, Value> = FxHashMap::default();
-        m.insert(c1.to_string(), v1.clone());
-        m.insert(c2.to_string(), v2.clone());
+        let mut m: RowMap = FxHashMap::default();
+        m.insert(c1.to_string().into(), v1.clone());
+        m.insert(c2.to_string().into(), v2.clone());
         source.borrow_mut().add_row(m);
     }
 }
@@ -563,17 +564,17 @@ fn test_pipeline_with_like_filter() {
 fn test_pipeline_with_is_null_filter() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row({
-        let mut m: FxHashMap<String, Value> = FxHashMap::default();
-        m.insert("id".to_string(), Value::F64(1.0));
-        m.insert("name".to_string(), Value::Str("alice".into()));
-        m.insert("bio".to_string(), Value::Null);
+        let mut m: RowMap = FxHashMap::default();
+        m.insert("id".into(), Value::F64(1.0));
+        m.insert("name".into(), Value::Str("alice".into()));
+        m.insert("bio".into(), Value::Null);
         m
     });
     source.borrow_mut().add_row({
-        let mut m: FxHashMap<String, Value> = FxHashMap::default();
-        m.insert("id".to_string(), Value::F64(2.0));
-        m.insert("name".to_string(), Value::Str("bob".into()));
-        m.insert("bio".to_string(), Value::Str("has bio".into()));
+        let mut m: RowMap = FxHashMap::default();
+        m.insert("id".into(), Value::F64(2.0));
+        m.insert("name".into(), Value::Str("bob".into()));
+        m.insert("bio".into(), Value::Str("has bio".into()));
         m
     });
 

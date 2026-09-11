@@ -63,7 +63,7 @@ fn poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body() {
         rows_patch: Some(vec![
             RowPatchOp {
                 op: "put",
-                table_name: "issue".to_string(),
+                table_name: "issue".into(),
                 // Arc-shared, a float that must stay `1.0`, a null, and a
                 // nested object whose key order must survive.
                 value: Some(Arc::new(serde_json::json!({
@@ -77,7 +77,7 @@ fn poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body() {
             },
             RowPatchOp {
                 op: "del",
-                table_name: "comment".to_string(),
+                table_name: "comment".into(),
                 value: None,
                 id: Some(serde_json::json!({"id": "c1"})),
             },
@@ -323,7 +323,7 @@ fn make_row_patch_put(table: &str, contents: Value) -> PatchToVersion {
         patch: Patch::Row(RowPatch::Put {
             id: RowID {
                 schema: "s".to_string(),
-                table: table.to_string(),
+                table: table.into(),
                 row_key: Map::new(),
             },
             contents: std::sync::Arc::new(contents),
@@ -874,7 +874,7 @@ fn make_mutation_del_patch(row_key: Value) -> PatchToVersion {
         patch: Patch::Row(RowPatch::Del {
             id: RowID {
                 schema: "s".to_string(),
-                table: "app_0.mutations".to_string(),
+                table: "app_0.mutations".into(),
                 row_key: row_key.as_object().unwrap().clone(),
             },
         }),
@@ -1243,7 +1243,7 @@ fn a_large_row_burst_flushes_on_the_byte_cap_and_preserves_every_patch() {
             patch: Patch::Row(RowPatch::Put {
                 id: RowID {
                     schema: "s".to_string(),
-                    table: "t".to_string(),
+                    table: "t".into(),
                     row_key,
                 },
                 contents: std::sync::Arc::new(serde_json::json!({
@@ -1339,7 +1339,7 @@ fn test_patches_below_base_version_skipped() {
         patch: Patch::Row(RowPatch::Put {
             id: RowID {
                 schema: "s".to_string(),
-                table: "t".to_string(),
+                table: "t".into(),
                 row_key: Map::new(),
             },
             contents: std::sync::Arc::new(serde_json::json!({"id": 1})),

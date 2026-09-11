@@ -2,6 +2,7 @@
 //! Port of TS `flipped-join.fetch.test.ts` (v1.7.0).
 //! Tests the inner join: fetch child first, then batched parent fetch.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -17,9 +18,9 @@ use rust_ivm::ivm::schema::{ColumnType, System};
 
 #[allow(dead_code)]
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -41,9 +42,9 @@ fn make_source(
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let row_data: FxHashMap<String, Value> = pairs
+    let row_data: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(row_data);
 }
@@ -245,7 +246,7 @@ fn test_fetch_with_constraint() {
     );
 
     let mut constraint = rust_ivm::ivm::constraint::Constraint::default();
-    constraint.insert("id".to_string(), str_val("i2"));
+    constraint.insert("id".into(), str_val("i2"));
     let req = FetchRequest {
         constraint: Some(constraint),
         ..Default::default()
@@ -476,8 +477,7 @@ fn test_fetch_start_after() {
         ],
     );
 
-    let start_row: FxHashMap<String, Value> =
-        FxHashMap::from_iter([("id".to_string(), str_val("i2"))]);
+    let start_row: RowMap = FxHashMap::from_iter([("id".into(), str_val("i2"))]);
     let req = FetchRequest {
         start: Some(rust_ivm::ivm::operator::Start {
             row: Arc::new(start_row),
@@ -513,8 +513,7 @@ fn test_fetch_start_at() {
         ],
     );
 
-    let start_row: FxHashMap<String, Value> =
-        FxHashMap::from_iter([("id".to_string(), str_val("i2"))]);
+    let start_row: RowMap = FxHashMap::from_iter([("id".into(), str_val("i2"))]);
     let req = FetchRequest {
         start: Some(rust_ivm::ivm::operator::Start {
             row: Arc::new(start_row),
@@ -550,8 +549,7 @@ fn test_fetch_start_at_reverse() {
         ],
     );
 
-    let start_row: FxHashMap<String, Value> =
-        FxHashMap::from_iter([("id".to_string(), str_val("i2"))]);
+    let start_row: RowMap = FxHashMap::from_iter([("id".into(), str_val("i2"))]);
     let req = FetchRequest {
         start: Some(rust_ivm::ivm::operator::Start {
             row: Arc::new(start_row),
@@ -588,8 +586,7 @@ fn test_fetch_start_after_reverse() {
         ],
     );
 
-    let start_row: FxHashMap<String, Value> =
-        FxHashMap::from_iter([("id".to_string(), str_val("i2"))]);
+    let start_row: RowMap = FxHashMap::from_iter([("id".into(), str_val("i2"))]);
     let req = FetchRequest {
         start: Some(rust_ivm::ivm::operator::Start {
             row: Arc::new(start_row),

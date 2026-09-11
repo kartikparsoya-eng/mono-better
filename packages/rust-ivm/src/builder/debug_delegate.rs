@@ -231,13 +231,14 @@ impl DebugDelegate for Debug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ivm::data::RowMap;
     use crate::ivm::data::Value;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
     fn row(id: &str) -> Row {
-        let mut m: FxHashMap<String, Value> = FxHashMap::default();
-        m.insert("id".to_string(), Value::Str(Arc::from(id)));
+        let mut m: RowMap = FxHashMap::default();
+        m.insert("id".into(), Value::Str(Arc::from(id)));
         Arc::new(m)
     }
 

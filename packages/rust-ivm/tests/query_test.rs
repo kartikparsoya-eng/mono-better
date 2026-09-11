@@ -15,7 +15,7 @@ fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
 
     let mut user_rels: HashMap<String, RelationshipSpec> = HashMap::new();
     user_rels.insert(
-        "posts".to_string(),
+        "posts".into(),
         RelationshipSpec {
             source_field: vec!["id".to_string()],
             dest_field: vec!["author_id".to_string()],
@@ -23,11 +23,11 @@ fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
             cardinality: Cardinality::Many,
         },
     );
-    tables.insert("users".to_string(), user_rels);
+    tables.insert("users".into(), user_rels);
 
     let mut post_rels: HashMap<String, RelationshipSpec> = HashMap::new();
     post_rels.insert(
-        "author".to_string(),
+        "author".into(),
         RelationshipSpec {
             source_field: vec!["author_id".to_string()],
             dest_field: vec!["id".to_string()],
@@ -36,7 +36,7 @@ fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
         },
     );
     post_rels.insert(
-        "comments".to_string(),
+        "comments".into(),
         RelationshipSpec {
             source_field: vec!["id".to_string()],
             dest_field: vec!["post_id".to_string()],
@@ -44,7 +44,7 @@ fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
             cardinality: Cardinality::Many,
         },
     );
-    tables.insert("posts".to_string(), post_rels);
+    tables.insert("posts".into(), post_rels);
 
     tables
 }

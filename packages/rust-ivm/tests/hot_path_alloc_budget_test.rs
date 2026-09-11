@@ -3,7 +3,7 @@
 //! fetched row.
 //!
 //! `TableSource`'s row materialisation (table_source.rs, the
-//! `source.row_mat` scope) builds one `FxHashMap<String, Value>` per row — the
+//! `source.row_mat` scope) builds one `RowMap` per row — the
 //! innermost loop of every hydrate. It started that map at ZERO capacity and
 //! inserted column-by-column, so a 40-column row paid four table-growth
 //! allocations (hashbrown steps 3 → 7 → 14 → 28 → 56) before it held its

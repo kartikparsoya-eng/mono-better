@@ -18,7 +18,7 @@ fn make_schema() -> SchemaQuery {
 
     let mut user_rels: HashMap<String, RelationshipSpec> = HashMap::new();
     user_rels.insert(
-        "posts".to_string(),
+        "posts".into(),
         RelationshipSpec {
             source_field: vec!["id".to_string()],
             dest_field: vec!["author_id".to_string()],
@@ -26,11 +26,11 @@ fn make_schema() -> SchemaQuery {
             cardinality: Cardinality::Many,
         },
     );
-    schema.insert("users".to_string(), user_rels);
+    schema.insert("users".into(), user_rels);
 
     let mut post_rels: HashMap<String, RelationshipSpec> = HashMap::new();
     post_rels.insert(
-        "author".to_string(),
+        "author".into(),
         RelationshipSpec {
             source_field: vec!["author_id".to_string()],
             dest_field: vec!["id".to_string()],
@@ -38,7 +38,7 @@ fn make_schema() -> SchemaQuery {
             cardinality: Cardinality::One,
         },
     );
-    schema.insert("posts".to_string(), post_rels);
+    schema.insert("posts".into(), post_rels);
 
     schema
 }

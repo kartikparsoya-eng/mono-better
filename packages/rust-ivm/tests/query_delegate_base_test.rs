@@ -56,7 +56,7 @@ fn create_storage_returns_working_storage() {
     let mut d = QueryDelegateBase::new();
     let storage = d.create_storage();
 
-    storage.borrow_mut().set("k".to_string(), Value::F64(7.0));
+    storage.borrow_mut().set("k".into(), Value::F64(7.0));
     assert_eq!(storage.borrow().get("k"), Some(Value::F64(7.0)));
 
     storage.borrow_mut().del("k");

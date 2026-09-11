@@ -2,11 +2,10 @@
 //! `zero-cache` (getRow, transformedAst, initialized, cancel, setTableSpec).
 //! These were untested (triage #25: engine/mod.rs L438/1347/1355/1365/1387).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -27,9 +26,9 @@ fn make_source(name: &str, pk: &[&str]) -> Rc<RefCell<MemorySource>> {
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(map);
 }
@@ -72,7 +71,7 @@ fn get_row_by_table_and_pk() {
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
-    let got: Option<Row> = engine.get_row("users", &[("id".to_string(), Value::F64(1.0))]);
+    let got: Option<Row> = engine.get_row("users", &[("id".into(), Value::F64(1.0))]);
     assert_eq!(
         got.and_then(|r| r.get("name").cloned()),
         Some(Value::Str("Alice".into()))
@@ -81,14 +80,14 @@ fn get_row_by_table_and_pk() {
     // Missing PK => None.
     assert!(
         engine
-            .get_row("users", &[("id".to_string(), Value::F64(999.0))])
+            .get_row("users", &[("id".into(), Value::F64(999.0))])
             .is_none(),
         "absent PK returns None"
     );
     // Unknown table => None (source lookup misses).
     assert!(
         engine
-            .get_row("nope", &[("id".to_string(), Value::F64(1.0))])
+            .get_row("nope", &[("id".into(), Value::F64(1.0))])
             .is_none(),
         "unknown table returns None"
     );
@@ -148,7 +147,7 @@ fn set_table_spec_coexists_with_hydrate() {
     // Row still retrievable and the query still hydrates through the spec'd table.
     assert!(
         engine
-            .get_row("users", &[("id".to_string(), Value::F64(1.0))])
+            .get_row("users", &[("id".into(), Value::F64(1.0))])
             .is_some()
     );
     let results = engine.add_queries(&[QuerySpec {

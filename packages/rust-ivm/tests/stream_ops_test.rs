@@ -6,6 +6,7 @@
 //! functions directly and pin the TS behavior that `take` passes `Yield` items
 //! through WITHOUT counting them against the limit.
 
+use rust_ivm::ivm::data::RowMap;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -14,8 +15,8 @@ use rust_ivm::ivm::data::{Node, Value};
 use rust_ivm::ivm::stream::{StreamItem, count_data, first, single_node, skip_yields, take};
 
 fn node(id: f64) -> Node {
-    let mut r: FxHashMap<String, Value> = FxHashMap::default();
-    r.insert("id".to_string(), Value::F64(id));
+    let mut r: RowMap = FxHashMap::default();
+    r.insert("id".into(), Value::F64(id));
     Node::new(Arc::new(r))
 }
 

@@ -8,12 +8,11 @@
 //! drop"). These tests assert the live-instance census returns to baseline
 //! after remove_query / engine.destroy() for join and EXISTS graphs — the
 //! regression guard for that destroy-severs-cycles invariant.
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -48,9 +47,9 @@ fn make_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<RefCell<MemorySourc
 }
 
 fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     source.borrow_mut().add_row(map);
 }

@@ -563,7 +563,7 @@ impl RowRecordCache {
             match row {
                 None => deletes.push(RowKeyRef {
                     schema: id.schema.clone(),
-                    table: id.table.clone(),
+                    table: id.table.to_string(),
                     row_key: serde_json::Value::Object(id.row_key.clone()),
                 }),
                 Some(r) => inserts.push(row_record_to_rows_row(&self.cvr_id, r)),
@@ -969,7 +969,10 @@ async fn flush_one_iteration(
                     "schema".into(),
                     serde_json::Value::String(id.schema.clone()),
                 );
-                obj.insert("table".into(), serde_json::Value::String(id.table.clone()));
+                obj.insert(
+                    "table".into(),
+                    serde_json::Value::String(id.table.to_string()),
+                );
                 obj.insert(
                     "rowKey".into(),
                     serde_json::Value::Object(id.row_key.clone()),
@@ -1179,7 +1182,7 @@ mod tests {
         RowRecord {
             id: RowID {
                 schema: schema.to_string(),
-                table: table.to_string(),
+                table: table.into(),
                 row_key,
             },
             row_version: version.to_string(),
@@ -1196,7 +1199,7 @@ mod tests {
         let rows_row = RowsRow {
             client_group_id: "cg1".to_string(),
             schema: "public".to_string(),
-            table: "users".to_string(),
+            table: "users".into(),
             row_key: serde_json::json!({"id": 42}),
             row_version: "v1".to_string(),
             patch_version: "01".to_string(),
@@ -1204,7 +1207,7 @@ mod tests {
         };
         let record = rows_row_to_row_record(&rows_row).unwrap();
         assert_eq!(record.id.schema, "public");
-        assert_eq!(record.id.table, "users");
+        assert_eq!(&*record.id.table, "users");
         assert_eq!(record.row_version, "v1");
         assert_eq!(record.patch_version.state_version, "01");
         assert_eq!(
@@ -1230,7 +1233,7 @@ mod tests {
         let rows_row = RowsRow {
             client_group_id: "cg1".to_string(),
             schema: "public".to_string(),
-            table: "users".to_string(),
+            table: "users".into(),
             row_key: serde_json::json!({"id": 42}),
             row_version: "v1".to_string(),
             patch_version: "01".to_string(),
@@ -1245,7 +1248,7 @@ mod tests {
         let base = || RowsRow {
             client_group_id: "cg1".to_string(),
             schema: "public".to_string(),
-            table: "users".to_string(),
+            table: "users".into(),
             row_key: serde_json::json!({"id": 42}),
             row_version: "v1".to_string(),
             patch_version: "01".to_string(),

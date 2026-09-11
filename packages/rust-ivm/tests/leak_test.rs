@@ -14,12 +14,12 @@ use rust_ivm::ivm::source::Source;
 
 fn make_engine() -> Engine {
     let mut pks = HashMap::new();
-    pks.insert("t".to_string(), vec!["id".to_string()]);
+    pks.insert("t".into(), vec!["id".to_string()]);
     let mut eng = Engine::new(pks);
 
     let mut cols = HashMap::new();
-    cols.insert("id".to_string(), ColumnType::Number { optional: false });
-    cols.insert("name".to_string(), ColumnType::String { optional: false });
+    cols.insert("id".into(), ColumnType::Number { optional: false });
+    cols.insert("name".into(), ColumnType::String { optional: false });
     let source: Rc<RefCell<dyn Source>> = Rc::new(RefCell::new(MemorySource::new(
         "t",
         cols,

@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
-use crate::ivm::data::{Comparator, Value};
+use crate::ivm::data::{Comparator, RowMap};
 
 // ---------------------------------------------------------------------------
 // Format — port of `zero-types/src/format.ts`
@@ -50,7 +50,7 @@ pub enum View {
 #[derive(Clone, Debug)]
 pub struct Entry {
     /// Column values — the row data (string keys → Value).
-    pub row: FxHashMap<String, Value>,
+    pub row: RowMap,
     /// Reference count: how many edges reach this entry within its relationship.
     pub ref_count: usize,
     /// Optional stable identity (JSON-stringified PK).
@@ -61,7 +61,7 @@ pub struct Entry {
 
 impl Entry {
     /// Create a new entry from a row with refCount=1.
-    pub fn new(row: FxHashMap<String, Value>, ref_count: usize) -> Self {
+    pub fn new(row: RowMap, ref_count: usize) -> Self {
         Entry {
             row,
             ref_count,

@@ -35,6 +35,7 @@
 //! its post-advance assertion (the delivered-row assertion fails too, since a
 //! change parked in `changes` is never streamed).
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -62,10 +63,10 @@ fn issues_source() -> Rc<RefCell<MemorySource>> {
     )))
 }
 
-fn row(id: &str, owner: &str) -> FxHashMap<String, Value> {
-    let mut m: FxHashMap<String, Value> = FxHashMap::default();
-    m.insert("id".to_string(), Value::Str(id.into()));
-    m.insert("owner".to_string(), Value::Str(owner.into()));
+fn row(id: &str, owner: &str) -> RowMap {
+    let mut m: RowMap = FxHashMap::default();
+    m.insert("id".into(), Value::Str(id.into()));
+    m.insert("owner".into(), Value::Str(owner.into()));
     m
 }
 

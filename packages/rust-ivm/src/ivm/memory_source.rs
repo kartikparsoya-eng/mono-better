@@ -8,7 +8,9 @@
 use crate::builder::ast::Condition;
 use crate::ivm::change::{Change, make_add_change, make_edit_change, make_remove_change};
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key, constraint_matches_row};
-use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
+use crate::ivm::data::{
+    Comparator, Node, Row, RowMap, SortOrder, Value, make_comparator, values_equal,
+};
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{
     Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
@@ -173,7 +175,7 @@ impl MemorySource {
         self.db_path.is_some()
     }
 
-    pub fn add_row(&mut self, row_data: FxHashMap<String, Value>) {
+    pub fn add_row(&mut self, row_data: RowMap) {
         let r = Arc::new(row_data);
         let data = self.data.clone();
         let comparator = self.comparator.clone();
@@ -192,8 +194,8 @@ impl MemorySource {
         let pos = data.partition_point(|existing| comparator(existing, &r) == CmpOrdering::Less);
         let same_pk = |existing: &Row| {
             pk.iter().all(|k| {
-                let a = existing.get(k).unwrap_or(&Value::Null);
-                let b = r.get(k).unwrap_or(&Value::Null);
+                let a = existing.get(k.as_str()).unwrap_or(&Value::Null);
+                let b = r.get(k.as_str()).unwrap_or(&Value::Null);
                 values_equal(a, b)
             })
         };
@@ -213,8 +215,8 @@ impl MemorySource {
             data.partition_point(|existing| (self.comparator)(existing, row) == CmpOrdering::Less);
         pos < data.len()
             && self.primary_key.iter().all(|pk| {
-                let a = data[pos].get(pk).unwrap_or(&Value::Null);
-                let b = row.get(pk).unwrap_or(&Value::Null);
+                let a = data[pos].get(pk.as_str()).unwrap_or(&Value::Null);
+                let b = row.get(pk.as_str()).unwrap_or(&Value::Null);
                 values_equal(a, b)
             })
     }
@@ -230,7 +232,7 @@ impl MemorySource {
         data.iter()
             .find(|existing| {
                 pk.iter().all(|(col, val)| {
-                    let a = existing.get(col).unwrap_or(&Value::Null);
+                    let a = existing.get(col.as_str()).unwrap_or(&Value::Null);
                     values_equal(a, val)
                 })
             })
@@ -334,8 +336,8 @@ impl MemorySource {
                 let conn = c.borrow();
                 if let Some(ref keys) = conn.split_edit_keys {
                     keys.iter().any(|k| {
-                        let old_val = old_row.get(k).unwrap_or(&Value::Null);
-                        let new_val = row.get(k).unwrap_or(&Value::Null);
+                        let old_val = old_row.get(k.as_str()).unwrap_or(&Value::Null);
+                        let new_val = row.get(k.as_str()).unwrap_or(&Value::Null);
                         old_val != new_val
                     })
                 } else {
@@ -457,8 +459,8 @@ impl MemorySource {
             SourceChange::Remove { row } => {
                 if let Some(pos) = data.iter().position(|existing| {
                     pk.iter().all(|pk| {
-                        let a = existing.get(pk).unwrap_or(&Value::Null);
-                        let b = row.get(pk).unwrap_or(&Value::Null);
+                        let a = existing.get(pk.as_str()).unwrap_or(&Value::Null);
+                        let b = row.get(pk.as_str()).unwrap_or(&Value::Null);
                         values_equal(a, b)
                     })
                 }) {
@@ -472,8 +474,8 @@ impl MemorySource {
             SourceChange::Edit { row, old_row } => {
                 if let Some(pos) = data.iter().position(|existing| {
                     pk.iter().all(|pk| {
-                        let a = existing.get(pk).unwrap_or(&Value::Null);
-                        let b = old_row.get(pk).unwrap_or(&Value::Null);
+                        let a = existing.get(pk.as_str()).unwrap_or(&Value::Null);
+                        let b = old_row.get(pk.as_str()).unwrap_or(&Value::Null);
                         values_equal(a, b)
                     })
                 }) {
@@ -691,7 +693,7 @@ impl Input for SourceInput {
             let rows_result = stmt.query_map(
                 rusqlite::params_from_iter(param_refs.iter().copied()),
                 |row| {
-                    let mut map: FxHashMap<String, Value> = FxHashMap::default();
+                    let mut map: RowMap = FxHashMap::default();
                     for (i, col) in col_names.iter().enumerate() {
                         let value = crate::sqlite::table_source::sqlite_value_to_ivm(
                             row.get_ref(i),
@@ -699,7 +701,7 @@ impl Input for SourceInput {
                             &self.table_name,
                             col,
                         );
-                        map.insert(col.clone(), value);
+                        map.insert(Arc::from(col.as_str()), value);
                     }
                     Ok(Arc::new(map))
                 },
@@ -1279,12 +1281,12 @@ struct StableEdit {
 fn row_matches_pk(a: &Row, b: &Row, primary_key: &[String]) -> bool {
     primary_key
         .iter()
-        .all(|key| storage_values_equal(a.get(key), b.get(key)))
+        .all(|key| storage_values_equal(a.get(key.as_str()), b.get(key.as_str())))
 }
 
 fn rows_storage_equal_on(left: &Row, right: &Row, sort: &SortOrder) -> bool {
     sort.iter()
-        .all(|part| storage_values_equal(left.get(&part[0]), right.get(&part[0])))
+        .all(|part| storage_values_equal(left.get(part[0].as_str()), right.get(part[0].as_str())))
 }
 
 fn storage_values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
@@ -1573,7 +1575,7 @@ impl Iterator for KWayMerge {
 /// String-based PK key for deduplication (Value doesn't implement Hash).
 fn pk_key(row: &Row, pk: &[String]) -> String {
     pk.iter()
-        .map(|k| match row.get(k) {
+        .map(|k| match row.get(k.as_str()) {
             Some(Value::Str(s)) => s.to_string(),
             Some(Value::F64(n)) => n.to_string(),
             Some(Value::Bool(b)) => b.to_string(),
@@ -1591,9 +1593,9 @@ mod overlay_tests {
 
     fn row(id: f64, label: &str, json: &str) -> Row {
         Arc::new(FxHashMap::from_iter([
-            ("id".to_string(), Value::F64(id)),
-            ("label".to_string(), Value::Str(Arc::from(label))),
-            ("ordered_json".to_string(), Value::Json(Arc::from(json))),
+            ("id".into(), Value::F64(id)),
+            ("label".into(), Value::Str(Arc::from(label))),
+            ("ordered_json".into(), Value::Json(Arc::from(json))),
         ]))
     }
 

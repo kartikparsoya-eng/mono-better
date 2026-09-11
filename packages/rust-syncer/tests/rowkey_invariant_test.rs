@@ -85,7 +85,7 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
                 && &*rc.table == shape.table
                 && !rc.is_hidden
             {
-                let mut c: Vec<String> = rc.row_key.keys().cloned().collect();
+                let mut c: Vec<String> = rc.row_key.keys().map(|k| k.to_string()).collect();
                 c.sort();
                 cols = c;
             }

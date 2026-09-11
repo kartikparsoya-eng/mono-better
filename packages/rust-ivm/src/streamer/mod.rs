@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::data::{Node, Row, Value};
+use crate::ivm::data::{Node, Row, RowMap, Value};
 use crate::ivm::schema::{SourceSchema, System};
 use crate::snapshotter::ZERO_VERSION_COLUMN_NAME;
 
@@ -444,22 +444,24 @@ pub(crate) fn get_row_key(cols: &[String], row: &Row) -> Row {
          must contain at least one PK column (empty key would emit rowKey:\"{{}}\" \
          and crash the client at toPrimaryKeyString)",
     );
-    let mut key: FxHashMap<String, Value> = FxHashMap::default();
+    // Each key shares the row's own `Arc<str>` column name (`get_key_value`):
+    // no allocation per primary-key column per row.
+    let mut key: RowMap = FxHashMap::default();
     for col in cols {
-        let val = match row.get(col) {
-            Some(Value::Null) | None => panic!(
+        let (k, val) = match row.get_key_value(col.as_str()) {
+            Some((_, Value::Null)) | None => panic!(
                 "get_row_key: primary-key column {col:?} is {} in the row — a \
                  primary key is never legitimately null/absent (would emit a \
                  null/undefined rowKey and crash the client)",
-                if row.contains_key(col) {
+                if row.contains_key(col.as_str()) {
                     "null"
                 } else {
                     "absent"
                 },
             ),
-            Some(v) => v.clone(),
+            Some((k, v)) => (k.clone(), v.clone()),
         };
-        key.insert(col.clone(), val);
+        key.insert(k, val);
     }
     Arc::new(key)
 }
@@ -479,9 +481,9 @@ fn bump_row_version(row: &Row, spec: Option<&TableSpecInfo>) -> Row {
 
     // Only bump if the row's version is below minRowVersion.
     if row_version < min_version {
-        let mut new_row: FxHashMap<String, Value> = row.as_ref().clone();
+        let mut new_row: RowMap = row.as_ref().clone();
         new_row.insert(
-            ZERO_VERSION_COLUMN_NAME.to_string(),
+            Arc::from(ZERO_VERSION_COLUMN_NAME),
             Value::Str(Arc::from(min_version)),
         );
         Arc::new(new_row)
@@ -662,14 +664,15 @@ impl<S: StreamSink> Chunker<S> {
 #[cfg(test)]
 mod get_row_key_tests {
     use super::get_row_key;
+    use crate::ivm::data::RowMap;
     use crate::ivm::data::{Row, Value};
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
     fn row(pairs: &[(&str, Value)]) -> Row {
-        let mut m: FxHashMap<String, Value> = FxHashMap::default();
+        let mut m: RowMap = FxHashMap::default();
         for (k, v) in pairs {
-            m.insert((*k).to_string(), v.clone());
+            m.insert((*k).to_string().into(), v.clone());
         }
         Arc::new(m)
     }

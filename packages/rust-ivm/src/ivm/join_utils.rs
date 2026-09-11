@@ -23,8 +23,8 @@ use crate::ivm::stream::{NodeStream, RelStream};
 /// Port of TS `rowEqualsForCompoundKey` (join-utils.ts:232).
 pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &[String]) -> bool {
     for k in key {
-        let av = a.get(k).unwrap_or(&Value::Null);
-        let bv = b.get(k).unwrap_or(&Value::Null);
+        let av = a.get(k.as_str()).unwrap_or(&Value::Null);
+        let bv = b.get(k.as_str()).unwrap_or(&Value::Null);
         if compare_values(av, bv) != CmpOrdering::Equal {
             return false;
         }
@@ -41,8 +41,8 @@ pub fn is_join_match(
     child_key: &[String],
 ) -> bool {
     for (pk, ck) in parent_key.iter().zip(child_key.iter()) {
-        let pv = parent.get(pk).unwrap_or(&Value::Null);
-        let cv = child.get(ck).unwrap_or(&Value::Null);
+        let pv = parent.get(pk.as_str()).unwrap_or(&Value::Null);
+        let cv = child.get(ck.as_str()).unwrap_or(&Value::Null);
         if !values_equal(pv, cv) {
             return false;
         }
@@ -60,7 +60,10 @@ pub fn build_join_constraint(
 ) -> Option<crate::ivm::constraint::Constraint> {
     let mut constraint = crate::ivm::constraint::Constraint::default();
     for (from, to) in source_key.iter().zip(target_key.iter()) {
-        let val = source_row.get(from).cloned().unwrap_or(Value::Null);
+        let val = source_row
+            .get(from.as_str())
+            .cloned()
+            .unwrap_or(Value::Null);
         if val.is_null() {
             return None;
         }

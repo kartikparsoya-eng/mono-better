@@ -3,12 +3,11 @@
 //! Tests: basics (add/remove through filter), edit transitions,
 //!        beginFilter/endFilter forwarding.
 
+use rust_ivm::ivm::data::RowMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::catch::Catch;
 use rust_ivm::ivm::catch::CaughtChange;
@@ -22,9 +21,9 @@ use rust_ivm::ivm::source::{
 };
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
-    let map: FxHashMap<String, Value> = pairs
+    let map: RowMap = pairs
         .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
+        .map(|(k, v)| (k.to_string().into(), v.clone()))
         .collect();
     Arc::new(map)
 }
@@ -79,24 +78,24 @@ fn test_filter_basics_fetch() {
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(3.0)),
-            ("b".to_string(), Value::Str("foo".into())),
+            ("a".into(), Value::F64(3.0)),
+            ("b".into(), Value::Str("foo".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(2.0)),
-            ("b".to_string(), Value::Str("bar".into())),
+            ("a".into(), Value::F64(2.0)),
+            ("b".into(), Value::Str("bar".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(1.0)),
-            ("b".to_string(), Value::Str("foo".into())),
+            ("a".into(), Value::F64(1.0)),
+            ("b".into(), Value::Str("foo".into())),
         ]
         .into_iter()
         .collect(),
@@ -137,24 +136,24 @@ fn test_filter_basics_push() {
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(3.0)),
-            ("b".to_string(), Value::Str("foo".into())),
+            ("a".into(), Value::F64(3.0)),
+            ("b".into(), Value::Str("foo".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(2.0)),
-            ("b".to_string(), Value::Str("bar".into())),
+            ("a".into(), Value::F64(2.0)),
+            ("b".into(), Value::Str("bar".into())),
         ]
         .into_iter()
         .collect(),
     );
     source.borrow_mut().add_row(
         [
-            ("a".to_string(), Value::F64(1.0)),
-            ("b".to_string(), Value::Str("foo".into())),
+            ("a".into(), Value::F64(1.0)),
+            ("b".into(), Value::Str("foo".into())),
         ]
         .into_iter()
         .collect(),
@@ -231,12 +230,9 @@ fn test_filter_edit_add_passes_filter() {
     );
     for (a, x) in [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)] {
         source.borrow_mut().add_row(
-            [
-                ("a".to_string(), Value::F64(a)),
-                ("x".to_string(), Value::F64(x)),
-            ]
-            .into_iter()
-            .collect(),
+            [("a".into(), Value::F64(a)), ("x".into(), Value::F64(x))]
+                .into_iter()
+                .collect(),
         );
     }
 
@@ -297,12 +293,9 @@ fn test_filter_edit_stops_passing_becomes_remove() {
     );
     for (a, x) in [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)] {
         source.borrow_mut().add_row(
-            [
-                ("a".to_string(), Value::F64(a)),
-                ("x".to_string(), Value::F64(x)),
-            ]
-            .into_iter()
-            .collect(),
+            [("a".into(), Value::F64(a)), ("x".into(), Value::F64(x))]
+                .into_iter()
+                .collect(),
         );
     }
 
@@ -358,12 +351,9 @@ fn test_filter_edit_neither_passes_is_noop() {
     );
     for (a, x) in [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)] {
         source.borrow_mut().add_row(
-            [
-                ("a".to_string(), Value::F64(a)),
-                ("x".to_string(), Value::F64(x)),
-            ]
-            .into_iter()
-            .collect(),
+            [("a".into(), Value::F64(a)), ("x".into(), Value::F64(x))]
+                .into_iter()
+                .collect(),
         );
     }
 
@@ -405,12 +395,9 @@ fn test_filter_edit_both_pass_is_edit() {
     );
     for (a, x) in [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)] {
         source.borrow_mut().add_row(
-            [
-                ("a".to_string(), Value::F64(a)),
-                ("x".to_string(), Value::F64(x)),
-            ]
-            .into_iter()
-            .collect(),
+            [("a".into(), Value::F64(a)), ("x".into(), Value::F64(x))]
+                .into_iter()
+                .collect(),
         );
     }
 

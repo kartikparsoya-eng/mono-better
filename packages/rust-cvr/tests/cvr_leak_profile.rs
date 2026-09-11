@@ -51,7 +51,7 @@ fn base_cvr() -> CVR {
 fn row_id(n: usize) -> RowID {
     RowID {
         schema: "s".to_string(),
-        table: "t".to_string(),
+        table: "t".into(),
         row_key: serde_json::json!({ "id": n }).as_object().unwrap().clone(),
     }
 }

@@ -71,14 +71,14 @@ fn specs() -> HashMap<String, HashMap<String, ColumnType>> {
     HashMap::from([
         (
             "parent".to_string(),
-            HashMap::from([("id".to_string(), n(false)), ("name".to_string(), s(true))]),
+            HashMap::from([("id".to_string(), n(false)), ("name".into(), s(true))]),
         ),
         (
             "child".to_string(),
             HashMap::from([
                 ("id".to_string(), n(false)),
                 ("parent_id".to_string(), n(true)),
-                ("email".to_string(), s(true)),
+                ("email".into(), s(true)),
             ]),
         ),
     ])

@@ -4895,7 +4895,7 @@ fn issue_full_table_spec() -> crate::db::specs::LiteTableSpec {
 fn issue_table_spec() -> crate::services::view_syncer::pipeline_driver::IvmTableSpec {
     use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     IvmTableSpec {
-        table: "issue".to_string(),
+        table: "issue".into(),
         column_order: Vec::new(),
         columns: HashMap::from([
             (
