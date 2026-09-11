@@ -795,7 +795,7 @@ HELPER_ALIASES = {
     "zero-protocol/src/error.ts::ProtocolError": ("protocol/error.rs ErrorBody", "thrown error class → ErrorBody Result (D-16)"),
     "zero-protocol/src/error.ts::errorBodySchema": ("protocol/error.rs ErrorBody", "valita union → kind-discriminated Deserialize (error-wire-fixture.json) (D-17)"),
     "zero-protocol/src/error.ts::isProtocolError": ("N/A", "instanceof guard → Result::Err(ErrorBody) (D-16)"),
-    "zero-protocol/src/mutate-server.ts::mutateResponseSchema": ("services/mutagen/pusher.rs", "valita → serde (D-17)"),
+    "zero-protocol/src/mutate-server.ts::mutateResponseSchema": ("protocol/mutate_server.rs MutateResponse", "valita union → untagged serde enum, passthrough mode (D-17)"),
     "zero-protocol/src/mutation-type-enum.ts::*": ("N/A", "MutationType enum; rust relays custom pushes only — I-3"),
     "zero-protocol/src/mutation.ts::mutationResultSchema": ("client_handler.rs MutationResult", "valita union → untagged serde enum, passthrough mode; folded into rust-cvr's consumer (D-17)"),
     "zero-protocol/src/primary-key.ts::primaryKeySchema": ("N/A", "valita → Vec<String> (D-17)"),

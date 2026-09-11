@@ -315,8 +315,43 @@ impl PusherService {
                             // response handling (pusher.ts:535-556) followed by
                             // `#fanOutResponses` (pusher.ts:366-486).
                             let bytes = resp.bytes().await.unwrap_or_default();
-                            let mut response: serde_json::Value =
-                                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                            // fetch.ts:258-262: `response.json()` then
+                            // `validator.parse(json, {mode: 'passthrough'})`
+                            // against `mutateResponseSchema`. Either failure is
+                            // `apiFailedBody('push', Parse, …)` (fetch.ts:301-305),
+                            // which `#processPush`'s catch returns carrying THIS
+                            // push's `mutationIDs` (pusher.ts:563-567); it is
+                            // then fanned out below like any failure body.
+                            let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                .map_err(|e| e.to_string())
+                                .and_then(|v| {
+                                    <crate::protocol::mutate_server::MutateResponse as serde::Deserialize>::deserialize(&v)
+                                        .map(|_| v)
+                                        .map_err(|e| e.to_string())
+                                });
+                            let mut response = match parsed {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    // TS fetch.ts:294 `lc.warn?.('failed to parse response', …)`.
+                                    tracing::warn!(error = %e, "failed to parse response");
+                                    serde_json::to_value(crate::protocol::ErrorBody::PushFailedZeroCache(
+                                        crate::protocol::PushFailedZeroCacheBody {
+                                            kind: ErrorKind::PushFailed,
+                                            details: None,
+                                            mutation_ids: target
+                                                .as_ref()
+                                                .map(|t| t.mutation_ids.clone())
+                                                .unwrap_or_default(),
+                                            message: format!(
+                                                "Failed to parse response from API server: {e}"
+                                            ),
+                                            origin: crate::protocol::ErrorOrigin::ZeroCache,
+                                            reason: crate::protocol::ErrorReason::Parse,
+                                        },
+                                    ))
+                                    .expect("an error body serializes")
+                                }
+                            };
                             if let Some(t) = &target {
                                 let sel = ConnectionSelector {
                                     client_id: t.client_id.clone(),
@@ -1313,6 +1348,56 @@ mod tests {
                 assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
             }
             _ => panic!("expected WsCommand::Fail carrying the PushFailed body"),
+        }
+    }
+
+    /// `fetchFromAPIServer` parses the reply against `mutateResponseSchema`
+    /// (custom/fetch.ts:258-262): a body that is not JSON, or is outside the
+    /// schema, is a `parse` failure that `#processPush` returns with this
+    /// push's `mutationIDs` (pusher.ts:563-567) and `#fanOutResponses` fails
+    /// the client's downstream with. Before the port a non-JSON reply became
+    /// `null` and was handled as a success: no frame at all.
+    #[tokio::test]
+    async fn drainer_fails_downstream_on_unparseable_relay_reply() {
+        let addr = oneshot_http(200, "not json").await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an unparseable reply must fail the downstream (TS fetchFromAPIServer parse)")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Fail(err) => {
+                let msg = crate::protocol::error_message(&err);
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert_eq!(msg[1]["origin"], "zeroCache");
+                assert_eq!(msg[1]["reason"], "parse");
+                assert!(
+                    msg[1]["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Failed to parse response from API server: "),
+                    "{}",
+                    msg[1]
+                );
+                assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
+                assert_eq!(msg[1]["mutationIDs"][0]["clientID"], "cA");
+            }
+            _ => panic!("expected WsCommand::Fail carrying the PushFailed parse body"),
         }
     }
 

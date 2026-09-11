@@ -75,6 +75,15 @@ impl<'de> serde::Deserialize<'de> for JsNumber {
     }
 }
 
+/// valita `.nullable().optional()` for serde: the outer `Option` is presence
+/// (serde `default` fills absent), the inner one is `null`. Rust-only adapter,
+/// the twin of [`optional_no_null`] for the tri-state fields.
+pub fn nullable_optional<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    <Option<String> as serde::Deserialize>::deserialize(d).map(Some)
+}
+
 /// Deserialize a valita `.optional()` field: absent-or-value, NEVER an explicit
 /// `null`.
 ///
@@ -113,6 +122,8 @@ pub mod error_kind_enum;
 pub mod error_origin_enum;
 pub mod error_reason_enum;
 pub mod inspect_up;
+pub mod mutate_server;
+pub mod mutation;
 pub mod mutation_id;
 pub mod mutations_patch;
 pub mod ping;

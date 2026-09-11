@@ -123,6 +123,31 @@ pub struct TransformFailedZeroCacheBody {
     pub reason: ErrorReason,
 }
 
+/// `pushFailedBodySchema` (error.ts:70-110): the three `PushFailed` members of
+/// `errorBodySchema`, resolved the same way. Any other kind is rejected, as
+/// valita rejects it for this narrower union.
+#[derive(Debug, Clone)]
+pub enum PushFailedBody {
+    Server(PushFailedServerBody),
+    Http(PushFailedHttpBody),
+    ZeroCache(PushFailedZeroCacheBody),
+}
+
+impl<'de> Deserialize<'de> for PushFailedBody {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match ErrorBody::deserialize(deserializer)? {
+            ErrorBody::PushFailedServer(body) => Ok(PushFailedBody::Server(body)),
+            ErrorBody::PushFailedHttp(body) => Ok(PushFailedBody::Http(body)),
+            ErrorBody::PushFailedZeroCache(body) => Ok(PushFailedBody::ZeroCache(body)),
+            other => Err(D::Error::custom(format!(
+                "expected a PushFailed body, got kind {:?}",
+                other.kind()
+            ))),
+        }
+    }
+}
+
 /// `transformFailedBodySchema` (error.ts:112-136): the three `TransformFailed`
 /// members of `errorBodySchema`, resolved the same way. A body of any other
 /// kind is rejected, as valita rejects it for this narrower union.

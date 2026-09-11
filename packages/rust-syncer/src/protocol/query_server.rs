@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::custom_queries::{ErroredQuery, TransformResponseMessage, TransformedQuery};
 use super::error::TransformFailedBody;
+use super::nullable_optional;
 
 /// `queryResultSchema` (query-server.ts:9-12): `transformedQuery | erroredQuery`.
 /// valita tries the members in order; so does `untagged`.
@@ -39,12 +40,6 @@ pub struct QuerySuccess {
     #[serde(default, rename = "userID", deserialize_with = "nullable_optional")]
     pub user_id: Option<Option<String>>,
     pub queries: QueryResponseBody,
-}
-
-/// `.nullable().optional()` tri-state: the outer `Option` is presence (serde
-/// `default` fills absent), the inner one is `null`.
-fn nullable_optional<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(d).map(Some)
 }
 
 /// `queryResponseSchema` (query-server.ts:25-30):
