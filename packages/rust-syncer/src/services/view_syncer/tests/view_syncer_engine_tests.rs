@@ -341,6 +341,14 @@ fn make_cvr() -> CVR {
     cvr
 }
 
+/// `users` plus the internal `app_0.clients` / `app_0.mutations` tables the
+/// engine under test (shard `app`/0) queries for every client group.
+fn users_tables() -> Vec<IvmTableSpec> {
+    let mut tables = crate::services::view_syncer::pipeline_driver::internal_table_specs("app_0");
+    tables.push(users_spec());
+    tables
+}
+
 fn users_spec() -> IvmTableSpec {
     IvmTableSpec {
         table: "users".into(),
@@ -375,7 +383,7 @@ async fn hydrate_unchanged_queries_logs_the_ts_summary_line() {
     use rust_cvr::schema::types::{ClientState, CustomQueryRecord};
     let (buf, _guard) = capture_logs(tracing::Level::INFO);
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let live = || {
         let mut cs = BTreeMap::new();
@@ -481,7 +489,7 @@ async fn hydrate_unchanged_queries_detects_drift() {
     // signature, and one LIVE (non-inactivated) client.
     let build = |stored_sig: u64| {
         let mut pipelines = IvmPipelines::new();
-        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        pipelines.init(users_tables(), None, "zero").unwrap();
         let engine = SyncEngine::new(pipelines);
         let mut cvr = make_cvr();
         let q = cvr.queries.get_mut("q1").unwrap();
@@ -560,7 +568,7 @@ async fn quiet_commit_bump_discard_logs_only_when_patches_were_sent() {
     // (pokeStart) before the flush is forced to report a quiet commit.
     async fn run(sent: bool) -> (String, bool) {
         let mut pipelines = IvmPipelines::new();
-        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        pipelines.init(users_tables(), None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
         let mut ws_ids: Vec<String> = Vec::new();
         // Held for the whole call: dropping the receiver closes the sink, and
@@ -641,7 +649,7 @@ async fn quiet_commit_bump_discard_logs_only_when_patches_were_sent() {
 #[tokio::test]
 async fn hydrate_and_sync_emits_poke_frames() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
 
@@ -744,7 +752,7 @@ async fn hydrate_and_sync_emits_poke_frames() {
 #[tokio::test]
 async fn hydrate_and_sync_records_inspector_materialization_and_ast() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -858,7 +866,7 @@ async fn advance_and_sync_uses_header_version_not_empty() {
 
     let mut pipelines = IvmPipelines::new();
     pipelines
-        .init(vec![users_spec()], Some(db_path), "app")
+        .init(users_tables(), Some(db_path), "app")
         .unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
@@ -977,7 +985,7 @@ async fn advance_and_sync_uses_header_version_not_empty() {
 async fn config_update_no_op_flush_does_not_close_client() {
     async fn run(flush_outcome: bool) -> (usize, usize, usize) {
         let mut pipelines = IvmPipelines::new();
-        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        pipelines.init(users_tables(), None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -1078,7 +1086,7 @@ async fn config_update_no_op_flush_does_not_close_client() {
 #[tokio::test]
 async fn delete_clients_no_op_flush_does_not_close_client() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -1173,7 +1181,7 @@ async fn delete_clients_no_op_flush_does_not_close_client() {
 #[tokio::test]
 async fn config_and_hydrate_from_desired_queries_pokes_client() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -1301,7 +1309,7 @@ fn desired(hash: &str) -> DesiredQuerySpec {
 #[tokio::test]
 async fn slow_query_materialization_warns_per_query_with_its_ast() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
@@ -1450,7 +1458,7 @@ fn slow_hydrate_threshold_resolves_the_ts_env_name_and_default() {
 #[tokio::test]
 async fn expiry_tick_removes_nothing_until_pipelines_are_synced() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     engine.replica_version = "v1".to_string(); // CVRs below are at replica v1
 
@@ -1565,7 +1573,7 @@ async fn expiry_tick_removes_nothing_until_pipelines_are_synced() {
 #[tokio::test]
 async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     // The test CVRs are at replica "v1"; the sync-set updater asserts the
     // engine's replica version is not older (TS `#pipelines.replicaVersion`).
@@ -1678,7 +1686,7 @@ async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
 #[tokio::test]
 async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     // The test CVRs are at replica "v1"; the sync-set updater asserts the
     // engine's replica version is not older (TS `#pipelines.replicaVersion`).
@@ -1777,7 +1785,7 @@ async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines()
 #[tokio::test]
 async fn expired_query_is_removed_after_ttl_elapses() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     // The test CVRs are at replica "v1"; the sync-set updater asserts the
     // engine's replica version is not older (TS `#pipelines.replicaVersion`).
@@ -1894,7 +1902,7 @@ async fn expired_query_is_removed_after_ttl_elapses() {
 #[tokio::test]
 async fn clear_op_drops_all_desired_queries() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -1982,7 +1990,7 @@ async fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
     // add set, so it takes the catchup branch. With no CVR store wired,
     // catchup is a clean no-op and the call still returns the CVR intact.
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -2117,7 +2125,7 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
 
     // ── `All`: the custom query IS submitted even though it is hydrated. ──
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     // Pretend `q1` is already running (what a steady-state CG looks like).
     pipelines.set_query_transformation_hash("q1", "hash-q1");
     let mut engine = SyncEngine::new(pipelines);
@@ -2162,7 +2170,7 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
 
     // ── `Missing`: the same hydrated query is NOT submitted. ──
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     pipelines.set_query_transformation_hash("q1", "hash-q1");
     let mut engine = SyncEngine::new(pipelines);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -2209,7 +2217,7 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
 
     // ── `Missing` still transforms a custom query that is NOT hydrated. ──
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     engine.register_client(
@@ -2262,7 +2270,7 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
 #[tokio::test]
 async fn hydrate_unchanged_runs_once_per_pipeline_init() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -2385,7 +2393,7 @@ async fn changed_transformation_hash_rehydrates_query() {
     // with one transformation hash is re-hydrated when the recomputed hash
     // differs (as it would when authData changes the permission expansion).
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -2499,7 +2507,7 @@ async fn changed_transformation_hash_rehydrates_query() {
 #[tokio::test]
 async fn catchup_clients_pokes_even_when_there_are_no_patches() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -2563,7 +2571,7 @@ async fn catchup_clients_pokes_even_when_there_are_no_patches() {
 #[tokio::test]
 async fn catchup_clients_marks_the_version_served_with_no_clients_like_ts() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let cvr = super::empty_cvr("cg1", "v1");
     engine
@@ -2593,7 +2601,7 @@ fn catchup_floor_uses_original_cookie_not_advanced_version() {
     use rust_cvr::schema::types::version_from_string;
 
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
@@ -2648,7 +2656,7 @@ fn catchup_floor_uses_original_cookie_not_advanced_version() {
 #[test]
 fn get_clients_returns_one_handler_per_socket_for_a_repeated_ws_id() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "zero".to_string(),
@@ -2688,7 +2696,7 @@ fn advance_poke_targets_excludes_lagging_clients() {
     use rust_cvr::schema::types::version_from_string;
 
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -2717,7 +2725,7 @@ fn config_poke_targets_include_new_but_exclude_lagging_clients() {
     use rust_cvr::schema::types::version_from_string;
 
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -2748,7 +2756,7 @@ fn config_poke_targets_include_new_but_exclude_lagging_clients() {
 #[tokio::test]
 async fn delete_clients_removes_client_and_acks() {
     let mut pipelines = IvmPipelines::new();
-    pipelines.init(vec![users_spec()], None, "zero").unwrap();
+    pipelines.init(users_tables(), None, "zero").unwrap();
     let mut engine = SyncEngine::new(pipelines);
     let shard = ShardID {
         app_id: "app".to_string(),

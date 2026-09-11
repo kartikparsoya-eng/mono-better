@@ -99,6 +99,54 @@ pub fn init_and_reset_common(
     )
 }
 
+/// Test fixture: the `{schema}.clients` / `{schema}.mutations` tables every
+/// replica carries and the view-syncer's internal queries read
+/// (rust-cvr `cvr.rs` `ensureClient` / `getMutationResultsQuery`), with the
+/// columns TS's test replica creates (view-syncer-test-util.ts:662-676).
+/// Without them the engine throws `mustGetTableSpec`'s error for the internal
+/// query — exactly as TS would against a replica missing them.
+#[cfg(test)]
+pub(crate) fn internal_table_specs(upstream_schema: &str) -> Vec<IvmTableSpec> {
+    let col = |ty: &str, optional: bool| IvmColumnSchema {
+        r#type: ty.to_string(),
+        optional,
+    };
+    let spec = |table: &str, columns: Vec<(&str, IvmColumnSchema)>, pk: &[&str]| IvmTableSpec {
+        table: format!("{upstream_schema}.{table}"),
+        column_order: columns.iter().map(|(name, _)| name.to_string()).collect(),
+        columns: columns
+            .into_iter()
+            .map(|(name, schema)| (name.to_string(), schema))
+            .collect(),
+        primary_key: pk.iter().map(|c| c.to_string()).collect(),
+        unique_keys: None,
+        all_potential_primary_keys: vec![pk.iter().map(|c| c.to_string()).collect()],
+        min_row_version: None,
+    };
+    vec![
+        spec(
+            "clients",
+            vec![
+                ("clientGroupID", col("string", false)),
+                ("clientID", col("string", false)),
+                ("lastMutationID", col("number", false)),
+                ("userID", col("string", true)),
+            ],
+            &["clientGroupID", "clientID"],
+        ),
+        spec(
+            "mutations",
+            vec![
+                ("clientGroupID", col("string", false)),
+                ("clientID", col("string", false)),
+                ("mutationID", col("number", false)),
+                ("result", col("string", true)),
+            ],
+            &["clientGroupID", "clientID", "mutationID"],
+        ),
+    ]
+}
+
 /// Table spec used to build a `TableSource` and the snapshotter diff spec.
 #[derive(Clone, Debug)]
 pub struct IvmTableSpec {

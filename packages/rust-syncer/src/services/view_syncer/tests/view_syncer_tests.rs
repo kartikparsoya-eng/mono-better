@@ -118,7 +118,7 @@ impl CGServicesFactory for TestFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: Vec::new(),
+            tables: crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0"),
             full_tables: Vec::new(),
             replica_path: None, // in-memory (no PG, no replica)
             app_id: "zero".to_string(),
@@ -163,7 +163,7 @@ impl CGServicesFactory for PermsReloadFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: Vec::new(),
+            tables: crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0"),
             full_tables: Vec::new(),
             replica_path: Some(self.replica_path.clone()),
             app_id: "zero".to_string(),
@@ -600,6 +600,22 @@ fn transform_rereads_permissions_through_the_snapshot_at_use_time() {
                 INSERT INTO "issue" ("id", "title", "_0_version") VALUES
                     ('i1', 'first issue', '01'),
                     ('i2', 'second issue', '01');
+                CREATE TABLE "app_0.clients" (
+                    "clientGroupID"  TEXT,
+                    "clientID"       TEXT,
+                    "lastMutationID" INTEGER,
+                    "userID"         TEXT,
+                    _0_version       TEXT NOT NULL,
+                    PRIMARY KEY ("clientGroupID", "clientID")
+                );
+                CREATE TABLE "app_0.mutations" (
+                    "clientGroupID"  TEXT,
+                    "clientID"       TEXT,
+                    "mutationID"     INTEGER,
+                    "result"         TEXT,
+                    _0_version       TEXT NOT NULL,
+                    PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+                );
                 CREATE TABLE "app.permissions" (permissions TEXT, hash TEXT);
                 INSERT INTO "app.permissions" (permissions, hash)
                     VALUES ('{"tables":{"issue":{"row":{"select":[]}}}}', 'h1');
@@ -925,7 +941,7 @@ impl CGServicesFactory for RevalidateFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: Vec::new(),
+            tables: crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0"),
             full_tables: Vec::new(),
             replica_path: None,
             app_id: "zero".to_string(),
@@ -1993,7 +2009,12 @@ impl CGServicesFactory for IssueTableFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: vec![issue_table_spec()],
+            tables: {
+                let mut tables =
+                    crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0");
+                tables.push(issue_table_spec());
+                tables
+            },
             full_tables: vec![issue_full_table_spec()],
             replica_path: None,
             app_id: "zero".to_string(),
@@ -2657,7 +2678,7 @@ fn desired_queries_transform_rejects_a_server_user_id_that_does_not_match() {
             } else {
                 (
                     "200 OK",
-                    r#"{"kind":"QueryResponse","userID":"someone-else","queries":[{"id":"h1","ast":{"table":"issue"}}]}"#.to_string(),
+                    r#"{"kind":"QueryResponse","userID":"someone-else","queries":[{"id":"h1","name":"myQuery","ast":{"table":"issue"}}]}"#.to_string(),
                 )
             }
         },
@@ -4136,7 +4157,12 @@ impl CGServicesFactory for BlockingPusherFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: vec![issue_table_spec()],
+            tables: {
+                let mut tables =
+                    crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0");
+                tables.push(issue_table_spec());
+                tables
+            },
             full_tables: vec![issue_full_table_spec()],
             replica_path: None,
             app_id: "zero".to_string(),
@@ -4935,7 +4961,12 @@ impl CGServicesFactory for TablesFactory {
     fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
         SyncEngineConfig {
             initialization_error: None,
-            tables: vec![issue_table_spec()],
+            tables: {
+                let mut tables =
+                    crate::services::view_syncer::pipeline_driver::internal_table_specs("zero_0");
+                tables.push(issue_table_spec());
+                tables
+            },
             full_tables: vec![issue_full_table_spec()],
             replica_path: None, // in-memory sources
             app_id: "zero".to_string(),
