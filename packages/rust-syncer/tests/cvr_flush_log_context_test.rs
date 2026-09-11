@@ -120,6 +120,22 @@ fn flushed_cvr_line_carries_the_ts_log_context() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
+        CREATE TABLE "flushlogapp_7.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "flushlogapp_7.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
         CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",

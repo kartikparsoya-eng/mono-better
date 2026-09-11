@@ -1210,6 +1210,14 @@ fn pg_advance_lmid_change_with_no_queries() {
                 "pos"          INTEGER NOT NULL,
                 PRIMARY KEY ("stateVersion", "pos")
             );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+            );
             CREATE TABLE "app_0.clients" (
                 "clientGroupID"  TEXT NOT NULL,
                 "clientID"       TEXT NOT NULL,
@@ -1432,6 +1440,22 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
                 "pos"          INTEGER NOT NULL,
                 PRIMARY KEY ("stateVersion", "pos")
             );
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "lastMutationID" INTEGER,
+                "userID"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+            );
             CREATE TABLE issue (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -1635,6 +1659,14 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
                 "op"           TEXT NOT NULL,
                 "pos"          INTEGER NOT NULL,
                 PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
             );
             CREATE TABLE "app_0.clients" (
                 "clientGroupID"  TEXT NOT NULL,
@@ -1916,6 +1948,22 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
                 "op"           TEXT NOT NULL,
                 "pos"          INTEGER NOT NULL,
                 PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "lastMutationID" INTEGER,
+                "userID"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
             );
             CREATE TABLE issue (
                 id TEXT PRIMARY KEY,
@@ -2340,6 +2388,22 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
                 "op"           TEXT NOT NULL,
                 "pos"          INTEGER NOT NULL,
                 PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "lastMutationID" INTEGER,
+                "userID"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
             );
             CREATE TABLE "channel_user_status" (
                 "channelId"  "text|NOT_NULL",
