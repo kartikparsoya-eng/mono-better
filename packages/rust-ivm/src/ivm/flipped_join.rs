@@ -170,11 +170,9 @@ impl FlippedJoin {
         let mut child_indexes_by_key: HashMap<String, Vec<usize>> = HashMap::new();
 
         for (i, child_node) in child_nodes.iter().enumerate() {
-            let constraint = build_join_constraint(&child_node.row, &child_key, &parent_key);
-            if constraint.is_none() {
+            let Some(c) = build_join_constraint(&child_node.row, &child_key, &parent_key) else {
                 continue;
-            }
-            let c = constraint.unwrap();
+            };
             if let Some(prc) = &parent_req_constraint
                 && !constraints_are_compatible(&c, prc)
             {

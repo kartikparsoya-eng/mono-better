@@ -578,7 +578,10 @@ impl<S: StreamSink> Chunker<S> {
             .as_ref()
             .is_some_and(|cur| cur != query_id);
         if need_flush {
-            let prev_qid = self.current_query_id.clone().unwrap();
+            let prev_qid = self
+                .current_query_id
+                .clone()
+                .expect("need_flush implies a current query id");
             self.flush();
             self.sink.send(StreamFrame::Final {
                 chunk_index: self.chunk_index,

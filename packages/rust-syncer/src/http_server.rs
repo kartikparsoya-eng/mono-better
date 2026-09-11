@@ -142,7 +142,9 @@ fn check_notify_request(
 /// port is bound (and emit its process-ready signal) before serving begins.
 pub async fn bind_http_listener(addr: SocketAddr) -> tokio::net::TcpListener {
     tracing::info!("HTTP server listening on {}", addr);
-    tokio::net::TcpListener::bind(addr).await.unwrap()
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| panic!("bind HTTP listener on {addr}: {e}"))
 }
 
 /// Serve the axum app on an already-bound listener (see `bind_http_listener`).

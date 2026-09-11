@@ -172,8 +172,13 @@ impl Snapshotter {
 
         // TS constructs Diff after the swap, so a count failure is observable
         // as an advance error after the snapshot lifecycle has moved forward.
-        let prev_version_for_diff = self.prev.as_ref().unwrap().version.clone();
-        let curr = self.curr.as_ref().unwrap();
+        let prev_version_for_diff = self
+            .prev
+            .as_ref()
+            .expect("prev set by the swap above")
+            .version
+            .clone();
+        let curr = self.curr.as_ref().expect("curr set by the swap above");
         let curr_version_for_diff = curr.version.clone();
         let change_count = {
             let _t = crate::perf_trace::scope("advance.count");
@@ -209,7 +214,11 @@ impl Snapshotter {
         self.prev = self.curr.take();
         self.curr = Some(next);
         self.publish_snapshot_interrupt_handles();
-        Ok(&self.curr.as_ref().unwrap().version)
+        Ok(&self
+            .curr
+            .as_ref()
+            .expect("curr set by the swap above")
+            .version)
     }
 
     /// Read the head `stateVersion` via a fresh, transient autocommit

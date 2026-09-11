@@ -396,10 +396,10 @@ impl RowRecordCache {
             // Count the copy BEFORE `make_mut` decides: once it has run, an
             // in-place mutation and a copy are indistinguishable. See
             // `CacheState::cow_copies`.
-            if Arc::strong_count(state.cache.as_ref().unwrap()) > 1 {
+            if Arc::strong_count(state.cache.as_ref().expect("load() ran above")) > 1 {
                 state.cow_copies += 1;
             }
-            let cache = Arc::make_mut(state.cache.as_mut().unwrap());
+            let cache = Arc::make_mut(state.cache.as_mut().expect("load() ran above"));
             for (id, row) in &row_records {
                 let id_str = row_id_string(id);
                 match row {

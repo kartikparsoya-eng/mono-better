@@ -311,7 +311,12 @@ pub fn simplify_condition(c: Value) -> Value {
         .cloned()
         .unwrap_or_default();
     if conditions.len() == 1 {
-        return simplify_condition(conditions.into_iter().next().unwrap());
+        return simplify_condition(
+            conditions
+                .into_iter()
+                .next()
+                .expect("len() == 1 checked above"),
+        );
     }
     let simplified: Vec<Value> = conditions.into_iter().map(simplify_condition).collect();
     let flat = flatten(kind, simplified);
@@ -451,7 +456,12 @@ fn flattened(cond: &Value) -> Option<Value> {
     }
     match conditions.len() {
         0 => None,
-        1 => Some(conditions.into_iter().next().unwrap()),
+        1 => Some(
+            conditions
+                .into_iter()
+                .next()
+                .expect("match arm: len() == 1"),
+        ),
         _ => Some(json!({"type": kind, "conditions": conditions})),
     }
 }
@@ -594,7 +604,7 @@ fn base36(mut n: u64) -> String {
         n /= 36;
     }
     buf.reverse();
-    String::from_utf8(buf).unwrap()
+    String::from_utf8(buf).expect("base36 digits are ASCII")
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

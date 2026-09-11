@@ -4,7 +4,7 @@
 > **Audience:** engineers onboarding onto the Rust port of Zero's sync engine.
 > **Scope:** the read path — connect → subscribe to queries → receive reactive updates ("pokes"). Mutations are **not** processed here (they are relayed to TS; see [§11](#11-what-this-does-not-do)).
 >
-> Every claim below was re-checked against the actual code on `rust-cvr-v1.0.0` (post the **L9 1:1 structural refactor**, tasks #159–#163, which dissolved the old `sync_engine.rs`/`router.rs` into the TS-mirrored `services/view_syncer/` + `workers/` tree). File/line references use `file:line` and are clickable in most editors. Line numbers drift as code changes — treat them as "look near here"; grep the named function if one has moved.
+> Every claim below was re-checked against the actual code on `rust-cvr-v1.0.0` (post the **L9 1:1 structural refactor**, which dissolved the old `sync_engine.rs`/`router.rs` into the TS-mirrored `services/view_syncer/` + `workers/` tree). File/line references use `file:line` and are clickable in most editors. Line numbers drift as code changes — treat them as "look near here"; grep the named function if one has moved.
 >
 > **Living companions (parity/ layer system — the source of truth for TS↔Rust status):**
 > - [`parity/INVENTIONS.md`](./parity/INVENTIONS.md) — every rust-only construct (thread model, ws tasks, push relay, CVR write-behind, per-CG inspector, advance gate) with its TS-observable contract + pinning tests (I-1 … I-11).
@@ -127,7 +127,7 @@ flowchart TB
 1. The IVM engine is **single-threaded by nature** — it is built on `Rc<RefCell<…>>` and thread-local `rusqlite` connections, so a `ViewSyncerService` is `!Send` and can never move between threads. Parallelism therefore comes from *spreading client groups across threads*.
 2. The CVR Postgres connections must be a **single shared pool** (to match TS's one-pool-per-worker budget and let any connection serve any group).
 
-The resolution ("doc 91, Iteration C"):
+The resolution (the two-runtime model):
 
 - **K executor threads** are the compute lanes. Each is a `tokio` **`current_thread` runtime + `LocalSet`** (`workers/cg_executor.rs:204-208`), hosting a hash/least-loaded shard of client groups as `spawn_local` tasks.
 - **The main multi-thread runtime** owns the reactor (accept loop, HTTP, JWKS fetches) **and the one shared PG pool**.
@@ -175,7 +175,7 @@ The rules, each grounded in code:
 
 3. **Many CGs share one OS thread cooperatively.** The CG's event loop is a `spawn_local` future on the executor's `LocalSet` (`cg_executor.rs:270`). There is **no per-CG OS thread** and no per-CG `JoinHandle` — the router keeps only a lightweight `CGHandle` (a channel + shared counters, `cg_executor.rs:72-143`), stored in a `DashMap<String, CGHandle>` (`workers/syncer.rs:585`). Draining is done by shutting the executors down.
 
-4. **The executor count is tuned for tail latency, not throughput.** This is the single richest comment in the repo (`main.rs:157-212`; the default is computed in `config/zero_config.rs:245-252`). Each executor **serializes** its client groups: a 12k-row hydrate + poke serialization holds the thread ~200ms, and any CG sharing that thread eats that latency. Measured A/B (ART G25, 4-CPU container):
+4. **The executor count is tuned for tail latency, not throughput.** This is the single richest comment in the repo (`main.rs:157-212`; the default is computed in `config/zero_config.rs:245-252`). Each executor **serializes** its client groups: a 12k-row hydrate + poke serialization holds the thread ~200ms, and any CG sharing that thread eats that latency. Measured A/B (latency drive, 4-CPU container):
 
    | Shards | Result |
    |---|---|
@@ -244,7 +244,7 @@ sequenceDiagram
     E-->>C: poke (delta only)
 ```
 
-> **⚠ The `connected` ack is NOT on the CG thread.** It is emitted from `create_connection` (`workers/syncer.rs:855`, the port of TS `syncer.ts#handleConnection`) on the **per-connection accept task, before any hydrate** (emit at `workers/syncer.rs:956-970`; body built by `check_version`, `workers/connection.rs:608`). This is the fix for the **2026-08-27 prod outage** (task #152): the old code sent `connected` from `Connection::init()` *inside* the serial CG thread, so a slow hydrate (79–254s prod queries) blocked the ack past the client's 10s connect timeout → disconnect → IVM-graph reap → cold-rehydrate thrash. TS sends the ack from the per-connection worker (concurrent), and now so does Rust. The L3 `call_topology.py` guard pins this emission to the accept-task context.
+> **⚠ The `connected` ack is NOT on the CG thread.** It is emitted from `create_connection` (`workers/syncer.rs:855`, the port of TS `syncer.ts#handleConnection`) on the **per-connection accept task, before any hydrate** (emit at `workers/syncer.rs:956-970`; body built by `check_version`, `workers/connection.rs:608`). This is the fix for the **connect-ack outage**: the old code sent `connected` from `Connection::init()` *inside* the serial CG thread, so a slow hydrate (79–254s prod queries) blocked the ack past the client's 10s connect timeout → disconnect → IVM-graph reap → cold-rehydrate thrash. TS sends the ack from the per-connection worker (concurrent), and now so does Rust. The L3 `call_topology.py` guard pins this emission to the accept-task context.
 
 **Hop-by-hop with code anchors:**
 
@@ -377,7 +377,7 @@ impl Drop for Engine {
 }
 ```
 
-Operators form **strong `Rc` cycles** (each op holds its input down-edge, and `set_output` installs an output back-edge). Without `destroy()`, every CG teardown would leak the entire operator tree **and** its pinned SQLite connections — this was the **G6 RSS leak**.
+Operators form **strong `Rc` cycles** (each op holds its input down-edge, and `set_output` installs an output back-edge). Without `destroy()`, every CG teardown would leak the entire operator tree **and** its pinned SQLite connections — this was the **teardown RSS leak**.
 
 ### The operator graph
 
@@ -407,7 +407,7 @@ flowchart TB
 
 ### Build & advance
 
-- **Build:** `build_pipeline(ast, delegate)` (`builder/builder.rs`) walks the ZQL AST → source connect → WHERE Filter → correlated subqueries (Cap/Exists) → related Joins → Skip/Take. The **planner** (`planner/planner_builder.rs`) informs join order via a SQLite cost model; it does not generate code. The `plan_query` flip-planner is wired into engine build (fix for the G8 exists-in-OR over-emission, tasks #165).
+- **Build:** `build_pipeline(ast, delegate)` (`builder/builder.rs`) walks the ZQL AST → source connect → WHERE Filter → correlated subqueries (Cap/Exists) → related Joins → Skip/Take. The **planner** (`planner/planner_builder.rs`) informs join order via a SQLite cost model; it does not generate code. The `plan_query` flip-planner is wired into engine build (fix for the exists-in-OR over-emission).
 - **Advance:** `advance_to_head_stream` (`engine/mod.rs:1153`) asks the **Snapshotter** for the diff between the previous and current replica snapshots, sets sources to the PREV snapshot for fetch consistency, then pushes each `SourceChange` through the graph, streaming `RowChange`s out.
 
 ### Reading the replica
@@ -495,7 +495,7 @@ The pool is created eagerly but falls back to a **lazy** pool if the CVR PG is u
 ## 11. What this does *not* do
 
 - **No mutation processing.** `create_mutagen` returns `None`; legacy CRUD is rejected.
-- **Custom mutations are relayed, not run.** With `PUSHER_URL` set, a custom push is forwarded (with the connection's auth/headers, read from the CCM at use time — the 2026-08-27 stale-JWT fix, task #153) to the TS push endpoint via `services/mutagen/pusher.rs`; the result flows back through the `lmids`/`mutationResults` queries this syncer already hydrates and pokes. No mutation logic lives here (Option-A; the loopback endpoint is TS-side `zero-cache/src/server/rust-push-relay.ts`).
+- **Custom mutations are relayed, not run.** With `PUSHER_URL` set, a custom push is forwarded (with the connection's auth/headers, read from the CCM at use time — the stale-JWT fix) to the TS push endpoint via `services/mutagen/pusher.rs`; the result flows back through the `lmids`/`mutationResults` queries this syncer already hydrates and pokes. No mutation logic lives here (Option-A; the loopback endpoint is TS-side `zero-cache/src/server/rust-push-relay.ts`).
 - **No handoff model.** Unlike TS, the WS server accepts directly.
 
 ---
@@ -548,8 +548,8 @@ Versions below are the direct dependencies across the three crates (`Cargo.toml`
 Three memory-related mechanisms, all in `main.rs`:
 
 1. **dhat heap profiler** (`main.rs:72-143`) — build with `--features dhat-heap`; a global allocator (`main.rs:74`) intercepts every allocation. On **graceful** shutdown it writes `dhat-heap.json` (path via `ZERO_DHAT_OUT`, defaults next to the replica file / CWD). View at the dh_view web UI. A SIGKILL skips the dump — always drain gracefully.
-2. **`malloc_trim` task** (`main.rs:367-381`) — a dedicated thread calls `libc::malloc_trim(0)` every 30s (Linux/glibc only). Freed pipeline/row memory otherwise stays in malloc's arenas and reads as an unbounded RSS leak (the ART **G6** gate). Kept well off the hot path.
-3. **Live-instance census** (`live_count.rs`) — each long-lived type increments a counter on construction and decrements on `Drop`. Used to prove the G6 leak was fixed: at `cg=0` the census returns to 0 and RSS plateaus. Every `ViewSyncerService`/`Engine` carries a census `Guard`.
+2. **`malloc_trim` task** (`main.rs:367-381`) — a dedicated thread calls `libc::malloc_trim(0)` every 30s (Linux/glibc only). Freed pipeline/row memory otherwise stays in malloc's arenas and reads as an unbounded RSS leak (the release leak gate). Kept well off the hot path.
+3. **Live-instance census** (`live_count.rs`) — each long-lived type increments a counter on construction and decrements on `Drop`. Used to prove the teardown leak was fixed: at `cg=0` the census returns to 0 and RSS plateaus. Every `ViewSyncerService`/`Engine` carries a census `Guard`.
 
 ---
 
@@ -561,8 +561,8 @@ Every Rust module cites its TS origin in a doc-comment (HARD RULE 6). The
 `parity/MAP-cvr.md`, `parity/MAP-ivm.md`, `parity/MAP-syncer.md` — regenerate
 those, don't hand-edit. The tables below are the human-readable snapshot
 (each TS file → its **primary** Rust file; genuine splits show all real
-targets). Updated 2026-09-01 after the L9 1:1 refactor (tasks #159–#163) and the
-analyzeQuery/inspector port (tasks #168–#181). For *behavior-level* parity see
+targets). Updated after the 1:1 file refactor (d632507bc..0c280577d) and the
+analyzeQuery/inspector port. For *behavior-level* parity see
 `parity/PARITY-EXCEPTIONS.md` (sanctioned deltas) and `parity/INVENTIONS.md`
 (rust-only constructs).
 
@@ -789,7 +789,7 @@ contracted in `parity/INVENTIONS.md`):
 | `rust-syncer/main.rs` | Binary entry point; replaces the TS syncer *worker process*. Env config → builds runtimes/pool → accept + HTTP. |
 | `rust-syncer/workers/cg_executor.rs` | **I-1** — per-CG executor substrate, the Rust twin of TS's `ViewSyncerService` `#lock`. `K` `current_thread` executors (`LocalSet`+`spawn_local`), serialized by an unbounded ordered channel. |
 | `rust-syncer/ws_server.rs` | WS accept + connection lifecycle over `tokio-tungstenite`; reader/writer tasks, liveness, payload cap. No handoff model (accepts directly). |
-| `rust-syncer/ws_sink.rs` | `DirectWebSocketSink` poke-egress channel + symmetric byte/frame backpressure. Replaces napi `NapiWebSocketSink` + TSFN. |
+| `rust-syncer/ws_sink.rs` | `DirectWebSocketSink` poke-egress channel + symmetric byte/frame backpressure. Rust-only writer-task sink (AGENTS.md rule 5). |
 | `rust-syncer/http_server.rs` | axum control/observability surface: `/statz`, `/metrics`, `/heapz`, `/readyz`, `/notify/:cg_id` (commit-notifier ingress, replaces the TS in-process notifier). |
 | `rust-ivm/sqlite/interrupt.rs` | Cross-thread SQLite interrupt + job-scoped watchdog; a cancel/timeout from any thread aborts an in-flight query (`SQLITE_INTERRUPT`). |
 | `rust-ivm/advance_gate.rs` | **I-11** — per-row mid-fetch advancement gate: a thread-local bridge that lets the SQLite leaf fetch abort an over-budget advance without TS's `ResetPipelinesSignal` `throw` (Rust push is infallible). The economic-budget *logic* is a 1:1 port of `pipeline-driver.ts` `#shouldAdvanceYieldMaybeAbortAdvance` (its per-change arm lives in `engine/mod.rs`); this file is the delivery *mechanism* + shared leaf. |
@@ -808,7 +808,7 @@ mirror TS semantics 1:1):
 
 | File | Purpose |
 |---|---|
-| `live_count.rs` (cvr · ivm · syncer) | Drop-based live-instance census; a count that never returns to 0 after teardown is the leak signal (proved the G6 RSS leak fixed). |
+| `live_count.rs` (cvr · ivm · syncer) | Drop-based live-instance census; a count that never returns to 0 after teardown is the leak signal (proved the teardown RSS leak fixed). |
 | `tracer.rs` (cvr, `CVR_TRACE`) · `trace.rs` (syncer, `SYNCER_TRACE`) · `ivm/trace.rs` (ivm, `IVM_TRACE`) | Env-gated event-trace harnesses for the flush/poke, connection/advance, and push-routing pipelines. |
 | `rust-ivm/perf_trace.rs` (`RUST_IVM_PERF_TRACE`) | RAII perf-scope instrumentation (nested scopes double-count into parents). |
 
@@ -819,7 +819,7 @@ mirror TS semantics 1:1):
 | `rust-cvr/parity_check.rs` | TS-golden differential: Rust output == captured TS output from `parity-fixture.json`. |
 | `rust-cvr/seq_replay.rs` + `bin/cvr_seq_replay.rs` | CVR *sequence* differential — replays a config-driven transaction program against the real `CVRStore`, byte-compatible with the TS driver. |
 | `rust-ivm/replay.rs` + `bin/replay.rs` | Fixture replayer — emits the Rust engine's canonical `{hydrate,pushChanges,finalView}` for diffing against the TS oracle. |
-| `rust-ivm/bin/server.rs` | Single-threaded HTTP JSON API exposing the IVM engine for ART testing. |
+| `rust-ivm/bin/server.rs` | Single-threaded HTTP JSON API exposing the IVM engine to the release-gate harness. |
 
 **E. Directory-mirror module glue** (NOT logic — `mod.rs`-equivalents, 3–17 LOC
 each, mirroring TS directories): `rust-syncer/{auth,config,custom,custom_queries,
@@ -830,7 +830,7 @@ db,observability,protocol,server,services,workers}.rs` +
 
 ## 16. The inspector / analyzeQuery surface
 
-The read path carries a diagnostics surface ported 1:1 from TS (tasks #168–#181).
+The read path carries a diagnostics surface ported 1:1 from TS.
 
 - **`analyzeQuery`** (`services/analyze.rs` ← `analyze.ts`) → **`runAst`** (`services/run_ast.rs` ← `run-ast.ts`) drives a query through IVM and returns an `AnalyzeQueryResult` (`protocol/analyze_query_result.rs`): warnings, syncedRows/count, timings, `afterPermissions` (via `ast_to_zql.rs`), `readRowCountsByQuery`/`readRowCount`, `dbScansByQuery`, `sqlitePlans`, `joinPlans`. A **TS-golden test** (`tests/analyze_query_golden_test.rs` + `tests/ts_golden_analyze.mts`) drives the real TS `analyzeQuery` and Rust `analyze_query` over the same replica and asserts field-for-field equality (minus nondeterministic timings). It caught + drove the fix of a real column-order divergence (SELECT list must use declared/pragma order + `sql\`,\`` no-space, `query_builder.rs:80`).
 - **`InspectorDelegate`** (`server/inspector_delegate.rs` ← `inspector-delegate.ts`) holds the server metrics (`query-materialization-server` / `query-update-server` t-digests, via `tdigest.rs`) + the `queryID→AST` map. The `metrics` and `queries` inspect ops read it through `inspect_handler.rs` (`metrics_for_protocol` handles the protocol-51 wire-format boundary). Recording happens in `hydrate_and_sync` (keyed by `q.id`) and `hydrate_unchanged_queries` (keyed by `transformationHash`), mirroring view-syncer.ts:2296/1640.
@@ -842,16 +842,16 @@ The read path carries a diagnostics surface ported 1:1 from TS (tasks #168–#18
 ## 17. Invariants & gotchas
 
 1. **`!Send` engine ⇒ pinned CG.** A `ViewSyncerService`/`Engine` never crosses threads. Anything that would require migration (rebalancing a hot group) is out of scope — balance by placement only.
-2. **The `connected` ack must be emitted off the CG thread.** It goes out from `create_connection` on the per-connection accept task, *before* hydrate (`workers/syncer.rs:970`). Serializing it behind hydrate on the CG thread caused the 2026-08-27 outage. The L3 `call_topology.py` guard pins this — keep it green.
+2. **The `connected` ack must be emitted off the CG thread.** It goes out from `create_connection` on the per-connection accept task, *before* hydrate (`workers/syncer.rs:970`). Serializing it behind hydrate on the CG thread caused the connect-ack outage. The L3 `call_topology.py` guard pins this — keep it green.
 3. **Poke ordering is load-bearing.** The downstream channel is unbounded specifically to keep `pokeStart → pokePart* → pokeEnd` in order. Do not "fix" it into a bounded channel; use the shed HWMs for memory safety instead.
-4. **`Engine` must be `destroy()`ed on teardown** or the `Rc` operator cycle leaks the graph + SQLite connections (G6). The `Drop` impl handles it (`engine/mod.rs:1717`) — don't bypass it by leaking the `Engine`.
+4. **`Engine` must be `destroy()`ed on teardown** or the `Rc` operator cycle leaks the graph + SQLite connections (the teardown leak). The `Drop` impl handles it (`engine/mod.rs:1717`) — don't bypass it by leaking the `Engine`.
 5. **Row keys use the client PK.** A CVR rowKey missing a PK column poisons the shared PG and can crash-loop clients (`toPrimaryKeyString "Got undefined"`) — and survives a TS image revert. Assert rowKey completeness at write time.
 6. **Only current-version clients get advance pokes.** Lagging clients are excluded (`advance_poke_targets`) and must catch up via rehydrate.
-7. **Connection/auth state has one owner, read fresh.** All connection/auth/config state lives in the `ConnectionContextManager` (`ccm` field); consumers (push relay, custom-query Bearer, mutagen) read `must_get_connection_context` at use time. A connect-time snapshot caused the 2026-08-27 push-relay 401 (task #153).
+7. **Connection/auth state has one owner, read fresh.** All connection/auth/config state lives in the `ConnectionContextManager` (`ccm` field); consumers (push relay, custom-query Bearer, mutagen) read `must_get_connection_context` at use time. A connect-time snapshot caused the push-relay 401 storm.
 8. **`available_parallelism()` is quota-aware — don't use it for shard sizing.** Use the affinity mask (`host_parallelism`, `config/zero_config.rs:19`).
 9. **Shards trade tail latency, not throughput.** More executors = more CG isolation (good) but burstier per-socket egress past ~2× cores (diminishing). Default `2× host cores`, `[16,64]`.
 10. **CVR store flush is a synchronous transaction but offloaded** off the serving thread; row records are async write-behind. Keep new CVR I/O on the offload path, never inline on the CG thread.
 
 ---
 
-*Re-verified against a code-level read of `packages/rust-syncer`, `packages/rust-ivm`, and `packages/rust-cvr` on branch `rust-cvr-v1.0.0` (2026-09-01, post L9 refactor + analyzeQuery/inspector port). Diagrams are Mermaid — they render in GitHub, VS Code, and claude.ai. Line numbers are approximate anchors; grep the named function if one has moved.*
+*Re-verified against a code-level read of `packages/rust-syncer`, `packages/rust-ivm`, and `packages/rust-cvr` on branch `rust-cvr-v1.0.0` (post the 1:1 file refactor + analyzeQuery/inspector port). Diagrams are Mermaid — they render in GitHub, VS Code, and claude.ai. Line numbers are approximate anchors; grep the named function if one has moved.*

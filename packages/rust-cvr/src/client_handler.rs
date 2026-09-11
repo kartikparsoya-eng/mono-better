@@ -366,7 +366,10 @@ impl PokeHandler {
         let result: Result<(), String> = (|| {
             match &patch_to_version.patch {
                 Patch::Query(qp) => {
-                    let body = state.body.as_mut().unwrap();
+                    let body = state
+                        .body
+                        .as_mut()
+                        .expect("ensure_body ran before any patch is added");
                     match qp {
                         QueryPatch::Put { id, client_id } => {
                             let entry = QueryPatchEntry {
@@ -427,7 +430,10 @@ impl PokeHandler {
                     } else if table == &self.zero_mutations_table {
                         self.add_mutation_patch(&mut state, rp)?;
                     } else {
-                        let body = state.body.as_mut().unwrap();
+                        let body = state
+                            .body
+                            .as_mut()
+                            .expect("ensure_body ran before any patch is added");
                         body.rows_patch
                             .get_or_insert_with(Vec::new)
                             .push(make_row_patch(rp)?);
@@ -717,7 +723,10 @@ impl PokeHandler {
                     "Received clients row for wrong clientGroupID. Ignoring."
                 );
             } else {
-                let body = state.body.as_mut().unwrap();
+                let body = state
+                    .body
+                    .as_mut()
+                    .expect("ensure_body ran before any patch is added");
                 let lmids = body
                     .last_mutation_id_changes
                     .get_or_insert_with(BTreeMap::new);
@@ -729,7 +738,10 @@ impl PokeHandler {
     }
 
     fn add_mutation_patch(&self, state: &mut PokeState, patch: &RowPatch) -> Result<(), String> {
-        let body = state.body.as_mut().unwrap();
+        let body = state
+            .body
+            .as_mut()
+            .expect("ensure_body ran before any patch is added");
         let patches = body.mutations_patch.get_or_insert_with(Vec::new);
 
         match patch {

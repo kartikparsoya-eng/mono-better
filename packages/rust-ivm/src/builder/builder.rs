@@ -190,14 +190,18 @@ fn build_pipeline_internal(
     let needs_where = ast.where_clause.is_some()
         && (transformed.conditions_removed
             || condition_includes_flipped_subquery_at_any_level(
-                ast.where_clause.as_ref().unwrap(),
+                ast.where_clause
+                    .as_ref()
+                    .expect("guarded by is_some() in this expression"),
             ));
 
     let _ = std::env::var("IVM_TRACE");
     if needs_where {
         current = apply_where(
             current.clone(),
-            ast.where_clause.as_ref().unwrap(),
+            ast.where_clause
+                .as_ref()
+                .expect("needs_where implies where_clause.is_some()"),
             delegate,
             name,
         );

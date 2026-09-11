@@ -71,7 +71,9 @@ impl PlannerGraph {
         base_constraints: Option<PlannerConstraint>,
         limit: Option<usize>,
     ) -> Rc<RefCell<PlannerConnection>> {
-        let source = self.sources.get(name).unwrap();
+        let source = self.sources.get(name).expect(
+            "a planner source is registered for every table the AST names (planner-graph.ts:85)",
+        );
         let conn = source.connect(sort, filters, is_root, base_constraints, limit);
         Rc::new(RefCell::new(conn))
     }
@@ -102,7 +104,12 @@ impl PlannerGraph {
     }
 
     pub fn get_total_cost(&self) -> f64 {
-        let est = self.terminus.as_ref().unwrap().borrow().estimate_cost();
+        let est = self
+            .terminus
+            .as_ref()
+            .expect("terminus set by plan(); TS must(this.#terminus) (planner-graph.ts:123)")
+            .borrow()
+            .estimate_cost();
         est.cost + est.startup_cost
     }
 

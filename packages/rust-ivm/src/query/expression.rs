@@ -16,7 +16,10 @@ pub fn and(conditions: &[Condition]) -> Condition {
         .collect();
 
     if filtered.len() == 1 {
-        return filtered.into_iter().next().unwrap();
+        return filtered
+            .into_iter()
+            .next()
+            .expect("len() == 1 checked above");
     }
 
     if filtered.iter().any(is_always_false) {
@@ -36,7 +39,10 @@ pub fn or(conditions: &[Condition]) -> Condition {
         .collect();
 
     if filtered.len() == 1 {
-        return filtered.into_iter().next().unwrap();
+        return filtered
+            .into_iter()
+            .next()
+            .expect("len() == 1 checked above");
     }
 
     if filtered.iter().any(is_always_true) {
@@ -107,7 +113,10 @@ pub fn simplify_condition(c: &Condition) -> Condition {
         Condition::And(conditions) => {
             let simplified: Vec<Condition> = conditions.iter().map(simplify_condition).collect();
             if simplified.len() == 1 {
-                return simplified.into_iter().next().unwrap();
+                return simplified
+                    .into_iter()
+                    .next()
+                    .expect("len() == 1 checked above");
             }
             let flattened = flatten(conditions.len(), &simplified);
             if flattened.iter().any(is_always_false) {
@@ -118,7 +127,10 @@ pub fn simplify_condition(c: &Condition) -> Condition {
         Condition::Or(conditions) => {
             let simplified: Vec<Condition> = conditions.iter().map(simplify_condition).collect();
             if simplified.len() == 1 {
-                return simplified.into_iter().next().unwrap();
+                return simplified
+                    .into_iter()
+                    .next()
+                    .expect("len() == 1 checked above");
             }
             let flattened = flatten(conditions.len(), &simplified);
             if flattened.iter().any(is_always_true) {

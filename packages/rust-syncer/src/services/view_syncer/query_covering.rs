@@ -374,10 +374,12 @@ fn simple_condition_implies(covered: &Value, covering: &Value) -> bool {
         && covered_value.is_array()
         && covering_value.is_array()
     {
-        let covering_arr = covering_value.as_array().unwrap();
+        let covering_arr = covering_value
+            .as_array()
+            .expect("is_array() checked in the guard");
         return covered_value
             .as_array()
-            .unwrap()
+            .expect("is_array() checked in the guard")
             .iter()
             .all(|v| literal_array_includes(covering_arr, v));
     }

@@ -763,8 +763,8 @@ pub(crate) mod test_support {
         respond: impl Fn(&str) -> (&'static str, String) + Send + 'static,
     ) -> String {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback stub");
+        let addr = listener.local_addr().expect("stub local_addr");
         std::thread::spawn(move || {
             for _ in 0..n {
                 let Ok((mut stream, _)) = listener.accept() else {
@@ -1131,8 +1131,8 @@ mod tests {
     /// (headers + Content-Length body), answers with `status` + `body`, closes.
     fn spawn_http_stub(status: &'static str, body: &'static str) -> String {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback stub");
+        let addr = listener.local_addr().expect("stub local_addr");
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             // Read until the end of headers, then the Content-Length body.

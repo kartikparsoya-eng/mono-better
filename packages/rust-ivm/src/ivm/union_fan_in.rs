@@ -248,7 +248,10 @@ impl Input for UnionFanIn {
             return from_vec(Vec::new());
         }
         if streams.len() == 1 {
-            return streams.into_iter().next().unwrap();
+            return streams
+                .into_iter()
+                .next()
+                .expect("len() == 1 checked above");
         }
 
         let merged = crate::ivm::memory_source::merge_sorted_streams(streams, compare);

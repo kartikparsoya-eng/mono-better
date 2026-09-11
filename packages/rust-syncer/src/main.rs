@@ -162,7 +162,7 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("build the shared tokio runtime");
 
     // Install OTLP metrics export (TS parity — `server/otel-start.ts` pushes
     // OTLP to a collector) BEFORE creating any instruments, so `Metrics` binds to
@@ -336,7 +336,9 @@ fn main() {
     // on the ready signal — so readiness MUST come after the binds, not (as
     // before) after the accept loop exits at shutdown.
     let http_router = router.clone();
-    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse().unwrap();
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port)
+        .parse()
+        .expect("0.0.0.0:<port> is a valid socket address");
     let ws_router = router.clone();
     // TS parity: `--websocket-max-payload-bytes` defaults to 10MB
     // (zero-config.ts websocketMaxPayloadBytes); oversized messages must be

@@ -366,7 +366,7 @@ fn push_patches(acc: &mut Vec<String>, patches: Vec<PatchToVersion>) {
 /// client-facing MEANING, not the internal field naming. Matches run-ts.mjs.
 fn canon_patch(p: &PatchToVersion) -> String {
     let v = version_string(&p.to_version);
-    let pv = serde_json::to_value(&p.patch).unwrap();
+    let pv = serde_json::to_value(&p.patch).expect("Patch is serializable");
     let ty = pv.get("type").and_then(|x| x.as_str()).unwrap_or("?");
     let op = pv.get("op").and_then(|x| x.as_str()).unwrap_or("?");
     // `id` is a string for query patches and a RowID object for row patches;

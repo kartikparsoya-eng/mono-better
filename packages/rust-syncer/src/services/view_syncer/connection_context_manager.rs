@@ -247,7 +247,7 @@ pub fn resolve_auth(
         return Ok(None);
     }
 
-    let wire = wire_auth.unwrap();
+    let wire = wire_auth.expect("has_provided_auth is wire_auth.is_some()");
 
     if user_id.is_none() {
         return Err(CCMError::Unauthorized(
@@ -633,7 +633,7 @@ impl ConnectionContextManager {
             validated_user_state = Some(UserState {
                 id: validated_user_id.clone(),
             });
-            if connection.user.id != validated_user_state.as_ref().unwrap().id {
+            if connection.user.id != validated_user_state.as_ref().expect("just set above").id {
                 return Err(CCMError::Unauthorized(
                     "Connection userID does not match validated server userID.".to_string(),
                 ));
@@ -779,11 +779,12 @@ impl ConnectionContextManager {
         let mut earliest_deadline_at = self.group.retransform_at;
 
         for connection in self.connections.values() {
-            if connection.state != ConnectionState::Validated || connection.revalidate_at.is_none()
-            {
+            if connection.state != ConnectionState::Validated {
                 continue;
             }
-            let revalidate_at = connection.revalidate_at.unwrap();
+            let Some(revalidate_at) = connection.revalidate_at else {
+                continue;
+            };
             if revalidate_at <= now {
                 due_revalidations.push(connection.clone());
             }
@@ -796,12 +797,12 @@ impl ConnectionContextManager {
 
         if let Some(not_before) = maintenance_not_before_at
             && not_before > now
-            && earliest_deadline_at.is_some()
+            && let Some(earliest) = earliest_deadline_at
         {
             return MaintenancePlan {
                 due_revalidations: Vec::new(),
                 due_retransform: false,
-                earliest_deadline_at: Some(earliest_deadline_at.unwrap().max(not_before)),
+                earliest_deadline_at: Some(earliest.max(not_before)),
             };
         }
 
@@ -931,7 +932,10 @@ impl ConnectionContextManager {
         }
 
         if reset || self.group.retransform_at.is_none() {
-            self.group.retransform_at = Some(self.now() + self.retransform_interval_ms.unwrap());
+            let interval = self
+                .retransform_interval_ms
+                .expect("guarded by the is_none() return above");
+            self.group.retransform_at = Some(self.now() + interval);
         }
     }
 

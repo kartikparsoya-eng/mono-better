@@ -207,7 +207,7 @@ impl Statement {
         let mut stmt = conn.prepare(&self.sql)?;
         let col_count = stmt.column_count();
         let col_names: Vec<String> = (0..col_count)
-            .map(|i| stmt.column_name(i).unwrap().to_string())
+            .map(|i| stmt.column_name(i).expect("i < column_count").to_string())
             .collect();
         let mut rows = stmt.query(params)?;
         if let Some(row) = rows.next()? {
@@ -235,7 +235,7 @@ impl Statement {
         let col_count = stmt.column_count();
         // Collect column names before querying to avoid borrow conflicts.
         let col_names: Vec<String> = (0..col_count)
-            .map(|i| stmt.column_name(i).unwrap().to_string())
+            .map(|i| stmt.column_name(i).expect("i < column_count").to_string())
             .collect();
         let mut rows = stmt.query(params)?;
         let mut result = Vec::new();

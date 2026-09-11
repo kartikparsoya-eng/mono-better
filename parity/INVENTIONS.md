@@ -443,7 +443,7 @@ above; this entry records the explicit coverage so L8 cold rows bind to it:
   keepalive-driven elective drain is not wired. Client-observable contract
   (no mid-work connection loss without Rehome semantics) unchanged.
 
-Formerly-open gap, now CLOSED (task #157, 2026-09-01 verified): the ivm
+Formerly-open gap, now CLOSED (verified): the ivm
 filter-pipeline operator protocol (`begin_filter`/`end_filter`/
 `build_filter_pipeline`/`set_filter_output` + builder DNF simplification) is
 ported and wired at the builder + operator call sites — `builder/builder.rs`

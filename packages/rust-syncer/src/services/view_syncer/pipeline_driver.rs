@@ -614,7 +614,7 @@ impl IvmPipelines {
             Some(
                 self.snapshotter
                     .as_ref()
-                    .unwrap()
+                    .expect("set above when it was None")
                     .current_conn()
                     .map_err(|e| format!("snapshotter current connection: {e}"))?,
             )

@@ -2904,7 +2904,10 @@ impl ViewSyncerService {
             }
         }
 
-        let cvr = self.cvr.as_ref().unwrap();
+        let cvr = self
+            .cvr
+            .as_ref()
+            .expect("the CVR is loaded for the life of the service");
         let client_version = self
             .client_base_versions
             .get(client_id)
@@ -2990,7 +2993,10 @@ impl ViewSyncerService {
             {
                 self.config_pass_runs += 1;
             }
-            let cvr = self.cvr.take().unwrap();
+            let cvr = self
+                .cvr
+                .take()
+                .expect("the CVR is loaded for the life of the service");
             let state_version = self
                 .pipelines()
                 .current_version()
@@ -3542,7 +3548,10 @@ impl ViewSyncerService {
             return;
         }
 
-        let cvr = self.cvr.take().unwrap();
+        let cvr = self
+            .cvr
+            .take()
+            .expect("the CVR is loaded for the life of the service");
         let poke_ws: Vec<String> = self.registered_ws.values().cloned().collect();
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
@@ -3785,7 +3794,10 @@ impl ViewSyncerService {
         // notification through a freshly opened replica connection cost
         // ~780 ms per notification on the replay box (9794 notifications, pre-
         // advance p50 784 ms vs 17 ms for the advance itself).
-        let cvr = self.cvr.take().unwrap();
+        let cvr = self
+            .cvr
+            .take()
+            .expect("the CVR is loaded for the life of the service");
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
         let now = now_ms();

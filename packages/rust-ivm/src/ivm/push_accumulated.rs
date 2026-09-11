@@ -222,7 +222,9 @@ pub fn push_accumulated_changes(
         ChangeType::Remove => {
             assert_eq!(types.len(), 1);
             assert_eq!(types[0], ChangeType::Remove);
-            let change = candidates.remove(&ChangeType::Remove).unwrap();
+            let change = candidates
+                .remove(&ChangeType::Remove)
+                .expect("asserted above: the only candidate type");
             output
                 .borrow_mut()
                 .push(add_empty_relationships(schema, &change), pusher);
@@ -230,7 +232,9 @@ pub fn push_accumulated_changes(
         ChangeType::Add => {
             assert_eq!(types.len(), 1);
             assert_eq!(types[0], ChangeType::Add);
-            let change = candidates.remove(&ChangeType::Add).unwrap();
+            let change = candidates
+                .remove(&ChangeType::Add)
+                .expect("asserted above: the only candidate type");
             output
                 .borrow_mut()
                 .push(add_empty_relationships(schema, &change), pusher);

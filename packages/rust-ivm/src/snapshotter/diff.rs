@@ -165,7 +165,7 @@ fn get_row(
         .map_err(|e| format!("get_row prepare: {}", e))?;
     let params: Vec<&dyn rusqlite::ToSql> = key_cols
         .iter()
-        .map(|c| row_key.get(c).unwrap() as &dyn rusqlite::ToSql)
+        .map(|c| row_key.get(c).expect("row key carries every key column") as &dyn rusqlite::ToSql)
         .collect();
 
     let mut rows = stmt
@@ -233,7 +233,11 @@ fn get_rows(
     let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::new();
     for key in &valid_keys {
         for c in *key {
-            binds.push(row.get(c).unwrap() as &dyn rusqlite::ToSql);
+            binds.push(
+                row.get(c)
+                    .expect("a valid key names only columns the row has")
+                    as &dyn rusqlite::ToSql,
+            );
         }
     }
 

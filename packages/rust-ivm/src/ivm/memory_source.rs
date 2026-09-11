@@ -1443,7 +1443,10 @@ pub fn merge_sorted_streams(streams: Vec<NodeStream>, compare: NodeCompare) -> N
         return empty_stream();
     }
     if streams.len() == 1 {
-        return streams.into_iter().next().unwrap();
+        return streams
+            .into_iter()
+            .next()
+            .expect("len() == 1 checked above");
     }
     Box::new(KWayMerge::new(streams, compare))
 }

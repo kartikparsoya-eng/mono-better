@@ -35,5 +35,8 @@ async fn main() {
         .expect("connect TEST_CVR_PG_URI");
 
     let trace = run(&pool, &prog).await;
-    println!("{}", serde_json::to_string_pretty(&trace).unwrap());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&trace).expect("trace is serializable")
+    );
 }

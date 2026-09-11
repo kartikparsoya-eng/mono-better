@@ -209,7 +209,12 @@ pub fn transform_filters(filters: Option<&Condition>) -> TransformedFilters {
                 filters: if transformed.is_empty() {
                     None
                 } else if transformed.len() == 1 {
-                    Some(transformed.into_iter().next().unwrap())
+                    Some(
+                        transformed
+                            .into_iter()
+                            .next()
+                            .expect("len() == 1 checked above"),
+                    )
                 } else {
                     Some(Condition::And(transformed))
                 },
@@ -246,7 +251,12 @@ pub fn transform_filters(filters: Option<&Condition>) -> TransformedFilters {
                 filters: if transformed.is_empty() {
                     Some(Condition::Or(Vec::new()))
                 } else if transformed.len() == 1 {
-                    Some(transformed.into_iter().next().unwrap())
+                    Some(
+                        transformed
+                            .into_iter()
+                            .next()
+                            .expect("len() == 1 checked above"),
+                    )
                 } else {
                     Some(Condition::Or(transformed))
                 },

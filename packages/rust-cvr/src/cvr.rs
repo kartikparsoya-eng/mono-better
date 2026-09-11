@@ -266,7 +266,7 @@ pub fn next_eviction_time(cvr: &CVR) -> Option<TTLClock> {
     let mut next: Option<i64> = None;
     for q in get_inactive_queries(cvr) {
         let expire = q.inactivated_at + q.ttl;
-        if next.is_none() || expire < next.unwrap() {
+        if next.is_none_or(|n| expire < n) {
             next = Some(expire);
         }
     }
@@ -371,7 +371,12 @@ impl CVRConfigDrivenUpdater {
     /// Ensure a client record exists. Creates internal queries on first client.
     pub fn ensure_client(&mut self, id: &str) -> &mut ClientRecord {
         if self.base.cvr.clients.contains_key(id) {
-            return self.base.cvr.clients.get_mut(id).unwrap();
+            return self
+                .base
+                .cvr
+                .clients
+                .get_mut(id)
+                .expect("checked by contains_key above");
         }
 
         // Add the ClientRecord
@@ -438,7 +443,7 @@ impl CVRConfigDrivenUpdater {
             self.base.store_ops.push(StoreOp::PutQuery(mr_query));
         }
 
-        self.base.cvr.clients.get_mut(id).unwrap()
+        self.base.cvr.clients.get_mut(id).expect("inserted above")
     }
 
     /// Set the client schema. Must match existing schema if already set.
@@ -499,7 +504,7 @@ impl CVRConfigDrivenUpdater {
             .cvr
             .clients
             .get(client_id)
-            .unwrap()
+            .expect("client record exists: ensure_client registered this clientID")
             .desired_query_ids
             .iter()
             .cloned()
@@ -565,7 +570,7 @@ impl CVRConfigDrivenUpdater {
             .cvr
             .clients
             .get_mut(client_id)
-            .unwrap()
+            .expect("client record exists: ensure_client registered this clientID")
             .desired_query_ids = combined;
 
         // Emit in input order (TS iterates an insertion-ordered Set), deduping
@@ -656,7 +661,7 @@ impl CVRConfigDrivenUpdater {
             .cvr
             .clients
             .get(client_id)
-            .unwrap()
+            .expect("client record exists: ensure_client registered this clientID")
             .desired_query_ids
             .iter()
             .cloned()
@@ -679,7 +684,7 @@ impl CVRConfigDrivenUpdater {
             .cvr
             .clients
             .get_mut(client_id)
-            .unwrap()
+            .expect("client record exists: ensure_client registered this clientID")
             .desired_query_ids = remaining;
 
         // Iterate `remove` in a STABLE (sorted) order. TS iterates the smaller of
@@ -782,7 +787,7 @@ impl CVRConfigDrivenUpdater {
             .cvr
             .clients
             .get(client_id)
-            .unwrap()
+            .expect("client record exists: ensure_client registered this clientID")
             .desired_query_ids
             .clone();
         self.delete_queries(client_id, &desired, None)
@@ -964,7 +969,12 @@ impl CVRQueryDrivenUpdater {
         if current_hash.as_deref() != Some(transformation_hash) {
             let transformation_version = self.base.ensure_new_version();
 
-            let query = self.base.cvr.queries.get_mut(query_id).unwrap();
+            let query = self
+                .base
+                .cvr
+                .queries
+                .get_mut(query_id)
+                .expect("queryID is present in cvr.queries (TS indexes it non-null)");
 
             if !query.is_internal() && query.patch_version().is_none() {
                 // Client query: desired -> gotten
@@ -1162,7 +1172,9 @@ impl CVRQueryDrivenUpdater {
                 }
                 Some(_) => {
                     if let Some(contents) = contents {
-                        let rv = row_version.as_ref().unwrap();
+                        let rv = row_version
+                            .as_ref()
+                            .expect("a merged (non-deleted) row carries its rowVersion");
                         let should_send = match last_patch {
                             Some(lp) => lp
                                 .row_version
