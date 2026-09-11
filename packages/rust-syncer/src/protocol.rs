@@ -100,6 +100,7 @@ where
 }
 
 pub mod analyze_query_result;
+pub mod ast;
 pub mod change_desired_queries;
 pub mod client_schema;
 pub mod close_connection;
@@ -174,6 +175,62 @@ mod tests {
             r#"["initConnection",{"desiredQueriesPatch":[],"clientSchema":{"tables":{}}}]"#,
         );
         assert!(matches!(ok, Ok(Upstream::InitConnection(_))), "{ok:?}");
+    }
+
+    /// `upQueriesPatchSchema` / `astSchema` are valita `v.object`s parsed in
+    /// strict mode (queries-patch.ts:10-29, ast.ts): an unknown key anywhere
+    /// in a desired-queries patch entry — including inside its `ast` — fails
+    /// the upstream parse, so the connection closes with `InvalidMessage`
+    /// instead of registering the query.
+    #[test]
+    fn parse_upstream_rejects_unknown_keys_in_desired_queries_patch_and_ast() {
+        let ok = parse_upstream(
+            r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ttl":1000,"ast":{"table":"issue","where":{"type":"simple","op":"=","left":{"type":"column","name":"id"},"right":{"type":"literal","value":"x"}}}},{"op":"del","hash":"g"},{"op":"clear"}]}]"#,
+        );
+        assert!(
+            matches!(ok, Ok(Upstream::ChangeDesiredQueries(_))),
+            "{ok:?}"
+        );
+        for bad in [
+            // unknown key on the put entry
+            r#"[{"op":"put","hash":"h","bogus":1}]"#,
+            // unknown key inside the AST
+            r#"[{"op":"put","hash":"h","ast":{"table":"issue","bogus":1}}]"#,
+            // unknown key deep inside a condition
+            r#"[{"op":"put","hash":"h","ast":{"table":"issue","where":{"type":"simple","op":"=","left":{"type":"column","name":"id","x":1},"right":{"type":"literal","value":1}}}}]"#,
+            // an operator outside simpleOperatorSchema
+            r#"[{"op":"put","hash":"h","ast":{"table":"issue","where":{"type":"simple","op":"~","left":{"type":"column","name":"id"},"right":{"type":"literal","value":1}}}}]"#,
+            // `.optional()` never admits null
+            r#"[{"op":"put","hash":"h","ttl":null}]"#,
+            r#"[{"op":"put","hash":"h","ast":null}]"#,
+            // an op outside the union
+            r#"[{"op":"upsert","hash":"h"}]"#,
+            // hash must be a string
+            r#"[{"op":"del","hash":7}]"#,
+            // clear takes no other keys
+            r#"[{"op":"clear","hash":"h"}]"#,
+        ] {
+            let msg = format!(r#"["changeDesiredQueries",{{"desiredQueriesPatch":{bad}}}]"#);
+            assert!(parse_upstream(&msg).is_err(), "must reject: {bad}");
+            let init = format!(r#"["initConnection",{{"desiredQueriesPatch":{bad}}}]"#);
+            assert!(
+                parse_upstream(&init).is_err(),
+                "initConnection must reject: {bad}"
+            );
+        }
+    }
+
+    /// `inspectAnalyzeQueryUpSchema` carries `astSchema.optional()` twice
+    /// (inspect-up.ts:48,51); both are validated the same way.
+    #[test]
+    fn parse_upstream_rejects_unknown_keys_in_inspect_analyze_query_ast() {
+        let good = r#"["inspect",{"op":"analyze-query","id":"1","ast":{"table":"issue"}}]"#;
+        assert!(parse_upstream(good).is_ok(), "{:?}", parse_upstream(good));
+        let bad =
+            r#"["inspect",{"op":"analyze-query","id":"1","ast":{"table":"issue","bogus":1}}]"#;
+        assert!(parse_upstream(bad).is_err());
+        let bad_value = r#"["inspect",{"op":"analyze-query","id":"1","value":{"table":"issue","orderBy":[["id","sideways"]]}}]"#;
+        assert!(parse_upstream(bad_value).is_err());
     }
 
     #[test]

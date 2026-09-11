@@ -23,8 +23,17 @@ pub enum InspectUpBody {
     #[serde(rename = "analyze-query")]
     AnalyzeQuery {
         id: String,
+        // `astSchema.optional()` (inspect-up.ts:48/51): validated, kept as JSON.
+        #[serde(
+            default,
+            deserialize_with = "crate::protocol::ast::optional_strict_ast"
+        )]
         value: Option<Value>,
         options: Option<AnalyzeQueryOptions>,
+        #[serde(
+            default,
+            deserialize_with = "crate::protocol::ast::optional_strict_ast"
+        )]
         ast: Option<Value>,
         name: Option<String>,
         args: Option<Vec<Value>>,

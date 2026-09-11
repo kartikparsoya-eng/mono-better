@@ -32,6 +32,7 @@ pub struct ConnectedBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InitConnectionBody {
+    #[serde(deserialize_with = "crate::protocol::queries_patch::strict_up_queries_patch")]
     pub desired_queries_patch: UpQueriesPatch,
     // Every `.optional()` below is absent-or-value, never an explicit `null`
     // — valita `.optional()` does not admit null, serde's `Option`

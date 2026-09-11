@@ -1037,6 +1037,30 @@ mod tests {
         assert!(matches!(cmds[1], WsCommand::Close(_)));
     }
 
+    /// Port of TS `#handleMessage`'s parse catch for a message that is valid
+    /// JSON but fails the strict upstream schema: an unknown key inside a
+    /// desired query's `ast` (valita strict mode, ast.ts) closes the
+    /// connection with `InvalidMessage` and the handler never sees the
+    /// query. Before the strict port rust accepted the AST and registered it.
+    #[test]
+    fn handle_inbound_unknown_ast_key_closes_with_invalid_message() {
+        let (conn, mut rx, calls, closes) = test_connection(PROTOCOL_VERSION, Vec::new());
+        let msg = r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"issue","bogus":1}}]}]"#;
+        assert!(!block_on_local(conn.handle_inbound(msg)));
+        assert!(conn.is_closed());
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert!(calls.lock().unwrap().is_empty(), "handler must not run");
+        let cmds = drain(&mut rx);
+        match &cmds[0] {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[0], "error");
+                assert_eq!(msg[1]["kind"], "InvalidMessage");
+            }
+            _ => panic!("expected the error frame first"),
+        }
+        assert!(matches!(cmds[1], WsCommand::Close(_)));
+    }
+
     /// Port of TS `#handleMessage`'s ping fast-path: `["ping",{}]` answers
     /// `["pong",{}]` directly, WITHOUT dispatching to the message handler.
     #[test]
