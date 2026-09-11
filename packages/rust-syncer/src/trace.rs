@@ -67,7 +67,7 @@ pub fn thread_cpu_ms() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    /// F-18: `note!` must not evaluate its format arguments when the trace is
+    /// `note!` must not evaluate its format arguments when the trace is
     /// off.
     ///
     /// TS's logging idiom is an optional CALL — `lc.debug?.(`…${expensive()}`)`
@@ -82,7 +82,7 @@ mod tests {
     /// is meaningful whether or not `SYNCER_TRACE` is set in the environment —
     /// it pins the equivalence, not one side of it.
     ///
-    /// NON-VACUOUS: turn `note!` back into
+    /// Mutation test: turn `note!` back into
     /// `pub fn note(op: &str, msg: &str)` with the callers' `&format!(…)` and
     /// the argument is evaluated unconditionally, so this fails in any
     /// environment where `SYNCER_TRACE` is unset (i.e. every normal test run).

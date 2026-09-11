@@ -1,5 +1,6 @@
 // tests/advance_fixture_replay_test.rs — replay advance-path regression fixtures
-// against the TS advance oracle using the real napi addon.
+// against the TS advance oracle through the removed native addon's runner
+// (skips when the runner is absent).
 //
 // Fixtures in agentic/fixtures/regressions/adv-seed-* are advance-only:
 // their .expected.json is produced by agentic/oracle/ts-advance-runner.mjs

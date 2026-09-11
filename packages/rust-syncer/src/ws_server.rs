@@ -54,8 +54,8 @@ const DEFAULT_DOWNSTREAM_BYTE_HWM: i64 = 256 * 1024 * 1024;
 /// (`DOWNSTREAM_MSG_INTERVAL_MS`, ported below), and TS's heartbeat close
 /// (`sendPingsForLiveness`, types/ws.ts:26) is applied only to its internal
 /// streams (types/streams.ts:155/264), never to clients. A 60s default here
-/// closed 50 of 344 sessions (code 1001 "liveness timeout") in the 2026-09-03
-/// ART replay — clients that send no app-level `ping` — and cost 1/3 of the
+/// closed 50 of 344 sessions (code 1001 "liveness timeout") in a
+/// production-trace replay — clients that send no app-level `ping` — and cost 1/3 of the
 /// pokes vs TS. `ZERO_WS_LIVENESS_TIMEOUT_MS=<ms>` opts in for deployments that
 /// want half-open sockets (pulled cable, sleeping laptop, zero-window peer)
 /// closed before the OS TCP timeout; zero-client pings every ~5s, so 60000 =
@@ -796,7 +796,7 @@ where
                 // multi-frame poke burst (pokeStart → pokePart → pokeEnd as
                 // separate writes) stalls ~40-50ms on Nagle + delayed-ACK —
                 // measured live as a constant +50ms push-ack penalty
-                // (G42 push class 2.0x vs TS).
+                // (a push-latency class 2.0x vs TS).
                 let _ = stream.set_nodelay(true);
                 let handler = handler.clone();
                 let max_payload_bytes = config.max_payload_bytes;
@@ -866,7 +866,7 @@ mod tests {
         )));
     }
 
-    /// G36 oversized-payload: a frame above the payload cap must close with
+    /// Oversized payload: a frame above the payload cap must close with
     /// RFC 6455 code 1009 "Max payload size exceeded" — Node `ws` behavior
     /// (receiver RangeError → 1009), which TS zero-cache inherits via
     /// `maxPayload`. Before the fix the reader just dropped the transport and
@@ -923,7 +923,7 @@ mod tests {
         // tungstenite layer's 2× limit, so the frame is read CLEANLY and
         // rejected by the reader's own size check — the deterministic 1009
         // path (the mid-frame Capacity abort path is best-effort only; its
-        // regression net is the live xyne-art G36 oversized-payload case).
+        // regression net is the release-gate oversized-payload case).
         let _ = ws.send(Message::Text("x".repeat(1500))).await;
 
         let mut close_code = None;
@@ -954,7 +954,7 @@ mod tests {
     /// ordering): a pre-CG connect failure sends the `["error", body]` frame
     /// FIRST, then the close frame with code 3000 carrying the error message
     /// as the reason — never a bare close (the client would see an opaque
-    /// 1005/1006 and could not classify the failure). G36 error surface.
+    /// 1005/1006 and could not classify the failure). Error-surface parity.
     #[tokio::test]
     async fn send_error_and_close_sends_error_frame_then_close_3000() {
         use futures_util::StreamExt as _;
@@ -1013,7 +1013,7 @@ mod tests {
     /// an `["error", {kind:"Rehome"}]` frame FIRST, then a close frame (code
     /// 3000) — never a bare 1006, which the client cannot classify.
     ///
-    /// NON-VACUOUS: change `ErrorBody::rehome(...)` at the shed arm to any other
+    /// Mutation test: change `ErrorBody::rehome(...)` at the shed arm to any other
     /// kind, or drop the error frame, and the `kind == "Rehome"` / frame-present
     /// assertions fail. (Verified by reverting to a bare close.)
     #[tokio::test]
@@ -1151,7 +1151,7 @@ mod tests {
     /// is pinned; `poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body`
     /// (rust-cvr) pins the two serialization ROUTES against each other.
     ///
-    /// NON-VACUOUS: point the writer arm at the wrong tag (`"poke"`) or drop
+    /// Mutation test: point the writer arm at the wrong tag (`"poke"`) or drop
     /// the arm's `est_bytes` accounting and this fails; before the variant
     /// existed there was no writer-side poke-part path to observe at all.
     #[tokio::test]
@@ -1273,7 +1273,7 @@ mod liveness_default_tests {
     use super::*;
 
     /// I-14: with no operator opt-in the server never closes an idle client
-    /// (TS parity — connection.ts has no idle close). Non-vacuous: a 60_000
+    /// (TS parity — connection.ts has no idle close). Mutation test: a 60_000
     /// default makes the first assertion fail. Env is read at call time, so
     /// the opt-in parse is checked in the same test (no cross-test env race).
     #[test]

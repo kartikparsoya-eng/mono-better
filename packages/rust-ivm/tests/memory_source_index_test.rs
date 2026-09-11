@@ -1,4 +1,4 @@
-//! F-21: `MemorySource`'s primary index is kept sorted by the primary-key
+//! `MemorySource`'s primary index is kept sorted by the primary-key
 //! comparator, so `add_row`'s replace-or-insert and `has`'s membership test
 //! both BINARY SEARCH it rather than scanning.
 //!
@@ -16,7 +16,7 @@
 //! row, the last row, inserting before everything, after everything, and into
 //! the middle.
 //!
-//! NON-VACUOUS: introduce any off-by-one in either search — drop the
+//! Mutation test: introduce any off-by-one in either search — drop the
 //! `pos < data.len()` guard (panics on the append cases), compare against
 //! `data[pos - 1]`, or use `!= CmpOrdering::Greater` in the `partition_point`
 //! predicate — and these fail. Restoring the full `.iter().position(..)` scan

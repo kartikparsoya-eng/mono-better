@@ -19,7 +19,7 @@ use super::*;
 /// per-row path. It now looks the key up first and clones only for a
 /// query's first row. This pins the fold's arithmetic across that change.
 ///
-/// NON-VACUOUS: make the present-key arm assign rather than XOR
+/// Mutation test: make the present-key arm assign rather than XOR
 /// (`Some(sig) => *sig = unit`) and both the two-row and the undo
 /// assertions fail; seed the absent key with `0` instead of `unit` and the
 /// single-row assertion fails; drop the EDIT guard and the last assertion
@@ -87,7 +87,7 @@ fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
         "an Edit must not change the row-set signature"
     );
 }
-// The dissolved engine (L9 Stage 3c-iii): tests keep the old name.
+// The dissolved `SyncEngine` (1970feeb7): tests keep the old name.
 use super::ViewSyncerService as SyncEngine;
 // Auth-maintenance harness helpers live in the sibling `tests` module.
 use super::tests::{pinned_params, revalidate_state, validate_test_connection};
@@ -227,7 +227,7 @@ fn same_hash_rehydration_forces_bump_matches_ts_guard() {
     );
 }
 
-/// Port of napi `value_to_serde_json` REAL→JSON semantics (TS
+/// `value_to_serde_json` REAL→JSON semantics (TS
 /// `JSON.stringify` of a JS Number): an integral, in-i64-range REAL
 /// serializes as an INTEGER token (JS `2` not `2.0`), a fractional REAL
 /// keeps its fraction, and the non-finite fallbacks route through
@@ -367,7 +367,7 @@ fn users_spec() -> IvmTableSpec {
 /// drift branch (never insert into `drifted`) fails the first assertion.
 /// TS view-syncer.ts:1570-1577: the `hydrateUnchangedQueries:` summary
 /// classifies EVERY got query — hydrated (same hash), other / custom hash
-/// mismatch, custom transform error, inactivated. Non-vacuous: without the
+/// mismatch, custom transform error, inactivated. Mutation test: without the
 /// line, or with a query in the wrong bucket, the exact-string assertion
 /// fails (the pre-fix code logged nothing here).
 #[tokio::test]
@@ -447,7 +447,7 @@ async fn hydrate_unchanged_queries_logs_the_ts_summary_line() {
         .unwrap();
     assert!(drifted.is_empty(), "{drifted:?}");
     // TS view-syncer.ts:1638: `#hydrations.add(1)` per rehydrated query —
-    // the one same-hash survivor here. NON-VACUOUS: drop the
+    // the one same-hash survivor here. Mutation test: drop the
     // `record_hydration(elapsed)` in `hydrate_unchanged_queries` → 0.
     assert_eq!(
         engine.metrics.snapshot()["hydrations"],
@@ -541,7 +541,7 @@ async fn hydrate_unchanged_queries_detects_drift() {
     );
 }
 
-/// NON-VACUOUS (log precision, 2026-09-08): the
+/// Mutation test: the
 /// `quiet commit discarded a version bump` diagnostic exists to name the
 /// path that closes a client with `Patches were sent but finalVersion ...
 /// is not greater than baseVersion`. TS raises that ONLY on the
@@ -730,10 +730,10 @@ async fn hydrate_and_sync_emits_poke_frames() {
     assert!(has_del, "late catch-up patch must be delivered in the poke");
 }
 
-/// D-c: `hydrate_and_sync` records the per-query inspector server metrics —
+/// `hydrate_and_sync` records the per-query inspector server metrics —
 /// `query-materialization-server` (from the engine's hydration timing) and
 /// the queryID→AST map (`add_query`), both keyed by the queryID, exactly as
-/// TS `#syncQueryPipelineSet` (view-syncer.ts:2297-2298). NON-VACUOUS: after
+/// TS `#syncQueryPipelineSet` (view-syncer.ts:2297-2298). Mutation test: after
 /// hydrating q1, the delegate reports the AST and a `query-hydration-server-ms`
 /// for q1; removing the recording loop makes both `get_ast_for_query` and
 /// `get_metrics_json_for_query` return `None`, failing the asserts.
@@ -873,7 +873,7 @@ async fn advance_and_sync_uses_header_version_not_empty() {
     // make_cvr() has stateVersion "00" and replicaVersion "v1"; advancing a
     // snapshot pinned at "v1" MUST NOT panic (it did before the fix).
     //
-    // ALSO PINS (fix, 2026-09-05) that this zero-change advance never reads
+    // ALSO PINS that this zero-change advance never reads
     // the CVR row map. TS materialises no row map for an advance:
     // `#advancePipelines` hands `#processChanges` only the changed-row batch
     // (view-syncer.ts:2472-2505 -> `updater.received(lc, rows)`), and the
@@ -901,8 +901,8 @@ async fn advance_and_sync_uses_header_version_not_empty() {
     // `zero.sync.advance-time` — TS records `timer.totalElapsed()` (the
     // process clock) at the end of `#advancePipelines` (view-syncer.ts:2628-
     // 2632); rust records it here, inside `advance_and_sync`, with the same
-    // value the outcome carries. NON-VACUOUS: before 2026-09-09 the record
-    // lived in `on_notification` on the WALL clock — this direct call left
+    // value the outcome carries. Mutation test: an earlier version recorded
+    // this in `on_notification` on the WALL clock — this direct call left
     // the seam `None`.
     assert_eq!(
         crate::metrics::LAST_ADVANCE_MS.lock().unwrap().take(),
@@ -923,7 +923,7 @@ async fn advance_and_sync_uses_header_version_not_empty() {
     // (cvr-store.ts:1068, 1217); a zero-change advance flushes no rows, so
     // the count must be exactly what it was. 4453a0f91 assigned the (now
     // empty) lazily-read map's length here, zeroing the `zero.sync.rows`
-    // gauge after every no-op advance. Non-vacuous: restore that
+    // gauge after every no-op advance. Mutation test: restore that
     // assignment and this reads 0.
     assert_eq!(
         row_count_after, 7,
@@ -932,7 +932,7 @@ async fn advance_and_sync_uses_header_version_not_empty() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-04): the config poke must be opened AFTER the
+/// Mutation test: the config poke must be opened AFTER the
 /// store flush and ONLY when the CVR version actually advanced. TS:
 ///
 /// ```text
@@ -1050,7 +1050,7 @@ async fn config_update_no_op_flush_does_not_close_client() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-04): the SECOND port of TS `#updateCVRConfig`.
+/// Mutation test: the SECOND port of TS `#updateCVRConfig`.
 /// `deleteClients` routes through `#handleConfigUpdate` → `#updateCVRConfig`
 /// (view-syncer.ts:1046), so it must flush first and poke only when the
 /// version advanced — exactly like `handle_config_update`. Rust had the same
@@ -1265,7 +1265,7 @@ fn desired(hash: &str) -> DesiredQuerySpec {
     }
 }
 
-/// NON-VACUOUS (log parity, 2026-09-08): TS's slow-hydrate warning is PER
+/// Mutation test: TS's slow-hydrate warning is PER
 /// QUERY — `if (elapsed > slowHydrateThreshold) queryLC.warn?.('Slow query
 /// materialization', elapsed, q.ast)` on the query's own process time, with
 /// `hash`/`queryHash`/`transformationHash` contexts and the transformed AST
@@ -1371,7 +1371,7 @@ async fn slow_query_materialization_warns_per_query_with_its_ast() {
     );
 }
 
-/// NON-VACUOUS (config parity, 2026-09-08): the threshold is TS's
+/// Mutation test: the threshold is TS's
 /// `log.slowHydrateThreshold` — env `ZERO_LOG_SLOW_HYDRATE_THRESHOLD`,
 /// default 100 (otel/src/log-options.ts:24-29). Rust read a rust-only name
 /// with a 10x default (1000), so a bare rust binary warned on almost nothing
@@ -1391,7 +1391,7 @@ fn slow_hydrate_threshold_resolves_the_ts_env_name_and_default() {
         slow_hydrate_threshold_from_env(env(&[("ZERO_LOG_SLOW_HYDRATE_THRESHOLD", "50")])),
         50.0
     );
-    // The pre-2026-09-08 bridge name still applies (deprecated alias)…
+    // The earlier bridge name still applies (deprecated alias)…
     assert_eq!(
         slow_hydrate_threshold_from_env(env(&[("ZERO_SLOW_HYDRATE_THRESHOLD_MS", "250")])),
         250.0
@@ -1410,7 +1410,7 @@ fn slow_hydrate_threshold_resolves_the_ts_env_name_and_default() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): the TTL expiry tick syncs the pipeline set
+/// Mutation test: the TTL expiry tick syncs the pipeline set
 /// ONLY when pipelines are synced. TS:
 /// ```text
 /// // #syncQueryPipelineSet() will remove the expired queries.
@@ -1983,7 +1983,7 @@ async fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
     assert!(cvr.clients.contains_key("client1"));
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): `customQueryTransformMode` — a `Missing`
+/// Mutation test: `customQueryTransformMode` — a `Missing`
 /// pass must submit ONLY custom queries that are not already hydrated, an
 /// `All` pass must submit every one. Port of TS `customQueriesToTransform`
 /// (view-syncer.ts:1954-1959).
@@ -2169,7 +2169,7 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): `hydrate_unchanged_queries` — the proactive
+/// Mutation test: `hydrate_unchanged_queries` — the proactive
 /// re-materialize of every already-gotten pipeline — must run ONCE per pipeline
 /// init (TS `#hydrateUnchangedQueries` gated by `#pipelinesSynced`,
 /// view-syncer.ts:568-606), NOT on every connect/config-change. Before the fix
@@ -2397,7 +2397,7 @@ async fn changed_transformation_hash_rehydrates_query() {
 ///
 /// rust used to `return Ok(())` the moment the patch set came back empty,
 /// which skipped BOTH the poke and `mark_version_served`. The 60-minute dual
-/// replay's frameseq gate caught it on 2026-09-04 as 4 client groups with
+/// replay's frame-sequence gate caught it as 4 client groups with
 /// rust=1 frame (`connected`) against ts=3 (`connected`, `pokeStart`,
 /// `pokeEnd`) — a client that never learns its queries were reconciled.
 ///
@@ -2466,7 +2466,7 @@ async fn catchup_clients_pokes_even_when_there_are_no_patches() {
 /// 2464-2467). Rust returned early on an empty client set, skipping the
 /// served mark — the e2e serving-lag observation and the cross-CG
 /// `servedVersion` TS records for a group whose last client just dropped.
-/// Non-vacuous: restore the `clients.is_empty()` early return and
+/// Mutation test: restore the `clients.is_empty()` early return and
 /// `served_version` stays `None`.
 #[tokio::test]
 async fn catchup_clients_marks_the_version_served_with_no_clients_like_ts() {
@@ -2551,7 +2551,7 @@ fn catchup_floor_uses_original_cookie_not_advanced_version() {
 /// because the holder is on this very thread and only an `.await` could let
 /// it run. One duplicated entry wedged the whole client-group thread.
 ///
-/// NON-VACUOUS: drop the `seen.insert(...)` filter in `get_clients` and the
+/// Mutation test: drop the `seen.insert(...)` filter in `get_clients` and the
 /// length assertion fails with 2.
 #[test]
 fn get_clients_returns_one_handler_per_socket_for_a_repeated_ws_id() {
@@ -2773,7 +2773,7 @@ async fn delete_clients_removes_client_and_acks() {
     assert!(saw_ack, "expected deleteClients ack naming client2");
 }
 
-/// NON-VACUOUS (parity fix 2026-09-01): a failed custom-query transform must
+/// Mutation test: a failed custom-query transform must
 /// emit the TS WARN AND still forward the error to clients. Port of TS
 /// `#processTransformedCustomQueries` (view-syncer.ts:1715-1719,
 /// `lc.warn?.(errorMessage, q)`). Before the fix rust forwarded to clients
@@ -2884,7 +2884,7 @@ fn capture_warns<F: FnOnce()>(f: F) -> String {
 /// Pure classifier parity (TS `#runBackgroundRetransform` catch dispatch,
 /// view-syncer.ts:2700-2723): an auth error body → `AuthError`, a transient
 /// transform-failed body → `TransformFailed`, and `None` (no throw) →
-/// `Success`. NON-VACUOUS: mis-map any arm (e.g. treat every failure as
+/// `Success`. Mutation test: mis-map any arm (e.g. treat every failure as
 /// transient) and the corresponding assert fails.
 #[test]
 fn classify_retransform_failure_splits_auth_transient_success() {
@@ -2918,11 +2918,11 @@ fn classify_retransform_failure_splits_auth_transient_success() {
     ));
 }
 
-/// NON-VACUOUS (fix #2, 2026-09-01): a background retransform whose re-hydrate
+/// Mutation test: a background retransform whose re-hydrate
 /// hits an AUTH error must NOT mark success — it must WARN, fail the stale
 /// connection, and retry under a replacement (TS `#runBackgroundRetransform`
 /// view-syncer.ts:2700-2709,2726-2745). The pre-fix code ran the re-hydrate
-/// and marked success UNCONDITIONALLY (the 2026-08-27 stale-auth outage
+/// and marked success UNCONDITIONALLY (the stale-auth outage
 /// class): no warn, no fail, no retry. Revert `run_background_retransform` to
 /// that unconditional mark and every assert below fails.
 #[test]
@@ -2980,7 +2980,7 @@ fn background_retransform_auth_error_fails_connection_and_retries() {
     );
 }
 
-/// NON-VACUOUS (fix #2): a background retransform whose re-hydrate hits a
+/// Mutation test: a background retransform whose re-hydrate hits a
 /// TRANSIENT transform failure must WARN + defer maintenance and KEEP the
 /// connection — never mark success, never close the socket (TS
 /// `#runBackgroundRetransform` view-syncer.ts:2710-2719). Revert to the

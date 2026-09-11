@@ -1,4 +1,4 @@
-//! G15 repro: Two Edits to the same row in the same advance.
+//! Same-advance staleness repro: Two Edits to the same row in the same advance.
 //! archiveChannel: isArchived false -> true
 //! unarchiveChannel: isArchived true -> false
 //! Final state should be isArchived=false.

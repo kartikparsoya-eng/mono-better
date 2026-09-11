@@ -1,6 +1,5 @@
 //! Port of `packages/zero-protocol/src/down.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 use serde::Serialize;
 use serde_json::Value;

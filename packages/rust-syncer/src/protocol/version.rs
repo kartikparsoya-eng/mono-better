@@ -1,6 +1,5 @@
 //! Port of `packages/zero-protocol/src/version.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 /// A CVR version (cookie). Always a string like "00" or "0123abc".
 pub type Version = String;
@@ -11,7 +10,7 @@ pub type Version = String;
 /// Not `Option<String>`, and not a `#[serde(transparent)]` newtype over one:
 /// serde fills a missing field via `missing_field`, whose deserializer answers
 /// `deserialize_option` with `visit_none`, so BOTH of those accept a body with
-/// no `cookie` at all — where TS rejects it (M13 R2). The hand-written impl
+/// no `cookie` at all — where TS rejects it. The hand-written impl
 /// below routes through `deserialize_any`, which `missing_field` refuses, so an
 /// absent key is an error while an explicit `null` still parses.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]

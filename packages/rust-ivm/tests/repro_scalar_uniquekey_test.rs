@@ -1,4 +1,4 @@
-//! Root-cause proof for the ART G8 gap: the conversation ACL injects a nested
+//! Root-cause proof for the release-gate data gap: the conversation ACL injects a nested
 //! *scalar* EXISTS on channel_participants keyed on the (channelId, userId)
 //! UNIQUE index:
 //!
@@ -12,7 +12,7 @@
 //! engine only knows the PK ([id]) — which is what the driver currently passes,
 //! omitting secondary unique keys — resolution FAILS, the scalar degrades to a
 //! live per-parent Exists, and the matched participant (cp0 = me) streams only
-//! as a HIDDEN companion (client discards it) → G8 "only_mirror".
+//! as a HIDDEN companion (client discards it) → a data-differential "only_mirror" miss.
 //!
 //! With the (channelId, userId) unique key known, the scalar resolves once and
 //! the matched row is emitted VISIBLE (is_hidden=false) → present on the client,

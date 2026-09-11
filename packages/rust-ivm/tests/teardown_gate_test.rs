@@ -2,7 +2,7 @@
 //
 // Validates that repeated hydrate → advance → destroy cycles on the Rust
 // snapshotter do NOT corrupt replica.db. This is the regression gate for the
-// ART-reported SQLITE_CORRUPT on replica.db WAL2 during destroy().
+// a replay-reported SQLITE_CORRUPT on replica.db WAL2 during destroy().
 //
 // Root cause of the original corruption: TWO runtimes (TS Snapshotter + Rust
 // engine) held connections to the same replica.db WAL2 file. When TS

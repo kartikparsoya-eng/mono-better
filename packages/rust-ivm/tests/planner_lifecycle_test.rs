@@ -16,7 +16,7 @@
 //!    `wal_checkpoint(TRUNCATE)` with busy=0, i.e. the planner path can never
 //!    pin the WAL read-mark (the checkpoint-starvation / unbounded-WAL class);
 //! 4. a dead snapshot conn degrades (default fanout / no flips) instead of
-//!    panicking through the napi boundary.
+//!    panicking through the driver boundary.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

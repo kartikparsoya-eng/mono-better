@@ -1,12 +1,11 @@
 //! Port of `packages/zero-protocol/src/delete-clients.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 use serde::{Deserialize, Serialize};
 
 // deleteClientsBodySchema uses clientIDs/clientGroupIDs (capital IDs)
-// valita `v.object` rejects unknown keys (M13 R3), and `.optional()` is
-// absent-or-value, never an explicit `null` (M13 R4).
+// valita `v.object` rejects unknown keys, and `.optional()` is
+// absent-or-value, never an explicit `null`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteClientsBody {

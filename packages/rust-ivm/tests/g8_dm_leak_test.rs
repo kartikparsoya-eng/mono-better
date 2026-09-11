@@ -213,7 +213,7 @@ fn user_all_channels_acl_excludes_cross_workspace_dm() {
 
 #[test]
 fn dm_channel_does_not_leak_to_non_participant() {
-    let me = "cms5zzgo"; // ART user, NOT a participant of the DM
+    let me = "cms5zzgo"; // the replay user, NOT a participant of the DM
     let other = "cms5vksku"; // real participant of the DM
 
     let channels = make_source(

@@ -1,4 +1,4 @@
-//! F-05 regression: the `primary_keys` / `table_specs` table maps must be
+//! Regression: the `primary_keys` / `table_specs` table maps must be
 //! SHARED with every `Streamer`, never deep-copied per pipeline or per change.
 //!
 //! TS `new Streamer(primaryKeys, tableSpecs)` stores the caller's `Map`
@@ -21,7 +21,7 @@
 //! `Rc`s — the `new_shared` variant is gone rather than left around to be
 //! skipped again by a fifth call site — and `Engine` owns the single `Rc`.
 //!
-//! NON-VACUOUS: revert `configure_streaming` to taking the maps by value with
+//! Mutation test: revert `configure_streaming` to taking the maps by value with
 //! an internal `Rc::new` (passing `(*self.primary_keys).clone()` at the call
 //! site) and the holder count stays at 1 however many queries are added, so
 //! `every_pipeline_shares_the_engines_one_table_map` fails; revert

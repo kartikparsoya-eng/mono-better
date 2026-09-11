@@ -3,7 +3,7 @@
 //! so its allocations never contend with another client group's. rust runs
 //! ~1000 client-group threads in ONE process and glibc malloc's arena locks
 //! became the bottleneck under a connect storm — `perf` on image 7f38dffd6
-//! (xyne ART 5m trace, 2026-09-03): 48% of the process's samples inside glibc
+//! (a 5-minute production-trace replay): 48% of the process's samples inside glibc
 //! malloc/free (`__lll_lock_wait_private`, `pthread_mutex_lock`), 31% in the
 //! kernel futex/wakeup paths those locks take, 21% doing work. The same
 //! 20K-row query hydrated in 1.2-1.4s alone (TS: 1.25-1.57s, parity) and in
@@ -124,7 +124,7 @@ pub fn route_sqlite_malloc_through_mimalloc() -> Result<(), c_int> {
 mod tests {
     use super::*;
 
-    /// F-17: the `usize -> c_int` casts in `x_size` / `x_roundup` truncated.
+    /// The `usize -> c_int` casts in `x_size` / `x_roundup` truncated.
     ///
     /// SQLite caps a single allocation near `0x7fffff00`, and mimalloc's
     /// usable/good size for an allocation that large rounds ABOVE `i32::MAX`,
@@ -135,7 +135,7 @@ mod tests {
     /// This tests the clamp directly rather than through a >2GiB allocation,
     /// which is why the clamp is a named function.
     ///
-    /// NON-VACUOUS: change `saturating_c_int` back to `n as c_int` and every
+    /// Mutation test: change `saturating_c_int` back to `n as c_int` and every
     /// assertion below the first two fails — each of these inputs wraps to a
     /// negative `c_int`.
     #[test]

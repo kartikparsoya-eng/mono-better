@@ -7,7 +7,7 @@
 //! same parameter through the first three and installs it as the node sink in
 //! `PlannerGraph::plan` (see the `planner_debug` module doc).
 //!
-//! This is NON-VACUOUS for that threading: drop the parameter anywhere along
+//! This is a mutation test for that threading: drop the parameter anywhere along
 //! the chain (e.g. restore `plans.plan.plan()` / `plan_query(&ast, model)`) and
 //! `events` is empty, so every assertion below fails. It is the only test that
 //! covers the emitters at all — they were ported but had no caller-visible

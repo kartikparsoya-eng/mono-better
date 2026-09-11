@@ -543,7 +543,7 @@ fn test_received_new_row() {
     }
 }
 
-/// Regression (prod 2026-08-31 `cvr.rs:1009`): `received` must NOT panic
+/// Regression (production CVR version-bump panic): `received` must NOT panic
 /// when a changed row needs a new patchVersion but no version bump happened.
 /// TS `#assertNewVersion` (cvr.ts:769) throws — recoverable, so the flush
 /// aborts transactionally and the client re-hydrates; rust must return `Err`,

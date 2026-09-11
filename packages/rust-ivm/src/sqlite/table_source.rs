@@ -1675,7 +1675,7 @@ mod advance_gate_fetch_tests {
     /// path: view-syncer `#catchupClients` → `#pipelines.getRow(table, rowKey)`
     /// for every row patch (rust: `gather_catchup_patches` →
     /// `Engine::get_row` → here). A CPU profile of the 60-minute prod-trace
-    /// replay (2026-09-04, rev 5f3beaaef) put 61% of process CPU in
+    /// replay (rev 5f3beaaef) put 61% of process CPU in
     /// `TableSource::get_row`, of which half was `sqlite3_prepare_v2` →
     /// `sqlite3RunParser` — i.e. re-parsing this one statement.
     #[test]

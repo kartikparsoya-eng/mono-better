@@ -162,7 +162,7 @@ fn set_table_spec_coexists_with_hydrate() {
 // its `hydrationTimeMs` (773): `add_queries_streaming` must report, per query,
 // how many rows the initial hydration produced and its wall-clock time — the
 // payload the driver's `#logQueryPipelineLifecycle` (`VENDED`-parity) log emits.
-// Non-vacuous: three rows so a dropped counter (0) or a hardcoded 1 both fail.
+// Mutation test: three rows so a dropped counter (0) or a hardcoded 1 both fail.
 #[test]
 fn hydration_row_count_tracks_rows_produced() {
     let source = make_source("users", &["id"]);

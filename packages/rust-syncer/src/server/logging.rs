@@ -13,8 +13,8 @@
 //! `workerIndex`, every `withContext` key) flattened at the top level. The
 //! stock `tracing_subscriber` JSON format instead nests every field under
 //! `"fields"` and carries no `pid`/`worker`/`workerIndex`, so a log pipeline
-//! keyed on `.message` read 4,810 of 4,956 rust INFO lines as empty (sandbox
-//! pod `xyne-spaces-zero-…-98c9b4446-bssjz`, 2026-09-09; the rust image bakes
+//! keyed on `.message` read 4,810 of 4,956 rust INFO lines as empty (a sandbox
+//! pod; the rust image bakes
 //! `ZERO_LOG_FORMAT=json`, so this is the production shape).
 //!
 //! Rust-only adapter: tracing has no `LogContext`, so an event's structured
@@ -187,7 +187,7 @@ mod tests {
 
     /// TS `shared/src/logging.ts:96-119`: `level` first, the `{pid, worker,
     /// workerIndex}` context and the event fields flattened at the top level,
-    /// `message` LAST, nothing nested. NON-VACUOUS: point the builder at the
+    /// `message` LAST, nothing nested. Mutation test: point the builder at the
     /// stock `tracing_subscriber::fmt::format().json()` main.rs used until this
     /// commit and `line["message"]` is null (it lives under `"fields"`),
     /// `pid`/`worker`/`workerIndex` are absent, and the key order differs.

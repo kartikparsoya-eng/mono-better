@@ -2,7 +2,7 @@
 //!
 //! ## STATUS: LIVE — the single owner of per-connection auth/context (I-8)
 //!
-//! Promoted 2026-08-27 (task #155). Every `CgState` holds this manager as
+//! Promoted in ce47a7306. Every `CgState` holds this manager as
 //! `self.ccm`; it records `initConnection`/`closeConnection`, resolves connect
 //! auth (`resolve_auth`), serves use-time context reads for the push relay,
 //! mutagen CRUD auth, and custom-query Bearer (via `CcmDispatchAdapter` in
@@ -11,7 +11,7 @@
 //! `validate_connection` / `fail_connection` / `defer_maintenance` + the
 //! background-connection retransform). The old simplified per-CG fields
 //! (`pinned_user_id` / `client_raw_auth`) are deleted.
-//! The placeholder dispatch + its dual-write are GONE (L9 Stage 3d, 2026-08-28):
+//! The placeholder dispatch + its dual-write are GONE (946da0b5c):
 //! the message handler's `connContextManager.initConnection` dispatch — the
 //! `CcmDispatchAdapter` in `services/view_syncer/view_syncer.rs` — is the single
 //! recording site into this CCM. Behavior changes to auth state/maintenance
@@ -1041,23 +1041,23 @@ mod tests {
         assert!(filter_headers(&headers, Some(&["nope".to_string()])).is_none());
     }
 
-    /// Item-B / I-8 parity: `resolve_auth` is a 1:1 port of TS `resolveAuth`
+    /// I-8 parity: `resolve_auth` is a 1:1 port of TS `resolveAuth`
     /// (auth.ts:49-123). Pins the three branch outcomes that decide whether a
     /// connection is anonymous, rejected, or authenticated — the exact question
-    /// the CCM-promotion spec (I8-CCM-PROMOTION-SPEC.md Stage 1.1) flagged as
+    /// the CCM-promotion spec (parity/I8-CCM-PROMOTION-SPEC.md) flagged as
     /// blocking. Resolved permanently against TS source:
     ///   - NO token, no previous auth      -> Ok(None)         anonymous ALLOWED (auth.ts:74-77)
     ///   - NO token, but previous auth set -> Unauthorized     (auth.ts:65-72)
     ///   - token provided, userID = None   -> Unauthorized     "require a userID" (auth.ts:79-85)
     ///   - opaque token + userID           -> Ok(Some(Opaque)) (auth.ts:108-112)
     ///
-    /// This CORRECTS the Stage-1.0 note ("anonymous/opaque paths need a userID or
+    /// This CORRECTS an earlier note ("anonymous/opaque paths need a userID or
     /// the CCM rejects"): a userID is required ONLY when a token is provided. The
     /// rust router admitting anonymous (no-token) connections is FAITHFUL to TS,
     /// NOT a divergence — so the CCM promotion is pure state-ownership
     /// de-duplication (latent I-8), not a correctness fix.
     ///
-    /// NON-VACUOUS: flip the anonymous branch (`Ok(None)` -> `Err`) and the first
+    /// Mutation test: flip the anonymous branch (`Ok(None)` -> `Err`) and the first
     /// assert fails; drop the userID gate and the third assert fails.
     #[test]
     fn resolve_auth_matches_ts_anonymous_and_userid_branches() {

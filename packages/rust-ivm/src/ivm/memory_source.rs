@@ -729,7 +729,7 @@ impl Input for SourceInput {
             //   - a same-advance REMOVE is in PREV, gone from `data`   -> drop it.
             // `data` is a PARTIAL cache (only pushed rows), so "in PREV, not in
             // data" is ambiguous (untouched vs removed) — the removed-PK set
-            // disambiguates. Fixes G15 (add) + its symmetric edit/remove staleness
+            // disambiguates. Fixes the same-advance add staleness + its symmetric edit/remove staleness
             // on re-entrant EXISTS/join re-fetches (e.g. leaveChannel).
             {
                 let pk = &self.schema.primary_key;

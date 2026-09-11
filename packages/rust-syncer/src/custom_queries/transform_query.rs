@@ -695,7 +695,7 @@ pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &Tra
 
 /// TEST-ONLY: how many entries the transform cache currently holds, and how
 /// long since its last expiry sweep. Lets a test observe the sweep SCHEDULE
-/// (F-28) rather than only its effect.
+/// rather than only its effect.
 #[doc(hidden)]
 pub fn __test_transform_cache_state() -> (usize, std::time::Duration) {
     let cache = TRANSFORM_CACHE.lock();
@@ -837,7 +837,7 @@ mod tests {
         }
     }
 
-    /// F-28: the expiry sweep must run on a SCHEDULE, not on every insert.
+    /// The expiry sweep must run on a SCHEDULE, not on every insert.
     ///
     /// TS sweeps on a `setInterval(ttlMs * 2)` started lazily on the first
     /// `set()` (shared/src/cache.ts:31-38, `#removeExpired`:56-63) — every 10s
@@ -851,7 +851,7 @@ mod tests {
     /// The observable is the sweep CLOCK: a sweep resets `last_swept`, so a
     /// clock that stays backdated across an insert proves no sweep ran.
     ///
-    /// NON-VACUOUS: make the sweep unconditional again (drop the
+    /// Mutation test: make the sweep unconditional again (drop the
     /// `if cache.last_swept.elapsed() >= CACHE_SWEEP_INTERVAL` guard, keeping
     /// the `last_swept = Instant::now()`) and
     /// `an_insert_inside_the_interval_does_not_sweep` fails; delete the sweep
@@ -926,14 +926,14 @@ mod tests {
         __test_reset_transform_cache();
     }
 
-    /// F-31: a panic that held the transform-cache lock must not kill the cache.
+    /// A panic that held the transform-cache lock must not kill the cache.
     ///
     /// It was a `std::sync::Mutex` read with `.lock().ok()?`, so one poisoning
     /// panic made `cache_get` return `None` for every query for the rest of the
     /// process's life — every custom query going to the network, silently and
     /// permanently. `parking_lot::Mutex` cannot poison.
     ///
-    /// NON-VACUOUS: restore the `StdMutex` + `.lock().ok()?` / `if let Ok(..)`
+    /// Mutation test: restore the `StdMutex` + `.lock().ok()?` / `if let Ok(..)`
     /// pair and the post-panic `cache_get` returns `None`, failing the last
     /// assertion.
     #[test]

@@ -140,8 +140,8 @@ pub enum VersionError {
     // TS propagates `versionFromLexi`'s throw RAW (lexi-version.ts:54,
     // `Invalid LexiVersion: <value>`) for BOTH the state-version and
     // config-version paths — with NO wrapper. Carry the exact lexi message
-    // transparently rather than re-wrapping it. (2026-08-28 A/error-frame:
-    // stale-cookie diff: rust emitted `invalid stateVersion "..": Invalid
+    // transparently rather than re-wrapping it. (Error-frame differential,
+    // stale-cookie case: rust emitted `invalid stateVersion "..": Invalid
     // LexiVersion: length prefix mismatch` where TS emits `Invalid LexiVersion: ..`.)
     #[error("{0}")]
     BadLexiVersion(String),
@@ -662,11 +662,11 @@ mod tests {
     }
 
     /// TS-golden message parity for malformed version strings — the client sees
-    /// this text in the error frame (2026-08-28 A/error-frame:stale-cookie diff).
+    /// this text in the error frame (error-frame differential, stale-cookie case).
     /// TS throws `versionFromLexi`'s message RAW (lexi-version.ts:54), NOT a
     /// wrapped `invalid stateVersion "..": ..` string.
     ///
-    /// NON-VACUOUS: pre-fix the length-prefix case rendered
+    /// Mutation test: pre-fix the length-prefix case rendered
     /// `invalid stateVersion "15": Invalid LexiVersion: length prefix mismatch`
     /// (BadStateVersion wrapper + static reason); reverting either the enum change
     /// or the `version_from_lexi` message makes these exact-string asserts FAIL.

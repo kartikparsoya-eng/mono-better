@@ -1,7 +1,7 @@
 //! The typed `Ast`'s serde shape is a RUST-INTERNAL representation, not the TS
 //! wire — and this test exists so nobody concludes otherwise.
 //!
-//! Reading the TS first turned finding F-39 around. The finding said rust
+//! Reading the TS first turned the review finding around. The finding said rust
 //! emitted `"scalar":false` where TS omits an unset `scalar` (TS declares it
 //! `scalar: v.boolean().optional()`, zero-protocol/src/ast.ts:126, and only
 //! ever sets it to `true`). That is true about TS and irrelevant to rust,
@@ -22,7 +22,7 @@
 //! form, plus the two properties that do matter — a lossless round trip, and
 //! `plan_id` never reaching any output.
 //!
-//! NON-VACUOUS: rename `where_clause` to `where` (serde attribute), make
+//! Mutation test: rename `where_clause` to `where` (serde attribute), make
 //! `Condition` internally tagged, or drop `#[serde(skip)]` from `plan_id`, and
 //! the corresponding assertion fails.
 

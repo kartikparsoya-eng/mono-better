@@ -32,7 +32,7 @@ pub enum HandlerResult {
 /// Trait for message handlers (port of TS `MessageHandler` interface).
 ///
 /// Implemented by `SyncerWsMessageHandler`, which dispatches to ViewSyncer,
-/// Mutagen, Pusher. `async` + `?Send` (L9 Stage 3d): the live ViewSyncer
+/// Mutagen, Pusher. `async` + `?Send`: the live ViewSyncer
 /// dispatch executes the message body INLINE on the CG task (TS `#lock` is
 /// FIFO-at-arrival — re-enqueueing would reorder), so the handler awaits it
 /// there and holds CG-local (`!Send`) state.
@@ -264,7 +264,7 @@ impl Connection {
     ///
     /// Why it exists: rust emitted ONE operator-visible line per client failure
     /// where TS emits two — TS logs in `#runInLockForClient`'s catch
-    /// (view-syncer.ts:1243) and again here. Measured 2026-09-08 on the G44
+    /// (view-syncer.ts:1243) and again here. Measured on the
     /// runtime log differential: rust 47 `closing connection with error` against
     /// TS 92, plus 22 TS-only INFO lines from the shutdown-race `Rehome`.
     pub fn fail(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {
@@ -273,7 +273,7 @@ impl Connection {
         let level = thrown.map_or(LogLevel::Warn, Thrown::get_log_level);
         // TS `String(e)` — `${e.name}: ${e.message}` for an Error instance. A
         // bare ProtocolError (`thrown: None`) renders `ProtocolError: <body
-        // message>`. Until 2026-09-09 rust logged the bare message, so every
+        // message>`. An earlier version logged the bare message, so every
         // class-named error read differently from TS's line
         // (`OwnershipError: …`, `SqliteError: …`, `TypeError: …`).
         let body_message = error.message().to_string();
@@ -308,8 +308,8 @@ impl Connection {
         // it at `warn`), but returns a value that already IS a ProtocolError
         // UNCHANGED (types/error-with-level.ts:33-35) — so a
         // `ProtocolErrorWithLevel` reaches `sendError` still carrying its own
-        // level and takes the `instanceof ProtocolErrorWithLevel` branch. Until
-        // 2026-09-08 this re-wrapped everything as a plain `Protocol`, which
+        // level and takes the `instanceof ProtocolErrorWithLevel` branch. An
+        // earlier version re-wrapped everything as a plain `Protocol`, which
         // logged an OwnershipError's frame at WARN where TS logs INFO
         // (`ownership_transfer_fails_clients_at_info_like_ts_ownership_error`).
         let wrapped = match thrown {
@@ -369,7 +369,7 @@ impl Connection {
         // `{:?}` printed the Rust enum instead
         // (`Basic(BasicErrorBody { kind: Internal, .. })`), so the same line read
         // as a different one on each arm and no operator query matched both
-        // (G44 runtime log differential, 2026-09-08).
+        // (the runtime log differential).
         let error_body = frame
             .get(1)
             .map(ToString::to_string)
@@ -650,8 +650,7 @@ pub fn classify_error_log_level(error: &ErrorBody, thrown: Option<Thrown<'_>>) -
     //   * its fallback mapped `Internal` to `error`, where TS's fallback is
     //     `info` whenever nothing was caught. That made rust page an operator on
     //     bodies the server synthesized itself — 47 rust `error` lines against
-    //     TS's `info`/`warn` for the same replay (G44 runtime log differential,
-    //     2026-09-08).
+    //     TS's `info`/`warn` for the same replay (the runtime log differential).
     if let Some(Thrown::WithLevel { level, .. }) = thrown {
         return level;
     }
@@ -728,9 +727,9 @@ mod tests {
     /// TS `String(e)` is `${e.name}: ${e.message}` (Error.prototype.toString):
     /// `ProtocolError` names itself (error.ts:166), the cvr-store subclasses
     /// override `name`, a plain `Error` prints `Error`, better-sqlite3 prints
-    /// `SqliteError`. The 2026-09-08 sandbox TS arm logged
+    /// `SqliteError`. The TS arm of a sandbox replay logged
     /// `view-syncer closing connection with error: SqliteError: unrecognized
-    /// token …` where rust logged the bare message. Non-vacuous: return the
+    /// token …` where rust logged the bare message. Mutation test: return the
     /// bare message from `js_string` and every case below fails.
     #[test]
     fn thrown_js_string_renders_the_error_name_before_the_message() {
@@ -780,7 +779,7 @@ mod tests {
     /// ProtocolError to `#closeWithThrown` (connection.ts:319). So
     /// `getLogLevel(thrown)` takes the `isProtocolError` branch -> `warn`.
     ///
-    /// NON-VACUOUS: classify this as `Thrown::Other` (a plain error) and it
+    /// Mutation test: classify this as `Thrown::Other` (a plain error) and it
     /// reports `error` — which is exactly what rust shipped, logging 47 Internal
     /// bodies at ERROR where TS logged WARN for the identical events.
     #[test]
@@ -1094,7 +1093,7 @@ mod tests {
 
     /// Port of TS `#handleMessageResult` 'transient': every error is sent to
     /// the client but the connection STAYS OPEN — the branch difference vs
-    /// 'fatal' that G36 pins.
+    /// 'fatal' that the error-semantics gate pins.
     #[test]
     fn handle_inbound_transient_errors_keep_connection_open() {
         let (conn, mut rx, _calls, closes) = test_connection(

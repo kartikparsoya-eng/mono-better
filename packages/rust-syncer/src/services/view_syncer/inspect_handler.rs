@@ -440,11 +440,11 @@ mod tests {
         .unwrap();
     }
 
-    /// A2: the analyze-query handler loads the DEPLOYED permissions from the
-    /// replica (TS inspect-handler.ts:135-147) and applies them. NON-VACUOUS:
+    /// The analyze-query handler loads the DEPLOYED permissions from the
+    /// replica (TS inspect-handler.ts:135-147) and applies them. Mutation test:
     /// with a deployed permissions doc that grants `users` no select rule, the
     /// loader returns exactly that doc and analyze filters every row to 0.
-    /// Reverting the loader to return `None` (the pre-A2 state) makes the exact
+    /// Reverting the loader to return `None` (the earlier state) makes the exact
     /// equality fail AND makes analyze return 3 rows.
     #[test]
     fn legacy_analyze_loads_and_applies_deployed_permissions() {
@@ -506,10 +506,10 @@ mod tests {
         }
     }
 
-    /// A3: a named analyze-query (`body.name`/`body.args`) is transformed against
+    /// A named analyze-query (`body.name`/`body.args`) is transformed against
     /// the user's query API server and analyzed as a NON-legacy query (so the
     /// deployed read-permissions are NOT re-applied — the API server already did).
-    /// The transform cache is seeded so no network call is made. NON-VACUOUS:
+    /// The transform cache is seeded so no network call is made. Mutation test:
     /// reverting the named path (treating it as legacy / not transforming) either
     /// returns `legacy_query=true` or fails to find the AST.
     #[tokio::test]
@@ -542,8 +542,8 @@ mod tests {
         );
     }
 
-    /// A3: a named query with no configured transform context errors like the TS
-    /// `assert(this.#customQueryTransformer, ...)`. NON-VACUOUS: the error text
+    /// A named query with no configured transform context errors like the TS
+    /// `assert(this.#customQueryTransformer, ...)`. Mutation test: the error text
     /// pins the branch; removing the `ok_or_else` guard changes the failure.
     #[tokio::test]
     async fn named_query_without_transform_context_errors() {

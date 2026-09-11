@@ -5,16 +5,16 @@
 //! assumes a row state the snapshot never had. Like the empty-hydrated take
 //! partition (`bound == None`), it is reachable by DATA, not by a code bug.
 //!
-//! DECISION (2026-08-05): unlike take-bound — which we convert to an in-place
+//! DECISION: unlike take-bound — which we convert to an in-place
 //! `-2` reset — source drift deliberately stays on the THROW -> view-syncer
 //! teardown -> client reconnect path (matching TS). This test locks two facts
-//! that the napi layer depends on for that behavior:
+//! that the driver's catch boundary depends on for that behavior:
 //!   1. The drift assert actually FIRES on the incremental push path.
 //!   2. Its panic is `catch_unwind`-safe and carries a "source drift" message
-//!      (so lib.rs can surface it as a thrown Err, not a silent drop / SIGABRT).
+//!      (so the driver can surface it as a thrown Err, not a silent drop / SIGABRT).
 //!
-//! The sibling tripwire in napi/src/lib.rs asserts a "source drift" payload maps
-//! to the Err arm (NOT a `-2` reset). If someone later makes drift recoverable,
+//! The driver's catch site maps a "source drift" payload to the Err arm (NOT a
+//! `-2` reset). If someone later makes drift recoverable,
 //! that sibling flips red and forces a conscious decision.
 //!
 //! Deterministic, single-threaded. Run: cargo test --test source_drift_teardown_test
@@ -64,7 +64,7 @@ fn seeded_source() -> Rc<RefCell<MemorySource>> {
 }
 
 /// Push `change` and return the panic message, or `None` if it did not panic.
-/// Uses `catch_unwind` exactly like the napi advance boundary (lib.rs:1511) so
+/// Uses `catch_unwind` exactly like the driver's advance boundary so
 /// this proves the panic never crosses an FFI boundary / SIGABRTs the process.
 fn push_expecting_drift(
     source: &Rc<RefCell<MemorySource>>,
@@ -136,7 +136,7 @@ fn edit_missing_old_row_panics_source_drift() {
 
 #[test]
 fn source_survives_a_caught_drift_panic() {
-    // After a drift panic is CAUGHT (as the napi boundary does), the source
+    // After a drift panic is CAUGHT (as the driver boundary does), the source
     // object is still usable — the panic unwound cleanly without corrupting the
     // process. A subsequent VALID push succeeds. (In production the engine is
     // torn down + rehydrated; this only asserts no UB / poisoned allocator.)

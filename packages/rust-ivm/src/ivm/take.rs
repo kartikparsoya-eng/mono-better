@@ -34,7 +34,7 @@ pub struct TakeState {
     bound: Option<Row>,
 }
 
-// NOTE (2026-08-05): the Take operator's boundary asserts — `'Bound should be
+// NOTE: the Take operator's boundary asserts — `'Bound should be
 // set'` (take.ts:445 / take.rs:670) and the `'…BoundNode must be found during
 // fetch'` family — are kept as raw panics that THROW → view-syncer teardown,
 // matching TS EXACTLY. We deliberately do NOT convert them to `-2` in-place

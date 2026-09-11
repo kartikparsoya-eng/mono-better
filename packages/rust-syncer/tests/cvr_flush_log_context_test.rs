@@ -13,7 +13,7 @@
 //! ```
 //!
 //! Rust emitted the same message with NO fields at all. That is a real parity
-//! loss, not cosmetics: on the 2026-09-06 G8 diff-oracle run rust's terminal
+//! loss, not cosmetics: on a data-differential run rust's terminal
 //! cookie carried one more config-version bump than TS's on 2 of 4 pairs, and
 //! the flush log was the only record of which config update did it — but with
 //! no `clientGroupID` on the line, the rust flushes could not be attributed to
@@ -23,7 +23,7 @@
 //! serial, INVENTIONS.md I-12 — and no per-service instance id), so they are
 //! not asserted.
 //!
-//! NON-VACUOUS: drop the fields from the `tracing::info!` at the flush site and
+//! Mutation test: drop the fields from the `tracing::info!` at the flush site and
 //! every assertion below fails — the captured line is the bare message.
 //!
 //! PG-gated on `TEST_CVR_PG_URI`: the flush log only fires when a real store

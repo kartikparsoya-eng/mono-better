@@ -118,7 +118,7 @@ mod tests {
     use super::merge_explain_fallback;
     use std::collections::HashMap;
 
-    /// NON-VACUOUS: the fallback must FILL queries missing from the captured
+    /// Mutation test: the fallback must FILL queries missing from the captured
     /// plans but must NOT overwrite a captured (execution-time) plan. Reverting
     /// the merge to `insert` (overwrite) flips the "captured wins" assertion;
     /// dropping the merge entirely drops the fallback-only query.

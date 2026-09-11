@@ -6,18 +6,18 @@
 //! the connection/auth state (`ConnectionContextManager`). Everything the client
 //! observes — hydrate, advance, diff, poke, CVR flush, inspector metrics —
 //! happens here, driven by `cg_event_loop` (this file), which runs as a
-//! `spawn_local` task on one of the `K` sharded executor threads (doc 91 — there
+//! `spawn_local` task on one of the `K` sharded executor threads (`RUST-SYNCER-ARCHITECTURE.md` §4 — there
 //! is no per-CG OS thread). CVR Postgres I/O is `offload`ed onto the main
 //! multi-thread runtime so it never blocks this serial thread's CPU.
 //!
-//! What is NOT here (moved out in the L9 refactor, task #160): the connection
+//! What is NOT here (moved out in d632507bc): the connection
 //! ROUTER — accepting a socket, JWT validation, `place_cg`, the
 //! `DashMap<client_group_id, CGHandle>`, and emitting the `connected` ack — lives
 //! in `workers/syncer.rs` (`create_connection`, port of TS
 //! `Syncer.#createConnection`/`handleConnection`). Crucially, the `connected` ack
 //! is sent THERE, on the per-connection accept task, BEFORE the connection is
 //! handed to this serial CG thread — decoupling the connect-ack from
-//! `config_and_hydrate` (TS parity; the 2026-08-27 prod fix, task #152).
+//! `config_and_hydrate` (TS parity; the connect-ack fix).
 
 use super::pipeline_driver::Timer;
 use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
@@ -251,7 +251,7 @@ pub(crate) fn shard_for(cg_id: &str, num_shards: usize) -> usize {
 ///
 /// This carries only the *identity* of the CVR (schema + ids); the `PgPool` it
 /// binds to is the ONE process-wide shared pool, built on the main runtime and
-/// handed to each executor (doc 91 Iteration C). CVR I/O is offloaded onto that
+/// handed to each executor (`RUST-SYNCER-ARCHITECTURE.md` §3). CVR I/O is offloaded onto that
 /// pool's own runtime via `SyncEngine::offload`, so every connection is polled
 /// by the reactor that created it (§5.1) while the whole `cvr_max_conns` budget
 /// stays one shared pool — matching TS's one-`cvrDB`-pool-per-worker model.
@@ -286,7 +286,7 @@ pub struct SyncEngineConfig {
     /// Compiled read-permissions (`PermissionsConfig` JSON) loaded from the
     /// replica, or `None` if none are deployed. A `None` doc still transforms
     /// client-AST queries with an EMPTY config — deny-by-default per table
-    /// (TS view-syncer.ts:1549 `?? {tables: {}}`; fixed 2026-08-28).
+    /// (TS view-syncer.ts:1549 `?? {tables: {}}`).
     pub permissions: Option<serde_json::Value>,
     /// The deployed permissions `hash` at load time, used to detect a
     /// hot-reload (a redeploy of `zero-deploy-permissions`). `None` when no
@@ -381,7 +381,7 @@ pub(crate) fn slow_hydrate_threshold_ms() -> f64 {
 
 /// Env resolution for [`slow_hydrate_threshold_ms`], pure for testing. The TS
 /// option's env name wins; `ZERO_SLOW_HYDRATE_THRESHOLD_MS` is the rust-only
-/// name the TS bridge emitted before 2026-09-08 (rust-syncer-bridge.ts), kept
+/// name an earlier TS bridge emitted (rust-syncer-bridge.ts), kept
 /// as a deprecated alias so a rust binary newer than its bridge still honors
 /// the configured value. Unset / unparseable → TS's default of 100.
 pub(crate) fn slow_hydrate_threshold_from_env(var: impl Fn(&str) -> Option<String>) -> f64 {
@@ -456,10 +456,10 @@ pub struct TimeSliceTimer {
 /// Rust-only adaptation (AGENTS.md rule 5) that makes rust measure the same
 /// QUANTITY as TS, not a different one. TS reads `performance.now()` — wall
 /// time — but TS runs one event loop per sync-worker PROCESS
-/// (`ZERO_NUM_SYNC_WORKERS`, 6 in the ART sandbox), so a running slice is never
+/// (`ZERO_NUM_SYNC_WORKERS`, 6 in the replay sandbox), so a running slice is never
 /// preempted and its wall time IS its execution time. Rust's shard model
 /// (INVENTIONS.md I-12) runs `ZERO_SYNCER_SHARDS` `current_thread` executors as
-/// OS threads — 1,523 threads on a 20-core cpuset in the ART sandbox — so wall
+/// OS threads — 1,523 threads on a 20-core cpuset in the replay sandbox — so wall
 /// time additionally counts OS preemption TS never experiences.
 /// `CLOCK_THREAD_CPUTIME_ID` is the quantity that equals TS's
 /// `performance.now()` delta under TS's execution model.
@@ -467,7 +467,7 @@ pub struct TimeSliceTimer {
 /// This matters because `MIN_ADVANCEMENT_TIME_LIMIT_MS` (50ms, advance_gate.rs)
 /// is an ABSOLUTE floor: it is what stops TS's advance budget from firing on
 /// short advances, and inflated wall time walks straight through it. Measured
-/// 2026-09-06 — same image, same compressed 60m trace, ONLY
+/// on the same image and the same compressed 60m trace, ONLY
 /// `ZERO_SYNCER_SHARDS` changed:
 ///
 ///   1500 shards / 1523 threads -> 1,194 `advancement-timeout` resets / 10 min
@@ -787,7 +787,7 @@ fn cvr_store_error_body(error: &CVRStoreError) -> crate::protocol::ErrorBody {
 /// `Thrown::Other` carrying its message.
 ///
 /// Sibling of [`cvr_store_error_body`], in the consumer for the same reason.
-/// Until 2026-09-08 (d11e0f171) every caller passed `None` → 'warn' for all of
+/// Before d11e0f171 every caller passed `None` → 'warn' for all of
 /// them, which logged an ownership transfer at WARN where TS logs INFO and a
 /// PG outage at WARN where TS logs ERROR.
 fn cvr_store_error_thrown<'a>(error: &CVRStoreError, message: &'a str) -> Thrown<'a> {
@@ -932,8 +932,8 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
         // MUST semantics — port of TS `mustGetConnectionContext` (a missing
         // context THROWS `InvalidConnectionRequest`). This adapter previously
         // defaulted to `auth: None` on a miss, which the push relay then
-        // forwarded as an Authorization-less POST — the 2026-08-29 prod
-        // "No token provided" 401s. Never default; surface the error.
+        // forwarded as an Authorization-less POST — the production
+        // "No token provided" push-relay 401s. Never default; surface the error.
         match lock_unpoisoned(&self.ccm).must_get_connection_context(&sel) {
             Ok(ctx) => Ok(ConnContextInfo {
                 auth: ctx.auth.as_ref().map(|a| a.raw().to_string()),
@@ -965,8 +965,8 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
 
     /// Port of the TS `SyncerWsMessageHandler` 'initConnection' side effect
     /// `connContextManager.initConnection(...)`: record the connection's
-    /// URL/header overrides on its context (moved here from the CG-thread
-    /// intercept in L9 Stage 3d — this dispatch is now the single site).
+    /// URL/header overrides on its context (this dispatch is the single
+    /// recording site).
     fn init_connection(&self, selector: &ConnectionSelector, body: &serde_json::Value) {
         let str_field = |k: &str| {
             body.get(k)
@@ -1003,7 +1003,7 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
     }
 }
 
-/// The live `ViewSyncerDispatch` (L9 Stage 3d) — TS `Connection` holds
+/// The live `ViewSyncerDispatch` — TS `Connection` holds
 /// `#viewSyncer`, and each `SyncerWsMessageHandler` arm calls
 /// `viewSyncer.<method>`, whose body runs under the view-syncer `#lock`.
 /// Rust twin: the adapter holds the CG task's own service cell and runs the
@@ -1024,7 +1024,7 @@ fn second_element(msg: &str) -> serde_json::Value {
 // across an await cannot race (no other task touches it), and the only re-entry
 // path — the inbound dispatch — releases its borrow before awaiting the handler
 // (see `on_inbound`). The lint guards multi-task executors; this is the
-// deliberate TS-`#lock` twin (L9 Stage 3d).
+// deliberate TS-`#lock` twin.
 #[allow(clippy::await_holding_refcell_ref)]
 #[async_trait::async_trait(?Send)]
 impl ViewSyncerDispatch for CgViewSyncer {
@@ -1134,7 +1134,7 @@ pub struct ViewSyncerService {
     /// runtime) onto which CVR Postgres I/O is offloaded. The client group runs
     /// on a single-threaded executor whose reactor does NOT drive the shared CVR
     /// pool's connections; spawning the I/O future here runs it on the runtime
-    /// that DOES drive them (doc 91 §5.1), while the executor only awaits the
+    /// that DOES drive them (`RUST-SYNCER-ARCHITECTURE.md` §3), while the executor only awaits the
     /// resulting `JoinHandle` and stays free to run its other client groups.
     /// `None` in unit tests that inject no handle — I/O then runs inline.
     tokio_handle: Option<tokio::runtime::Handle>,
@@ -1151,12 +1151,12 @@ pub struct ViewSyncerService {
     /// single-threaded (`!Send`) and flush helpers take `&self`.
     flush_observed: std::cell::Cell<bool>,
     /// Live-instance census guard for the dissolved engine seat (the
-    /// `SYNC_ENGINE` counter kept alive for /statz + the G7 gate; counts
+    /// `SYNC_ENGINE` counter kept alive for /statz + the census gate; counts
     /// identically to `_census` since the merge).
     _engine_census: crate::live_count::Guard,
     /// Handle to this service's own shared cell, set by `cg_event_loop` right
     /// after construction (`None` in the storeless engine-surface scaffold).
-    /// Rust-only (L9 Stage 3d): each connection's message handler gets a
+    /// Rust-only: each connection's message handler gets a
     /// `CgViewSyncer` dispatch built from this handle — the twin of TS
     /// `Connection` holding `#viewSyncer` — so `viewSyncer.<method>` executes
     /// inline on the CG task through a `RefCell` borrow (safe: the CG task is
@@ -1217,7 +1217,7 @@ pub struct ViewSyncerService {
     /// `hydrate_unchanged_queries`: TS runs `#hydrateUnchangedQueries` ONCE in the
     /// run-loop init block (view-syncer.ts:592, guarded by this flag), NOT on
     /// every connect/config-change — a per-sync re-hydrate re-materialized every
-    /// alive pipeline on each reconnect (the whale-CG 20-88s hydrates, 2026-09-02).
+    /// alive pipeline on each reconnect (whale client-group hydrates of 20-88 s).
     pipelines_synced: bool,
     /// Test observability (increments only when the `hydrate_unchanged_queries`
     /// gate opens): pins that the proactive re-hydrate runs once per pipeline init,
@@ -1303,7 +1303,7 @@ pub struct ViewSyncerService {
     /// seconds without clients so their SQLite readers, PG pools, and OS thread
     /// do not accumulate under cold-client churn.
     keepalive_until: i64,
-    /// client_id → Connection. `Rc` (L9 Stage 3d): the inbound path clones the
+    /// client_id → Connection. `Rc`: the inbound path clones the
     /// connection out and releases the service-cell borrow before awaiting the
     /// handler (whose live dispatch re-borrows the cell).
     connections: HashMap<String, Rc<Connection>>,
@@ -1367,7 +1367,7 @@ pub struct ViewSyncerService {
     /// store lock right after each flush (`flush_ops_to_store`) — shared with
     /// the offloaded flush task, hence the atomic. Nothing else writes it: an
     /// advance that collected nothing never touches the row map (4453a0f91) and
-    /// must not zero this either (it did, until 2026-09-09).
+    /// must not zero this either (an earlier version did).
     last_row_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Process-wide serving-lag registry this CG publishes its snapshot into.
     serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
@@ -1454,7 +1454,7 @@ impl ViewSyncerService {
     }
 
     /// `cvr_pool` is the ONE process-wide shared CVR pool (built on the main
-    /// runtime — doc 91 Iteration C). When the factory config requests a CVR
+    /// runtime — `RUST-SYNCER-ARCHITECTURE.md` §3). When the factory config requests a CVR
     /// store (`cvr_pg`), the store binds to this pool; the engine then offloads
     /// its CVR I/O onto the pool's own runtime (`SyncEngine::offload`, §5.1).
     /// `None` selects an in-memory / storeless CG (tests, no-PG dev).
@@ -2487,7 +2487,7 @@ impl ViewSyncerService {
     /// header), if any, for the caller to dispatch through the normal inbound
     /// path — TS `Connection.init()` routes it through `#handleMessage` like
     /// any frame. Dispatching it here would hold this method's `&mut self`
-    /// borrow across the handler (L9 Stage 3d).
+    /// borrow across the handler.
     async fn on_new_connection(
         &mut self,
         params: ConnectParams,
@@ -2560,7 +2560,7 @@ impl ViewSyncerService {
                         // rejection is `init_connection`'s. This accept-time
                         // fallback exists only so a malformed cookie cannot
                         // panic the CG task, so it must not add a rust-only
-                        // WARN with no TS twin (M14, 2026-09-08).
+                        // WARN with no TS twin (pinned by `parity/log_differential.py`).
                         tracing::debug!(
                             "CG {}: ignoring malformed base cookie {c:?}: {e}",
                             self.cg_id
@@ -2674,7 +2674,7 @@ impl ViewSyncerService {
         self.client_push_headers
             .insert(client_id.clone(), push_relay_headers.clone());
 
-        // The live dispatch (L9 Stage 3d): the handler's `viewSyncer.<method>`
+        // The live dispatch: the handler's `viewSyncer.<method>`
         // calls execute inline on this CG task via the service's own cell (TS
         // `Connection` holds `#viewSyncer`). A scaffold-constructed service has
         // no cell; its adapter no-ops (those tests drive the engine surface
@@ -2849,7 +2849,7 @@ impl ViewSyncerService {
         // was recorded on the ConnectionContextManager by the handler's
         // `connContextManager.initConnection(...)` dispatch BEFORE this method
         // ran (TS `SyncerWsMessageHandler` 'initConnection' — the recording
-        // moved to `CcmDispatchAdapter::init_connection` in L9 Stage 3d);
+        // recording site is `CcmDispatchAdapter::init_connection`);
         // `custom_query_context_from` reads it back at transform time.
 
         // Client-deletion inputs the body may also carry (TS `#handleConfigUpdate`
@@ -3107,7 +3107,7 @@ impl ViewSyncerService {
                     // `#hydrateUnchangedQueries` (:1638-1639, recorded there).
                     // Counting it here made every `already caught up` no-op
                     // pass a "hydration": 720 vs TS 396 on the same replay
-                    // (2026-09-09 collector diff). TS's `Slow query
+                    // (collector diff). TS's `Slow query
                     // materialization` is likewise PER QUERY (:2305-2307).
                 }
                 Err(e) => {
@@ -3125,8 +3125,8 @@ impl ViewSyncerService {
                     //
                     // Rust called `fail_group` here, so ONE client's unhydratable
                     // query evicted every client of the group and terminated the
-                    // CG thread. Caught by the G44 runtime log differential
-                    // (2026-09-08): for the same replay rust logged 47
+                    // CG thread. Caught by the runtime log differential:
+                    // for the same replay rust logged 47
                     // `terminating after fatal synchronization error` where TS
                     // logged 47 per-query `query hydration failed` and kept every
                     // group alive. The trigger was a filter value SQLite cannot
@@ -3675,7 +3675,7 @@ impl ViewSyncerService {
             // client observe a spurious "reconnect elsewhere" signal even though
             // the SAME client had already reconnected (this method only runs for
             // the same-clientID supersede, CGMessage::CloseConnection). Caught by
-            // the G49 ownership differential (2026-08-28): rust=Rehome, TS=none.
+            // the ownership differential: rust=Rehome, TS=none.
             conn.close("Connection superseded by a newer connection");
         }
         self.delete_client_due_to_disconnect(client_id, ws_id);
@@ -3783,8 +3783,8 @@ impl ViewSyncerService {
         // transform sites via `PipelineDriver.currentPermissions()` through the
         // pinned snapshot (see `sync_query_pipeline_set`). Checking per
         // notification through a freshly opened replica connection cost
-        // ~780 ms per notification on the ART box (9794 notifications, pre-
-        // advance p50 784 ms vs 17 ms for the advance itself, 2026-09-03).
+        // ~780 ms per notification on the replay box (9794 notifications, pre-
+        // advance p50 784 ms vs 17 ms for the advance itself).
         let cvr = self.cvr.take().unwrap();
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
@@ -3908,7 +3908,7 @@ impl ViewSyncerService {
         // (view-syncer.ts:1500-1501 and :1913-1914). It never iterates
         // `#clients`; the pokes go to `#getClients()`, every connection.
         //
-        // Until 2026-09-09 rust ran this pass once PER registered client, each
+        // An earlier version ran this pass once PER registered client, each
         // with that client's own context, and — with no client registered —
         // once with an empty auth (d8c00a28f). Same frames, but a different
         // context for the custom-query transform, and a group TS would have
@@ -4032,7 +4032,7 @@ impl ViewSyncerService {
     /// frame, no status. The idle path is the same loop exit
     /// (`#stateChanges.cancel()` inside `#runInLockWithCVR`, :486).
     ///
-    /// Until 2026-09-08 this sent `["error", Rehome "Reconnect required"]` and
+    /// An earlier version sent `["error", Rehome "Reconnect required"]` and
     /// cited `#cleanup`'s `client.fail(...)`. Wrong on both counts:
     /// `#cleanup(err)` fails clients only with the error that ESCAPED the run
     /// loop — the cvr-store ownership / CAS Rehomes (cvr-store.ts:1367-1398,
@@ -4075,7 +4075,7 @@ impl ViewSyncerService {
     ///
     /// Error kind/message follow TS `wrapWithProtocolError` (see
     /// [`wrap_with_protocol_error`]): `Internal` + the underlying error text.
-    /// Until 2026-09-03 this sent `Rehome` with a fixed label — a different
+    /// An earlier version sent `Rehome` with a fixed label — a different
     /// kind (zero-client reconnects immediately on Rehome, backs off on
     /// Internal) and no diagnostic for the app.
     ///
@@ -4149,8 +4149,7 @@ impl ViewSyncerService {
 /// Route one inbound socket frame through the ported dispatch chain:
 /// `Connection.#handleMessage` → `SyncerWsMessageHandler` →
 /// `ViewSyncerDispatch` (the `CgViewSyncer` adapter), all inline on this CG
-/// task (L9 Stage 3d — the CG-thread tag interception is gone; the handler is
-/// the single dispatch). Three phases so the service cell is NOT borrowed
+/// task (the handler is the single dispatch). Three phases so the service cell is NOT borrowed
 /// while the handler runs (the live dispatch re-borrows it).
 async fn on_inbound(
     state_rc: &Rc<RefCell<ViewSyncerService>>,
@@ -4196,7 +4195,7 @@ async fn on_inbound(
 // across an await cannot race (no other task touches it), and the only re-entry
 // path — the inbound dispatch — releases its borrow before awaiting the handler
 // (see `on_inbound`). The lint guards multi-task executors; this is the
-// deliberate TS-`#lock` twin (L9 Stage 3d).
+// deliberate TS-`#lock` twin.
 #[allow(clippy::await_holding_refcell_ref)]
 pub(crate) async fn cg_event_loop(
     cg_id: &str,
@@ -4206,7 +4205,7 @@ pub(crate) async fn cg_event_loop(
     ctx: CgTaskContext,
     last_notification: Option<serde_json::Value>,
 ) {
-    // The service lives in a shared cell (L9 Stage 3d): the per-connection
+    // The service lives in a shared cell: the per-connection
     // handler's `CgViewSyncer` dispatch re-borrows it inline on this task (TS
     // `Connection` holds `#viewSyncer`). Borrows are scoped; only this task
     // touches the cell, and the inbound path releases its borrow before
@@ -4410,7 +4409,7 @@ pub(crate) async fn cg_event_loop(
     // — is answered with `ProtocolErrorWithLevel(Rehome "Reconnect required",
     // 'info')`. Rust's mailbox IS that lock queue: a `NewConnection` the
     // router sent before it observed `accepting == false` is still in `rx`.
-    // Until 2026-09-08 it was dropped with the receiver, its sink with it, and
+    // An earlier version dropped it with the receiver, its sink with it, and
     // the writer task ended on a closed channel — the socket closed with NO
     // frame (ws_server.rs `None => break`). A queued `Inbound` needs nothing:
     // TS's queued op throws the same Rehome into a downstream `#cleanup` has
@@ -4691,12 +4690,12 @@ fn force_load_error_take() -> Option<CVRStoreError> {
     FORCE_LOAD_ERROR.with(|c| c.borrow_mut().take())
 }
 
-// ─── Dissolved SyncEngine seat (L9 Stage 3c-iii) ─────────────────────────────
+// ─── Engine + CVR hot path (the dissolved `SyncEngine` seat) ─────────────────
 // The former `sync_engine.rs` engine + CVR hot path, merged into
 // `ViewSyncerService` per TS: `view-syncer.ts` owns `#pipelines` / `#cvrStore` /
 // `#clients` directly. Port of the `CVRState` + `hydrate_and_sync` /
-// `advance_and_sync` logic that the removed napi cdylib carried (deleted in
-// a5e502ad9), with its TSFN / actor-thread machinery stripped. Drives the
+// `advance_and_sync` logic the removed native bridge carried (a5e502ad9),
+// with its thread-hop machinery stripped. Drives the
 // flow:
 //
 //   engine `RowChange` → `ChangeProcessor::on_row_change` →
@@ -5017,7 +5016,7 @@ impl ViewSyncerService {
     /// Run a `Send` CVR-I/O future on the shared-pool runtime instead of the
     /// caller's single-threaded executor runtime. The pool's connections are
     /// polled by that runtime's reactor, so awaiting them there avoids the
-    /// cross-runtime starvation of doc 91 §5.1; the executor awaits only the
+    /// cross-runtime starvation of `RUST-SYNCER-ARCHITECTURE.md` §3; the executor awaits only the
     /// (cross-runtime-safe) `JoinHandle` and is free to drive its other client
     /// groups meanwhile. With no handle injected (some unit tests) the future
     /// runs inline on the current runtime.
@@ -5047,7 +5046,7 @@ impl ViewSyncerService {
         let Some(store_arc) = self.store.clone() else {
             return Ok(None);
         };
-        // Offload the load onto the shared-pool runtime (doc 91 §5.1).
+        // Offload the load onto the shared-pool runtime (`RUST-SYNCER-ARCHITECTURE.md` §3).
         let load_started = std::time::Instant::now();
         // TS view-syncer.ts:491: `this.#runPriorityOp(lc, 'loading cvr', () =>
         // this.#cvrStore.load(...))` — IVM on this event loop slices finer
@@ -5093,8 +5092,8 @@ impl ViewSyncerService {
         self.cg_id = cg_id.to_string();
     }
 
-    /// Create the CVR Postgres store (once, shared across all calls). Port of
-    /// napi `set_cvr_store`.
+    /// Create the CVR Postgres store (once, shared across all calls) — the
+    /// twin of TS's `#cvrStore` construction in the `ViewSyncerService` ctor.
     pub fn set_cvr_store(
         &mut self,
         pool: sqlx::PgPool,
@@ -5275,7 +5274,7 @@ impl ViewSyncerService {
     /// Register a client for poke delivery — TS `#clients.set(clientID,
     /// newClient)` (view-syncer.ts:914), called from `init_connection` when the
     /// initConnection message arrives. `sink` is typically a
-    /// `DirectWebSocketSink`. Port of napi `register_client`.
+    /// `DirectWebSocketSink`.
     pub fn register_client(
         &mut self,
         client_id: &str,
@@ -5290,7 +5289,7 @@ impl ViewSyncerService {
         self.clients.insert(ws_id.to_string(), Arc::new(handler));
     }
 
-    /// Unregister a client. Port of napi `unregister_client`.
+    /// Unregister a client — TS `#clients.delete(clientID)` (view-syncer.ts:759).
     pub fn unregister_client(&mut self, ws_id: &str) {
         self.clients.remove(ws_id);
     }
@@ -5324,8 +5323,7 @@ impl ViewSyncerService {
     /// client for application errors — never to every poked socket. The got-del
     /// poke is client-group-wide, so a sibling socket that never desired the
     /// erroring query sees the del but must NOT see a `transformError`
-    /// (frame-capture #4, 2026-09-03: rust over-emitted 12 such frames on
-    /// cg art-tr40b3c943258c). `custom_query_map` is the sync's CVR snapshot
+    /// (a frame capture showed rust over-emitting 12 such frames). `custom_query_map` is the sync's CVR snapshot
     /// (TS builds `customQueries` from `cvr.queries` at the top of
     /// `#syncQueryPipelineSet`).
     fn send_query_transform_error_to_clients(
@@ -5412,7 +5410,7 @@ impl ViewSyncerService {
 
     /// Flush the updater's buffered store ops + CVR to Postgres (no-op when no
     /// store is set). Requires a current tokio runtime handle when a store is
-    /// present, mirroring the napi path.
+    /// present.
     ///
     /// Returns whether the store MATERIALLY flushed (see `flush_ops_to_store`).
     /// On `false` the caller must fall back to the updater's ORIGINAL CVR —
@@ -5474,7 +5472,7 @@ impl ViewSyncerService {
 
         // Offload the whole PG-touching section — apply ops, flush the CVR, and
         // mirror the row deltas back into the read cache — onto the shared-pool
-        // runtime (doc 91 §5.1). The store's `!Send` engine state is not touched
+        // runtime (`RUST-SYNCER-ARCHITECTURE.md` §3). The store's `!Send` engine state is not touched
         // here (only the `Send` `Arc<Mutex<CVRStoreHandle>>` / cache), so the
         // whole unit can run off-thread while the executor drives other groups.
         // `flushed_cvr` is an `Arc<CVR>`: moving it into the task is a refcount
@@ -5488,7 +5486,7 @@ impl ViewSyncerService {
         // `lc.withContext('cvrFlushID', flushCounter++)`, logged at :1249).
         // Rust emitted the message with NO fields at all, so a flush could not
         // be attributed to a client group — which is exactly what blocked
-        // localising the 2026-09-06 G8 extra-config-poke divergence from the
+        // localising the extra-config-poke divergence from the
         // logs. `instance` and `lock` have no rust twin: there is no `#lock`
         // (the CG thread is serial, INVENTIONS.md I-12) and no per-service
         // instance id.
@@ -5520,7 +5518,7 @@ impl ViewSyncerService {
                 // CVR still fails the group promptly rather than wedging. Jitter
                 // de-synchronizes the convoy.
                 //
-                // CORRECTED 2026-09-05: this block used to claim "a failed attempt
+                // This block once claimed "a failed attempt
                 // leaves nothing behind, so retries are safe" and retried EVERY
                 // error. A failed attempt leaves nothing behind in the DATABASE
                 // (the tx rolls back) but it has already consumed the store's
@@ -5928,9 +5926,9 @@ impl ViewSyncerService {
         // (view-syncer.ts:592/1449) — a PROACTIVE re-hydrate of every
         // already-gotten same-hash query each sync, to drift-check still-alive
         // pipelines. That is ported below as `hydrate_unchanged_queries`, called
-        // once `executed` is built. PERF/ART: it re-executes every alive same-hash
+        // once `executed` is built. PERF: it re-executes every alive same-hash
         // pipeline on every sync (TS's design) — a serving-path cost that must be
-        // confirmed by an ART gate before deploy; it changes no client-observable
+        // confirmed by a release-gate replay before deploy; it changes no client-observable
         // output. Its `drifted_query_ids` feed the `hydrate_and_sync` force-bump
         // reason label.
         //
@@ -5968,7 +5966,7 @@ impl ViewSyncerService {
         // client query with an EMPTY config, which deny-by-defaults every
         // table (transformQueryInternal adds the empty-OR FALSE sentinel).
         // Passing the AST through untransformed here was a fail-OPEN data
-        // leak (served the full table; caught by ART G8 via the #158 rider).
+        // leak (served the full table; caught by the release-gate data differential, b4754f12d).
         let empty_permissions = serde_json::json!({"tables": {}});
         // `this.#pipelines.currentPermissions()` at USE time (view-syncer.ts:1933;
         // AGENTS rule 9 freshness): the doc is re-read through the pinned
@@ -6198,8 +6196,8 @@ impl ViewSyncerService {
         // first sync after (re)init. Skipping it on later syncs does NOT skip
         // new-query hydration — the drift/add loop below still hydrates any query
         // missing from the pipeline (TS `'missing'` mode). Without this gate a big
-        // CG re-materialized every alive pipeline on every reconnect (whale-CG
-        // 20-88s hydrates, 2026-09-02).
+        // CG re-materialized every alive pipeline on every reconnect (whale
+        // client-group hydrates of 20-88 s).
         let drifted_query_ids = if self.pipelines_synced {
             std::collections::HashSet::new()
         } else {
@@ -6802,9 +6800,9 @@ impl ViewSyncerService {
     /// here — behaviorally identical, same ASTs + hashes). Returns the drifted
     /// query ids, which `hydrate_and_sync` uses for the force-bump reason label.
     ///
-    /// PERF/ART: this re-executes every alive same-hash pipeline on every sync
-    /// (TS's design). It is a serving-path cost that must be confirmed by an ART
-    /// gate before deploy; it does not change WHAT a client observes.
+    /// PERF: this re-executes every alive same-hash pipeline on every sync
+    /// (TS's design). It is a serving-path cost that must be confirmed by a release-gate
+    /// replay before deploy; it does not change WHAT a client observes.
     async fn hydrate_unchanged_queries(
         &mut self,
         cfg_cvr: &CVR,
@@ -6986,7 +6984,8 @@ impl ViewSyncerService {
     }
 
     /// Hydrate queries AND apply to CVR + push pokes to clients — the whole
-    /// hydrate hot path. Port of napi `HydrateAndSyncTask::compute`.
+    /// hydrate hot path — the hydrate arm of TS `#addAndRemoveQueries`
+    /// (view-syncer.ts:2151) through `#processChanges` (:2472).
     ///
     /// `add_queries` is `(query_id, transformation_hash)`; `queries` is
     /// `(query_id, ast_json)` for the pipelines to hydrate. A hydrate panic
@@ -7103,7 +7102,7 @@ impl ViewSyncerService {
             // keeps) or signature drift (re-execution chose a different row
             // subset). TS logs nothing here, so this is rust-only diagnostics on
             // a rust-only symptom: a 434-vs-0 divergence against the TS arm on
-            // identical traffic (2026-09-04 dual run).
+            // identical traffic (a dual replay run).
             tracing::info!(
                 cg_id = %self.cg_id,
                 add_queries = add_queries.len(),
@@ -7320,7 +7319,7 @@ impl ViewSyncerService {
             // whichever path bumped — the same-hash rehydration path was ruled
             // OUT by production data (244 errors, ZERO such bumps).
             //
-            // Gated on `any_started()` (2026-09-08): a discarded bump is only
+            // Gated on `any_started()`: a discarded bump is only
             // dangerous when a patch actually WENT OUT, because TS raises
             // `Patches were sent but finalVersion ...` only on the `pokeStarted`
             // branch (client-handler.ts:327-334) — an unstarted poke no-ops or
@@ -7361,8 +7360,9 @@ impl ViewSyncerService {
         ))
     }
 
-    /// Advance the replica to head AND apply to CVR + push pokes to clients.
-    /// Port of napi `AdvanceAndSyncTask::compute`. On a reset, the in-flight
+    /// Advance the replica to head AND apply to CVR + push pokes to clients —
+    /// TS `#advancePipelines` (view-syncer.ts:2567) through `#processChanges`
+    /// (:2601). On a reset, the in-flight
     /// poke is cancelled and the caller is expected to rehydrate.
     #[allow(clippy::too_many_arguments)]
     pub async fn advance_and_sync(
@@ -7813,8 +7813,8 @@ impl ViewSyncerService {
 // ─── RowChange → CVR maps ────────────────────────────────────────────────────
 
 /// Convert a `rust_ivm` `RowChange` into the `(change_type, query_id, table,
-/// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Port of napi
-/// `row_change_to_maps`.
+/// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Rust-only
+/// adapter between the two crates (AGENTS.md rule 5).
 type RowChangeMaps = (
     RowChangeType,
     String,
@@ -7920,7 +7920,7 @@ fn accumulate_signature(acc: &mut HashMap<String, u64>, rc: &rust_ivm::streamer:
 }
 
 /// Convert a `rust_ivm` `Value` to `serde_json::Value`, matching TS
-/// `JSON.stringify` semantics. Port of napi `value_to_serde_json`.
+/// `JSON.stringify` semantics. Rust-only adapter (AGENTS.md rule 5).
 fn value_to_serde_json(v: &rust_ivm::ivm::data::Value) -> serde_json::Value {
     use rust_ivm::ivm::data::Value;
     match v {

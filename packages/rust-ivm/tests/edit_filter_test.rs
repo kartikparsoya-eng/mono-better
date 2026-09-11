@@ -1,4 +1,4 @@
-//! G15 repro: Edit that changes a filter field (leftAt: null -> timestamp)
+//! Same-advance staleness repro: Edit that changes a filter field (leftAt: null -> timestamp)
 //! should remove the row from the filtered view.
 //!
 //! Query: org_members WHERE orgId = 'org1' AND leftAt IS NULL

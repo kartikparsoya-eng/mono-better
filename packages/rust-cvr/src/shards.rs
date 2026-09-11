@@ -96,7 +96,7 @@ mod tests {
 
     /// TS `appSchema` / `upstreamSchema` / `cvrSchema` each call `check(shard)`
     /// FIRST and throw `INVALID_APP_ID_MESSAGE` (shards.ts:59-77); rust ported
-    /// `check` (59cef76c2) but the three helpers skipped it. Non-vacuous: drop
+    /// `check` (59cef76c2) but the three helpers skipped it. Mutation test: drop
     /// `must_check` from `cvr_schema` and this returns `Bad-App_0/cvr`.
     #[test]
     #[should_panic(

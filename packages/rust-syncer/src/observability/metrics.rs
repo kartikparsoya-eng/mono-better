@@ -7,8 +7,8 @@
 //! Export is OTLP push only, exactly like TS (`server/otel_start.rs`, gated
 //! on the same env as `packages/otel/src/enabled.ts`). The hand-rolled
 //! Prometheus `/metrics` registry this file used to render was removed in
-//! 204359376 (2026-09-07): TS has no pull endpoint, and the ART G17 gate
-//! scrapes the collector. Instruments owned by another TS class live in that
+//! 204359376: TS has no pull endpoint, and the release-gate collector scrape
+//! covers it. Instruments owned by another TS class live in that
 //! class's port (CVRStore's in rust-cvr/src/otel_metrics.rs — see
 //! tests/metric_ownership_test.rs).
 
@@ -506,7 +506,7 @@ pub fn record_client_protocol_version(protocol_version: u32) {
 /// (main.ts:268) — whose startup the parent times as
 /// `zero.server.worker_startup_duration{worker: 'syncer', type: 'user-facing'}`
 /// (life-cycle.ts:227), exactly as it does for a TS syncer worker. Until
-/// 2026-09-09 rust also recorded `startup_duration{component: 'dispatcher'}`
+/// an earlier version also recorded `startup_duration{component: 'dispatcher'}`
 /// from here, double-counting the dispatcher's series.
 /// Register the two process-scoped dispatcher gauges. Called once from the
 /// serving bootstrap, after which the callbacks keep firing.
@@ -628,8 +628,8 @@ impl ConnectionFailureReason {
     /// Exhaustiveness fixture for `connection_failure_reasons_are_the_ts_vocabulary`
     /// — a rust-only test helper, NOT a port (TS never enumerates the reasons;
     /// `recordConnectionFailure` takes one at each call site). `#[cfg(test)]`
-    /// is therefore the truth, and it is also what keeps this out of the M11
-    /// prod-reachability surface: as a plain `pub const` the guard resolved it
+    /// is therefore the truth, and it is also what keeps this out of the
+    /// `parity/prod_reachability.py` surface: as a plain `pub const` the guard resolved it
     /// against the ledger and counted it as a ported symbol prod cannot reach.
     #[cfg(test)]
     pub const ALL: [ConnectionFailureReason; 5] = [
@@ -735,7 +735,7 @@ pub fn record_cvr_flush_failure() {
 // cvr-store port, rust-cvr/src/otel_metrics.rs (record_load /
 // record_flush_attempt), so alert rules and dashboards written for the TS
 // syncer keep working under rust. A second copy used to live here and doubled
-// every load/flush count (caught at the collector 2026-09-07: 12 attempts vs
+// every load/flush count (caught at the collector: 12 attempts vs
 // 6 durations); tests/metric_ownership_test.rs pins the single owner.
 
 /// Client groups torn down via `fail_group` (all their clients rehomed).
@@ -925,7 +925,7 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     /// TS `recordConnectionFailure` reasons, verbatim (workers/syncer.ts:571,
-    /// 608, 613, 637, 694, 707). NON-VACUOUS: the pre-2026-09-09 sites emitted
+    /// 608, 613, 637, 694, 707). Mutation test: earlier sites emitted
     /// `handshake` and `rehome`, which TS never does.
     #[test]
     fn connection_failure_reasons_are_the_ts_vocabulary() {

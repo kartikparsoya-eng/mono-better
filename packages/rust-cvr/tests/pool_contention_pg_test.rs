@@ -1,8 +1,8 @@
-//! B-POOL regression (task #112): CVR load under pool-acquire contention must
+//! Pool-contention regression (591d471ee): CVR load under pool-acquire contention must
 //! RETRY and succeed — never surface a transient `PoolTimedOut` as a terminal
 //! load failure (which the router escalates to `fail_group` → the client
 //! group's clients reconnect and cold-rehydrate, adding MORE pool demand — the
-//! self-amplifying storm behind the ART G25 latency FAIL: 548 pool timeouts,
+//! self-amplifying storm behind a latency-gate failure: 548 pool timeouts,
 //! 314 CG kills).
 //!
 //! TS twin of the behavior: postgres.js has NO acquire timeout — pool
@@ -95,7 +95,7 @@ async fn load_survives_pool_acquire_contention() {
     holder.await.expect("holder task");
 }
 
-/// NON-VACUOUS (fix, 2026-09-05): a flush that fails ACQUIRING its connection
+/// Mutation test: a flush that fails ACQUIRING its connection
 /// must leave the pending write set intact, so the caller's retry actually
 /// re-sends it.
 ///

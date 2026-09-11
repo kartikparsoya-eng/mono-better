@@ -97,7 +97,7 @@ fn client_cookie_at_or_behind_cvr_is_accepted() {
 }
 
 /// Wrap a test service in the shared cell + self-handle the live dispatch
-/// needs (L9 Stage 3d) — the test twin of `cg_event_loop`'s setup.
+/// needs — the test twin of `cg_event_loop`'s setup.
 fn shared(state: ViewSyncerService) -> Rc<RefCell<ViewSyncerService>> {
     let rc = Rc::new(RefCell::new(state));
     let weak = Rc::downgrade(&rc);
@@ -466,7 +466,7 @@ fn reset_cvr() -> CVR {
 /// <String(e)>` at warn (:617-622) and `#cleanup(e)` ends the group. A CG
 /// whose last client just dropped (reap pending) is notified and takes
 /// exactly this path. Rust used to rehydrate it with an empty auth instead
-/// (d8c00a28f) and keep serving. Non-vacuous: restore that branch and the
+/// (d8c00a28f) and keep serving. Mutation test: restore that branch and the
 /// group stays live with its query rebuilt.
 #[test]
 fn reset_with_no_validated_connection_stops_the_group_like_ts() {
@@ -517,7 +517,7 @@ fn reset_with_no_validated_connection_stops_the_group_like_ts() {
 /// view-syncer.ts:592-606 — using the BACKGROUND connection's context for
 /// both (:1500-1501, :1913-1914) and poking `#getClients()`. Rust looped
 /// once per registered client, each with that client's own context.
-/// Non-vacuous: restore the per-client loop and two contexts are recorded.
+/// Mutation test: restore the per-client loop and two contexts are recorded.
 #[test]
 fn reset_runs_one_pass_with_the_background_connection_context_like_ts() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -708,7 +708,7 @@ fn seed_test_client_schema(state: &mut ViewSyncerService) {
     state.cvr = Some(cvr);
 }
 
-/// I-8 Step 2 golden: `custom_query_context_from` maps the
+/// I-8 golden: `custom_query_context_from` maps the
 /// ConnectionContextManager's live `ConnectionContext` (the single owner of
 /// url/headers/auth/userID) onto the transform's `CustomQueryContext`, exactly
 /// as the deleted `client_query_ctx` map did. Drives a real
@@ -716,7 +716,7 @@ fn seed_test_client_schema(state: &mut ViewSyncerService) {
 /// derived field survives the mapping (url/auth/api_key/cookie/origin/
 /// allowed_urls/userID + the allowlist-filtered client headers).
 ///
-/// NON-VACUOUS: drop any field in `custom_query_context_from` (e.g. the
+/// Mutation test: drop any field in `custom_query_context_from` (e.g. the
 /// `auth` or `cookie` mapping) and the corresponding assert fails.
 #[test]
 fn configured_query_context_matches_typescript_defaults_and_header_filtering() {
@@ -792,9 +792,9 @@ fn configured_query_context_matches_typescript_defaults_and_header_filtering() {
 
 #[test]
 fn forwards_allowlisted_incoming_request_headers() {
-    // Port of #6144: only headers on `allowed_request_headers` (case-
+    // Port of upstream PR #6144: only headers on `allowed_request_headers` (case-
     // insensitive) are forwarded from the incoming request to the query API.
-    // Read back from the CCM via `custom_query_context_from` (I-8 Step 2).
+    // Read back from the CCM via `custom_query_context_from` (I-8).
     use crate::services::view_syncer::connection_context_manager::ConnectionContextManager;
     let config = FetchConfig {
         url: Some(vec!["https://api.example/query".to_string()]),
@@ -1210,7 +1210,7 @@ fn store_failure_fails_clients_with_internal_like_ts_wrap_with_protocol_error() 
     // LEVEL: a PG failure is a plain `Error` in TS — the raw-throw branch of
     // `getLogLevel` — so `#cleanup(err)` → `client.fail(err)` logs at ERROR
     // and `sendError` classifies the wrapped-ProtocolError frame line at
-    // WARN (`cvr_store_error_thrown`). NON-VACUOUS (2026-09-08): with the
+    // WARN (`cvr_store_error_thrown`). Mutation test: with the
     // `None` every caller passed before, both came out WARN.
     let at = |level: &str, msg: &str| {
         logs.lines()
@@ -1264,7 +1264,7 @@ fn store_failure_fails_clients_with_internal_like_ts_wrap_with_protocol_error() 
 /// `Sending error on WebSocket` at INFO. An ownership hand-off is routine,
 /// not a pager event.
 ///
-/// NON-VACUOUS (2026-09-08): `cvr_store_error_thrown` returning
+/// Mutation test: `cvr_store_error_thrown` returning
 /// `WithLevel(Warn)` — or the `None` every caller passed before it existed —
 /// makes both counts 0 and the WARN count 2.
 #[test]
@@ -1305,7 +1305,7 @@ fn ownership_transfer_fails_clients_at_info_like_ts_ownership_error() {
         "OwnershipError is level 'info' in TS (cvr-store.ts:1400); got:\n{logs}"
     );
     // TS `String(e)` = `${e.name}: ${e.message}`, and `OwnershipError`
-    // overrides `name` (cvr-store.ts:1383). Non-vacuous: render the bare
+    // overrides `name` (cvr-store.ts:1383). Mutation test: render the bare
     // message and this reads 0.
     assert_eq!(
         at(
@@ -1351,7 +1351,7 @@ fn ownership_transfer_fails_clients_at_info_like_ts_ownership_error() {
 /// group keeps its stream. Rust used to `fail_group_with_error` here, so a
 /// purged CVR ("Client has been purged due to inactivity", cvr-store.ts:423)
 /// surfaced by ONE client's `deleteClients` wiped every other client of the
-/// group. Non-vacuous: restoring `fail_group_with_error` makes clientB
+/// group. Mutation test: restoring `fail_group_with_error` makes clientB
 /// receive the error frame and the group go terminal.
 #[test]
 fn client_not_found_at_load_fails_only_the_requesting_client() {
@@ -1381,7 +1381,7 @@ fn client_not_found_at_load_fails_only_the_requesting_client() {
         "Client has been purged due to inactivity".to_string(),
     ));
 
-    // Log-level parity (2026-09-08): TS logs a load failure ONCE, from
+    // Log-level parity: TS logs a load failure ONCE, from
     // `sendError` at the thrown error's level — `warn` for
     // `ClientNotFoundError` (cvr-store.ts:1362, connection.ts:428). Rust
     // additionally logged a rust-only `unable to load CVR` line at ERROR,
@@ -1548,7 +1548,7 @@ fn cvr_store_errors_reach_the_client_with_their_ts_kind() {
 /// `String(e)` prints `${e.name}: ${e.message}`; the cvr-store classes that
 /// override `name` (cvr-store.ts:1368, 1383, 1406, 1438) print it, the ones
 /// that do not print `ProtocolError`, and a third `:` in a version string
-/// is a `TypeError` (schema/types.ts:339). Non-vacuous: collapse the names
+/// is a `TypeError` (schema/types.ts:339). Mutation test: collapse the names
 /// to 'ProtocolError'/'Error' and the rows fail.
 #[test]
 fn cvr_store_error_thrown_prints_the_ts_error_name() {
@@ -1603,7 +1603,7 @@ fn cvr_store_error_thrown_prints_the_ts_error_name() {
 /// client of the group as TS's Rehome body. This is the run-loop path, where
 /// TS's throw exits `#stateChanges` and `#cleanup(err)` fails every client
 /// (view-syncer.ts:2820-2826), so the group scope is 1:1 — only the KIND was
-/// wrong. Non-vacuous: restoring `fail_group(&e.to_string())` makes both
+/// wrong. Mutation test: restoring `fail_group(&e.to_string())` makes both
 /// clients receive `{kind: Internal}`.
 #[test]
 fn ownership_loss_at_load_rehomes_every_client() {
@@ -1956,7 +1956,7 @@ fn update_auth_opaque_token_change_retransforms() {
     let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     // Opaque token (not a JWT) WITH a userID — the CCM records the token so the
     // unchanged-check compares against a REAL previous opaque auth (this is what
-    // makes the raw-vs-decoded distinction non-vacuous: two opaque tokens both
+    // makes the raw-vs-decoded distinction mutation test: two opaque tokens both
     // decode to `{}`, so a decoded-claims comparison would falsely skip). The
     // group pins to `user-1`; the opaque refresh must NOT be closed by the pin.
     let mut params = authed_params("c1", "ws1", "opaque-token-1");
@@ -2020,8 +2020,8 @@ impl CGServicesFactory for IssueTableFactory {
 /// TS `#runInLockWithCVR` records `zero.sync.lock-wait-time` when the lock
 /// is granted (view-syncer.ts:459-461). Rust's lock is the CG message queue:
 /// a frame enqueued 40 ms ago records a wait of at least 40 ms when
-/// `dispatch_cg_message` picks it up. NON-VACUOUS: before 2026-09-09 no
-/// site recorded the instrument — the seam stays `None`.
+/// `dispatch_cg_message` picks it up. Mutation test: an earlier version
+/// recorded the instrument nowhere — the seam stays `None`.
 #[test]
 fn lock_wait_time_is_recorded_when_the_cg_dequeues_a_frame() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2070,9 +2070,9 @@ fn lock_wait_time_is_recorded_when_the_cg_dequeues_a_frame() {
 /// (view-syncer.ts:2093 guard → :2300 `hydrations.add(1)`), never per
 /// config pass. Rust counted every `handle_desired_queries` pass, so the
 /// `already caught up` no-op passes inflated it: 720 vs TS 396 on an
-/// identical 6-connection replay (2026-09-09 collector diff).
+/// identical 6-connection replay (collector diff).
 ///
-/// NON-VACUOUS: restore `self.metrics.record_hydration(elapsed_ms)` in
+/// Mutation test: restore `self.metrics.record_hydration(elapsed_ms)` in
 /// `handle_desired_queries` and the no-op pass reads 2, the batch 3.
 #[test]
 fn hydration_counter_counts_add_batches_not_config_passes_like_ts() {
@@ -2137,7 +2137,7 @@ fn hydration_counter_counts_add_batches_not_config_passes_like_ts() {
     );
 }
 
-/// NON-VACUOUS (log parity, 2026-09-08): TS logs `init pipelines@…` ONLY on
+/// Mutation test: TS logs `init pipelines@…` ONLY on
 /// the run loop's `!#pipelinesSynced` path (view-syncer.ts:568-606) — once
 /// per pipeline (re)init — never on a later `changeDesiredQueries`
 /// (`#syncQueryPipelineSet('missing')`, :644). The GKE sandbox log showed rust
@@ -2242,13 +2242,13 @@ fn init_pipelines_is_logged_once_per_pipeline_init_not_per_query_set_change() {
 /// — the only TS path that fails every client of a group.
 ///
 /// Rust called `fail_group`, so ONE client's unhydratable query evicted every
-/// client of the group and terminated the CG thread. Found by the G44 runtime
-/// log differential (2026-09-08): the same replay produced 47
+/// client of the group and terminated the CG thread. Found by the runtime
+/// log differential: the same replay produced 47
 /// `terminating after fatal synchronization error` on rust against 47 per-query
 /// `query hydration failed` on TS, triggered by a filter value SQLite cannot
 /// parse reaching the planner's inlined probe SQL.
 ///
-/// NON-VACUOUS: restore `self.fail_group(&e.to_string())` and the sibling
+/// Mutation test: restore `self.fail_group(&e.to_string())` and the sibling
 /// assertions fail — c2 receives an error frame and the group goes terminal.
 #[test]
 fn hydrate_failure_fails_only_the_requesting_connection_like_ts() {
@@ -2309,7 +2309,7 @@ fn hydrate_failure_fails_only_the_requesting_connection_like_ts() {
     //      (`sendError`, connection.ts:429 — `#closeWithThrown` receives
     //      `wrapWithProtocolError(e)`, so `isProtocolError` → warn)
     // Rust emitted only 1 and 3: measured 47 against TS's 92 on the
-    // 2026-09-08 G44 runtime log differential.
+    // runtime log differential.
     let line_at = |level: &str, msg: &str| {
         logs.lines()
             .filter(|l| l.contains(level) && l.contains(msg))
@@ -2368,7 +2368,7 @@ fn hydrate_failure_fails_only_the_requesting_connection_like_ts() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): `updateAuth` and the background retransform
+/// Mutation test: `updateAuth` and the background retransform
 /// carry an EMPTY desired-queries body, and both MUST still run the
 /// config/hydrate pass — re-transforming every query under the refreshed
 /// credential is their whole purpose (TS `updateAuth` -> `#handleConfigUpdate`
@@ -2442,7 +2442,7 @@ fn empty_body_config_passes_still_run_for_update_auth_and_retransform() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): `initConnection` validates the connection
+/// Mutation test: `initConnection` validates the connection
 /// against the query API server BEFORE any data is sent. TS:
 /// ```text
 /// // Validate auth before sending any data is sent to this connection.
@@ -2517,7 +2517,7 @@ fn init_connection_validates_before_serving_any_data() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-02): `updateAuth` validates the connection ONLY
+/// Mutation test: `updateAuth` validates the connection ONLY
 /// when pipelines are not yet synced. TS:
 /// ```text
 /// // If pipelines are not yet synced, there is no transform request that
@@ -2793,7 +2793,7 @@ fn update_auth_same_opaque_token_skips_retransform() {
 /// owner's real per-connection auth. Pins that the adapter surfaces the CCM's
 /// auth + revision, and returns `None` for an unknown connection.
 ///
-/// NON-VACUOUS: the old `PlaceholderConnContextManager` returned `auth:None`
+/// Mutation test: the old `PlaceholderConnContextManager` returned `auth:None`
 /// unconditionally — this asserts a NON-None token, so wiring the placeholder
 /// (or breaking the adapter's `auth` mapping) fails the first assert.
 #[test]
@@ -2842,7 +2842,7 @@ fn ccm_dispatch_adapter_surfaces_real_connection_auth() {
     // Unknown connection → the TS `mustGetConnectionContext` THROW
     // (InvalidConnectionRequest), NOT a defaulted `auth: None`. The old
     // "safe default" here is exactly what relayed Authorization-less
-    // pushes in prod (2026-08-29 "No token provided" 401s).
+    // pushes in production (the "No token provided" 401s).
     let missing = adapter
         .must_get_connection_context(&ConnectionSelector {
             client_id: "nope".to_string(),
@@ -2856,7 +2856,7 @@ fn ccm_dispatch_adapter_surfaces_real_connection_auth() {
     );
 }
 
-/// Regression (push-relay 401, prod incident 2026-08-27): the token forwarded
+/// Regression (push-relay 401, production incident): the token forwarded
 /// on relayed custom-mutation pushes MUST track `updateAuth`. Rust once
 /// snapshotted the connect-time token and never refreshed it → the API server
 /// 401'd every mutation on any session longer than the token TTL.
@@ -2868,7 +2868,7 @@ fn ccm_dispatch_adapter_surfaces_real_connection_auth() {
 /// single owner — currently holds. This asserts exactly that value across an
 /// `updateAuth`.
 ///
-/// NON-VACUOUS: `updateAuth` (via the CCM) stores the new token; the relay
+/// Mutation test: `updateAuth` (via the CCM) stores the new token; the relay
 /// reads the CCM at use time, so a broken adapter/mapping or a CCM that failed
 /// to refresh keeps forwarding the connect-time token and the second assert
 /// fails. (The `updateAuth` re-transform is exercised via the CCM directly
@@ -2921,10 +2921,10 @@ fn update_auth_refreshes_the_forwarded_push_relay_token() {
 
 /// The ConnectionContextManager owns per-connection auth: `registerConnection`
 /// seeds the connect-time token, `updateAuth` refreshes it, and
-/// `closeConnection` drops the entry (no leaked auth — the bug-2 soil). Pins
+/// `closeConnection` drops the entry (no leaked auth — the stale-auth soil). Pins
 /// that the seeded auth equals the connect token and survives a token refresh.
 ///
-/// NON-VACUOUS: registering with `auth: None` fails the seeded-auth assert;
+/// Mutation test: registering with `auth: None` fails the seeded-auth assert;
 /// skipping the `close_connection` on teardown fails the final `is_err`.
 #[test]
 fn connection_context_manager_tracks_register_update_and_close() {
@@ -3023,7 +3023,7 @@ fn connection_context_manager_tracks_register_update_and_close() {
 /// token's `sub` and equal the decoded connect token — read-permission
 /// evaluation is unchanged.
 ///
-/// NON-VACUOUS: a CCM returning no auth yields `{}` instead of
+/// Mutation test: a CCM returning no auth yields `{}` instead of
 /// `{sub:"user-1"}`, failing the assert.
 #[test]
 fn authdata_reads_from_connection_context_manager() {
@@ -3103,7 +3103,7 @@ fn periodic_revalidation_keeps_valid_connection_and_rearms() {
 /// single owner of per-connection auth. Arming + revalidation are driven
 /// entirely from the CCM (there is no separate auth map anymore).
 ///
-/// NON-VACUOUS: if arming/revalidation did not read the CCM, the connection's
+/// Mutation test: if arming/revalidation did not read the CCM, the connection's
 /// auth would be invisible → no arm, no revalidation, and both asserts fail.
 #[test]
 fn auth_maintenance_reads_token_from_the_connection_context_manager() {
@@ -3145,7 +3145,7 @@ fn auth_maintenance_reads_token_from_the_connection_context_manager() {
 /// regardless of token presence, and maintenance re-validates it via the
 /// server-side probe (`#validateConnection` → transformer.validate).
 ///
-/// NON-VACUOUS for the plan-driven migration: the previous interval-driven
+/// Mutation test for the plan-driven migration: the previous interval-driven
 /// arm skipped untokened connections entirely, so the `is_some` assert below
 /// fails against the old code.
 #[test]
@@ -3185,7 +3185,7 @@ fn periodic_revalidation_disabled_never_arms_but_unauthed_is_scheduled() {
 /// connection: with a 300s revalidate interval, a tick fired right after
 /// connect finds nothing due and touches nothing.
 ///
-/// NON-VACUOUS: the previous interval-driven tick revalidated every tokened
+/// Mutation test: the previous interval-driven tick revalidated every tokened
 /// connection on ANY tick, so `authRevalidations == 0` fails against it.
 #[test]
 fn maintenance_honors_ccm_revalidate_deadlines() {
@@ -3340,9 +3340,9 @@ fn cg_state_connection_lifecycle_and_notification() {
 /// tear the client down. No per-client state (auth, raw auth, query ctx, push
 /// headers, profile id, base version, sink registration) may leak — a leak
 /// would let a reconnecting client or a later relayed push read stale auth
-/// (the bug-2 class this framework exists to kill).
+/// (the stale-auth class this framework exists to kill).
 ///
-/// NON-VACUOUS: delete any single `self.<map>.remove(client_id)` line from
+/// Mutation test: delete any single `self.<map>.remove(client_id)` line from
 /// `delete_client_due_to_disconnect` and the matching `is_empty()` assertion fails.
 #[test]
 fn a_close_fully_tears_down_all_per_client_state() {
@@ -3420,7 +3420,7 @@ fn a_close_fully_tears_down_all_per_client_state() {
 /// disconnecting must STOP it (TS `#deleteClientDueToDisconnect`,
 /// view-syncer.ts:767) so an idle group with no clients runs zero eviction —
 /// matching TS, which clears the timer on last disconnect and never re-arms
-/// it until a client reconnects. Non-vacuous: reverting the
+/// it until a client reconnects. Mutation test: reverting the
 /// `stop_expire_timer()` call at the last-disconnect branch leaves the timer
 /// armed and the `is_none()` assertions below fail.
 #[test]
@@ -3513,10 +3513,10 @@ fn last_disconnect_stops_the_eviction_timer() {
 /// (view-syncer.ts:913 `client.close("replaced by wsID: …")` →
 /// `downstream.cancel()`). It must NOT send an `["error", …]` frame — a
 /// Rehome there tells the superseded client to reconnect elsewhere even
-/// though the SAME client already reconnected. Non-vacuous: reverting
+/// though the SAME client already reconnected. Mutation test: reverting
 /// `close_connection` to `close_with_error(rehome(...))` makes an error frame
-/// appear and the assertion fails. (Caught by the G49 ownership differential:
-/// rust=Rehome, TS=none, 2026-08-28.)
+/// appear and the assertion fails. (Caught by the ownership differential:
+/// rust=Rehome, TS=none.)
 #[test]
 fn supersede_close_is_frameless_like_ts() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -3669,7 +3669,7 @@ fn reconnect_closes_superseded_connection() {
 
     // The superseded ws1 socket is closed FRAME-LESS — TS syncer.ts:649
     // `existing.close(`replaced by ${params.wsID}`)` → ws close, no error
-    // frame (an `error` frame here was the G49-class divergence).
+    // frame (an `error` frame here was the ownership-class divergence).
     let mut ws1_closed = false;
     let mut ws1_errored = false;
     while let Ok(cmd) = drx1.try_recv() {
@@ -3708,7 +3708,7 @@ fn reconnect_closes_superseded_connection() {
 /// drain path lands here: `Syncer.drain()` → `vs.stop()` (workers/syncer.ts:
 /// 746) → `#stateChanges.cancel()` → the run loop ends normally.
 ///
-/// NON-VACUOUS (2026-09-08): until this commit rust sent `["error", Rehome
+/// Mutation test: an earlier version sent `["error", Rehome
 /// "Reconnect required"]` here and the test asserted exactly that, citing a
 /// `#cleanup` `client.fail(...)` that does not exist on this path (see the
 /// `shutdown` doc). Restore `close_with_error(rehome(..))` and the
@@ -3790,7 +3790,7 @@ fn shutdown_closes_connections_frameless_like_ts_cleanup() {
 /// that lock queue: a `NewConnection` the router sent (and counted) before
 /// it observed `accepting == false` sits behind the drain `Shutdown`.
 ///
-/// NON-VACUOUS (2026-09-08): before the post-loop drain in `cg_event_loop`
+/// Mutation test: before the post-loop drain in `cg_event_loop`
 /// the queued admission was dropped with the receiver, its sink with it,
 /// and the writer task ended on a closed channel — the socket closed with
 /// NO frame. Remove the `while let Ok(msg) = rx.try_recv()` block and the
@@ -3866,7 +3866,7 @@ fn queued_connection_behind_shutdown_is_rehomed_like_ts_run_in_lock_with_cvr() {
 /// with a Rehome (view-syncer.ts:464-478) — is admitted to a FRESH group and
 /// served. Contract: never left hanging.
 ///
-/// NON-VACUOUS: drop the `!handle.accepting` branch of `get_or_create_cg`
+/// Mutation test: drop the `!handle.accepting` branch of `get_or_create_cg`
 /// (always return the existing handle) and the two handles share one
 /// channel.
 #[test]
@@ -4062,8 +4062,8 @@ fn overflow_rehomes_instead_of_server_overloaded() {
 }
 
 /// A Pusher whose `init_connection` blocks the CG thread on the first call,
-/// simulating a long synchronous `config_and_hydrate`. (The seam moved with
-/// the L9 Stage 3d un-interception: `pusher.initConnection` now fires from
+/// simulating a long synchronous `config_and_hydrate`. (`pusher.initConnection`
+/// fires from
 /// the handler's `initConnection` arm ON the CG task, inside the same
 /// dispatch that runs the config/hydrate pass — the old injectable
 /// placeholder-CCM call is gone.) Signals `entered` when it reaches the
@@ -4160,7 +4160,7 @@ impl CGServicesFactory for BlockingPusherFactory {
     }
 }
 
-/// Regression (connect-ack decoupling, prod incident 2026-08-27): the
+/// Regression (connect-ack decoupling, production incident): the
 /// `connected` message MUST be emitted on the accept task
 /// (`handle_connection`), NOT on the serial CG thread. When a client's CG
 /// thread is blocked in an in-flight `config_and_hydrate` (here simulated by
@@ -4170,7 +4170,7 @@ impl CGServicesFactory for BlockingPusherFactory {
 /// its 10s connect timeout fires, it disconnects, the idle CG is reaped, and
 /// the reconnect pays a full cold re-hydrate (the thrash we observed).
 ///
-/// NON-VACUOUS: before the fix, `connected` was sent by `Connection::init()`
+/// Mutation test: before the fix, `connected` was sent by `Connection::init()`
 /// inside `on_new_connection` on the CG thread, so client B's ack was queued
 /// behind the blocked hydrate and this `try_recv` finds nothing → the assert
 /// fails. (Verified by reverting the `handle_connection` emission.)
@@ -4395,7 +4395,7 @@ fn placement_balances_groups_across_executors() {
     rt.block_on(router.shutdown());
 }
 
-/// L9 Stage 3d regression: a piggybacked `initConnection` is dispatched
+/// Regression: a piggybacked `initConnection` is dispatched
 /// through the SAME path as a socket frame (Connection → handler →
 /// ViewSyncerDispatch), and the handler's `connContextManager.initConnection`
 /// dispatch — now the SINGLE recording site — lands the body's
@@ -4513,11 +4513,11 @@ fn new_client_group_rejects_init_without_client_schema() {
     );
 }
 
-/// G36 garbage-cookie / overlarge-configversion: a baseCookie that fails
+/// Garbage cookie / overlarge configVersion: a baseCookie that fails
 /// `versionFromString` (TS schema/types.ts, called from the ClientHandler
 /// constructor's `cookieToVersion`) FAILS the connection with a fatal
 /// `Internal` error (`wrapWithProtocolError`, types/error-with-level.ts) —
-/// it must NOT be silently treated as "no base version". Covers both G36
+/// it must NOT be silently treated as "no base version". Covers both
 /// shapes: a non-Lexi stateVersion and a configVersion above 2^53.
 ///
 /// The `connected`-before-`error` ordering TS guarantees is now structural:
@@ -4584,7 +4584,7 @@ fn malformed_base_cookie_closes_with_internal_error() {
         // LEVEL: TS throws a RAW `TypeError`/`Error` from `versionFromString`
         // (schema/types.ts:333/338) → `Connection.#closeWithThrown(e)` →
         // `sendError(.., thrown=e)` → `getLogLevel(plain Error)` = 'error'.
-        // NON-VACUOUS (2026-09-08): the bodiless `close_with_error` this site
+        // Mutation test: the bodiless `close_with_error` this site
         // used classified `Internal` with no thrown → 'info'.
         assert_eq!(
             logs.lines()
@@ -4773,7 +4773,7 @@ fn last_inspect_frame(
 // (PG-gated), against the real desires/queries/rows tables.
 
 /// The `metrics` op returns the InspectorDelegate's real global aggregate
-/// digests (TS `getMetricsJSON()`), not a hardcoded empty pair. NON-VACUOUS:
+/// digests (TS `getMetricsJSON()`), not a hardcoded empty pair. Mutation test:
 /// a `query-materialization-server` metric seeded into the delegate shows up
 /// as `[1000, 12, 1]` in the frame; reverting the op to the old hardcoded
 /// `[1000]` (or not feeding the delegate) makes the exact-array assert fail.
@@ -5022,7 +5022,7 @@ const CHANGE_DESIRED_HASH1: &str = r#"["changeDesiredQueries",{"desiredQueriesPa
 /// registered the handler in `on_new_connection`, so an accepted socket whose
 /// baseCookie matched the CVR version was an advance-poke target before its
 /// initConnection, and its pre-init changeDesiredQueries ran a full config
-/// pass. Non-vacuous: on the pre-fix code the first assertion fails.
+/// pass. Mutation test: on the pre-fix code the first assertion fails.
 #[test]
 fn socket_becomes_a_client_only_on_init_connection() {
     use super::engine_tests::{capture_logs, captured};
@@ -5095,7 +5095,7 @@ fn socket_becomes_a_client_only_on_init_connection() {
 /// between the last disconnect and the next initConnection must not advance
 /// the clock. Rust re-based only on CVR load, so a reconnect inside the
 /// keepalive window (CVR still loaded) charged the whole idle gap to every
-/// query's TTL. Non-vacuous: on the pre-fix code the clock jumps by the
+/// query's TTL. Mutation test: on the pre-fix code the clock jumps by the
 /// simulated 100 s gap.
 #[test]
 fn idle_gap_before_the_next_init_connection_does_not_advance_the_ttl_clock() {

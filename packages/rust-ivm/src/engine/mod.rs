@@ -452,7 +452,7 @@ pub struct Engine {
     /// `flip` annotations before building (builder.ts:140). rust's builder READS
     /// `csq.flip` but nothing SET it, so exists-in-OR was always built
     /// non-flipped — over-attaching (and over-emitting to the CVR) the backing
-    /// rows of a redundant WHERE-EXISTS branch (the ART G8 divergence). When this
+    /// rows of a redundant WHERE-EXISTS branch (the release-gate data divergence). When this
     /// connection is present, `plan_ast` runs the ported planner so flips match
     /// TS. `None` (most unit tests) ⇒ no planning, unchanged legacy behavior.
     cost_model_conn: Option<Rc<RefCell<rusqlite::Connection>>>,
@@ -510,7 +510,7 @@ impl Engine {
     /// (TS `createSQLiteCostModel(db, ...)`); the planner then annotates each
     /// query AST's correlated-subquery `flip` before `build_pipeline`. Without
     /// this, exists-in-OR is built non-flipped and over-emits WHERE-EXISTS
-    /// backing rows (ART G8). Pair with [`Self::set_cost_model_table_specs`] —
+    /// backing rows (the release-gate data differential). Pair with [`Self::set_cost_model_table_specs`] —
     /// conn without specs degrades (loudly) to the legacy COUNT(*) model.
     pub fn set_cost_model_conn(&mut self, conn: Rc<RefCell<rusqlite::Connection>>) {
         self.cost_model_conn = Some(conn);
@@ -536,9 +536,9 @@ impl Engine {
     /// missing or SQLite lacks SQLITE_ENABLE_STMT_SCANSTATUS), so the caller
     /// runs UNPLANNED — TS parity (`if (costModel)`). There is NO fallback cost
     /// model; the removed COUNT(*) fallback + `RUST_IVM_PLANNER_COST_MODEL` env
-    /// were a rust-only divergence (the 2026-08-29 mis-flip).
+    /// were a rust-only divergence (the `tickets` mis-flip).
     ///
-    /// The 2026-08-29 prod 144s `tickets` hydrate was this exact seam: the
+    /// The 144 s `tickets` hydrate incident was this exact seam: the
     /// engine planned with the filter-blind COUNT model (constrained fetch ≈ 1
     /// row, fanout 1.0), flipped a join whose real parent-side fanout was tens
     /// of thousands of rows, and the flipped-join batch fetch ran 44.8s per
@@ -551,7 +551,7 @@ impl Engine {
     /// build error logs once and returns `None`, so the caller runs unplanned
     /// (correct, just un-flipped). The removed COUNT(*) fallback was a
     /// rust-only divergence that produced DIFFERENT plans than TS (the
-    /// 2026-08-29 144s `tickets` mis-flip). `build.rs` compiles in
+    /// 144 s `tickets` mis-flip). `build.rs` compiles in
     /// SCANSTATUS/STAT4, so a real binary returns `Some`; `None` means a wiring
     /// bug (specs not set), where un-flipped is the safe TS-parity baseline.
     fn ensure_cost_model(
@@ -563,7 +563,7 @@ impl Engine {
         }
         let Some(specs) = &self.cost_model_specs else {
             // The level carries the severity; the literal "WARNING:" prefix
-            // was how this got noticed at all as an `eprintln!` (M14).
+            // was how this got noticed at all as an `eprintln!`.
             tracing::warn!(
                 "planner cost-model conn set without table specs; \
                  running UNPLANNED (TS plans with scanstatus — call \
@@ -1700,7 +1700,7 @@ impl Engine {
 /// `SyncEngine`/`CgState` simply *drops* the engine — nothing calls `destroy()`
 /// explicitly — so without this impl the whole operator subtree (Join / Exists /
 /// TableSourceInput / TableConnection, plus the SQLite connection each
-/// TableConnection pins) leaks on every CG churn. That is the G6 RSS climb: the
+/// TableConnection pins) leaks on every CG churn. That is the RSS climb the leak gate saw: the
 /// `TableSource` root drops (it is not in the cycle) but its registered
 /// inputs/connections and the operators above them are retained forever.
 ///
@@ -1992,7 +1992,7 @@ mod advance_reset_message_tests {
     //! hydration budget and the position in the change batch
     //! (pipeline-driver.ts:1149-1155).
     //!
-    //! Worth pinning: the 60-minute dual prod-trace replay (2026-09-04, rev
+    //! Worth pinning: a 60-minute dual production-trace replay (rev
     //! 5f3beaaef) logged 25,713 `advancement-timeout` resets against TS's 6, and
     //! the cause could not be read from the rust logs because the syncer was
     //! printing the coarse `reason` instead of this text. A message that drops

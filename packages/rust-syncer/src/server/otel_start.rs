@@ -170,7 +170,7 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
 #[cfg(test)]
 mod tests {
     /// TS `NATIVE_HISTOGRAM_INSTRUMENT_NAMES` (server/otel-start.ts) has exactly
-    /// these two. NON-VACUOUS: until 2026-09-09 rust also listed
+    /// these two. Mutation test: an earlier version also listed
     /// `zero.sync.e2e_serving_lag`, exporting it as an exponential histogram
     /// while TS exports explicit buckets.
     #[test]

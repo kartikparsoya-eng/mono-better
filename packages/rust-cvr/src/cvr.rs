@@ -1034,7 +1034,7 @@ impl CVRQueryDrivenUpdater {
     /// return `Err`, never `assert!`/panic. A panic here unwinds mid-mutation,
     /// poisons the CG's locks, and takes down every client on the group; the
     /// client then re-hydrates the same state and re-panics, wedging until a
-    /// cache clear (prod 2026-08-31 `cvr.rs:1009`). TS-prod logs ZERO of these
+    /// cache clear (a production incident). TS-prod logs ZERO of these
     /// over 7 days precisely because a thrown-and-caught assert is a benign
     /// retry, not a crash — matching that error semantics is AGENTS.md rule 1.
     fn assert_new_version(&self) -> Result<CVRVersion, String> {

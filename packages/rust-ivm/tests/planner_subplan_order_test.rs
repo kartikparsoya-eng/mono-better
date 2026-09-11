@@ -1,4 +1,4 @@
-//! F-35: sub-plans must be traversed in INSERTION order, matching TS.
+//! Sub-plans must be traversed in INSERTION order, matching TS.
 //!
 //! TS's `plans.subPlans` is a plain object (`{[key: string]: Plans}`,
 //! planner-builder.ts:39,77) and `plan_recursively` walks it with
@@ -20,7 +20,7 @@
 //! `(version, table)`, and `apply_plans_to_ast` looks sub-plans up BY KEY.
 //! The assertions below are therefore about event ORDER only.
 //!
-//! NON-VACUOUS: restore `sub_plans: HashMap<String, Plans>` (and
+//! Mutation test: restore `sub_plans: HashMap<String, Plans>` (and
 //! `HashMap::new()` in `build_plan_graph`) and
 //! `sub_plans_are_traversed_in_ast_related_order` fails. With 8 sub-plans a
 //! randomized map would have to reproduce insertion order by chance, i.e.

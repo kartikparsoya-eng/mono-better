@@ -1,4 +1,4 @@
-//! F-06 regression: the per-row `Row` map must be built with its capacity
+//! Regression: the per-row `Row` map must be built with its capacity
 //! reserved, so a wide table does not pay rehash-growth allocations on EVERY
 //! fetched row.
 //!
@@ -7,12 +7,12 @@
 //! innermost loop of every hydrate. It started that map at ZERO capacity and
 //! inserted column-by-column, so a 40-column row paid four table-growth
 //! allocations (hashbrown steps 3 → 7 → 14 → 28 → 56) before it held its
-//! columns — per row, on every scan. At the 800K-row scale of the G8 oracle
+//! columns — per row, on every scan. At the 800K-row scale of the data-differential oracle
 //! that is millions of avoidable allocations.
 //!
 //! WHAT THIS DOES NOT FIX: `map.insert(col.clone(), value)` still heap-copies
 //! the column NAME per column per row. Removing that needs `Row`'s key to
-//! become `Arc<str>` (the "Phase 1a interned row keys" change) — a cross-crate
+//! become `Arc<str>` (interned row keys) — a cross-crate
 //! type change, deliberately not bundled here. This test measures exactly that
 //! cost too, so it is the gate for that work when it lands: the budget drops
 //! to ~0.1 and this assertion is what proves it.
@@ -25,7 +25,7 @@
 //! cache). Differencing slopes rather than asserting an absolute count keeps
 //! this stable against unrelated allocations elsewhere on the fetch path.
 //!
-//! NON-VACUOUS: restore `FxHashMap::default()` in place of
+//! Mutation test: restore `FxHashMap::default()` in place of
 //! `with_capacity_and_hasher(column_names.len(), ...)` and the growth
 //! allocations push the measured per-column cost over the budget. The
 //! assertion message prints both slopes, so re-measuring is a single run.
@@ -185,10 +185,10 @@ fn row_materialisation_pays_no_growth_allocations_per_column() {
     let wide = per_row_allocs(40);
     let per_column = (wide - narrow) / 36.0;
 
-    // MEASURED on this tree (2026-09-10, aarch64-apple-darwin, hashbrown as
+    // MEASURED on this tree (aarch64-apple-darwin, hashbrown as
     // vendored): 1.017 per column with the capacity reserved, 1.100 without.
     // The floor of ~1 is the `String` per column that the `String`-keyed `Row`
-    // still pays (F-06 step 2 / "Phase 1a interned row keys" takes it to ~0);
+    // still pays (interning the row keys as `Arc<str>` takes it to ~0);
     // the 0.083 on top is the growth-rehash churn, which is what reserving
     // `column_names.len()` removes. In absolute terms the fix saves 1
     // allocation per row at 4 columns (8.15 → 7.15) and 4 at 40 columns

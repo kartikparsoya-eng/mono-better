@@ -15,12 +15,12 @@
 //! (true for the prod image, the local wal2 build, and macOS system SQLite).
 //!
 //! `create_snapshot_cost_model` here is the LEGACY row-count model
-//! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none). As of
-//! 2026-08-31 it is **test-only** (mock-cost oracle differentials): the engine
+//! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none). Since
+//! fe849e862 it is **test-only** (mock-cost oracle differentials): the engine
 //! plans with the scanstatus model or runs UNPLANNED, mirroring TS. The
 //! rust-only auto-fallback + `RUST_IVM_PLANNER_COST_MODEL=count` env that once
 //! silently reached THIS model in prod — the cost-model gap behind the
-//! 2026-08-29 144s flipped-join `tickets` hydrate — were removed (option-b).
+//! 144 s flipped-join `tickets` hydrate incident — were removed (fe849e862).
 //! `engine_planner_wiring_test.rs` pins the engine selection (scanstatus, or
 //! unplanned when specs/scanstatus are unavailable).
 
@@ -43,8 +43,8 @@ use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, 
 /// Harmless because this whole model is test-only (see
 /// [`create_snapshot_cost_model`]) — but a claim that describes behaviour the
 /// code does not have is a stale claim, and this model's earlier PROD
-/// reachability is the cost-model gap behind the 2026-08-29 144 s `tickets`
-/// hydrate.
+/// reachability is the cost-model gap behind the 144 s `tickets` hydrate
+/// incident.
 type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
 
 /// LEGACY filter-blind `COUNT(*)` cost model — **test-only reference**, NOT
@@ -53,9 +53,9 @@ type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
 /// (`Engine::ensure_cost_model`, mirroring TS `if (costModel)`). Retained only
 /// so the differential tests (`sqlite_cost_model_test`, `planner_runtime_test`)
 /// can prove the scanstatus model plans DIFFERENTLY from this one — i.e. pin
-/// the 2026-08-29 `tickets` mis-flip fix. The rust-only auto-fallback + the
+/// the `tickets` mis-flip fix. The rust-only auto-fallback + the
 /// `RUST_IVM_PLANNER_COST_MODEL=count` env that once reached this in prod were
-/// removed 2026-08-31 (option-b: no divergent prod cost model).
+/// removed in fe849e862 (no divergent prod cost model).
 ///
 /// `#[doc(hidden)]` so the test-only status is machine-visible and not just
 /// prose. (`#[cfg(test)]` would be wrong: the differential tests are
@@ -108,7 +108,7 @@ fn row_count(conn: &rusqlite::Connection, table: &str) -> Option<f64> {
 /// decisions (canonical traversal — see [`flip_order`]).
 ///
 /// This used to say "the TS driver walks its own AST in the same order and sets
-/// `flip` per position". That driver was the napi bridge, DELETED in
+/// `flip` per position". That driver was the removed native bridge, deleted in
 /// `a5e502ad9` — the contract had no counterparty left. Reachable today only
 /// from `tests/sqlite_cost_model_test.rs` and `tests/planner_runtime_test.rs`,
 /// which use it to prove the scanstatus model plans differently from the legacy
@@ -131,7 +131,7 @@ pub fn plan_ast_flips(
 /// `RUST_IVM_PERF_TRACE`) and `Engine::planned_flips_for_test` returns it. The
 /// order is therefore what those two report, and what the differential tests
 /// compare positionally. It used to say "the TS driver's `applyFlips` MUST use
-/// this exact order" — that driver was the deleted napi bridge, so the MUST had
+/// this exact order" — that driver was the removed native bridge, so the MUST had
 /// no counterparty; the flips rust applies to the AST are set by the planner
 /// itself, not handed to a TS caller.
 pub fn flip_order(ast: &Ast) -> Vec<Option<bool>> {

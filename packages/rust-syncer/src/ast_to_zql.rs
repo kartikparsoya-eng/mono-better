@@ -342,7 +342,7 @@ mod tests {
 
     /// Golden ZQL renderings from the real TS `astToZQL` (ast-to-zql.ts) via tsx.
     /// Pins byte-exact parity across simple/logical/exists/related/order/limit/
-    /// start/static-param forms. NON-VACUOUS: any divergence in the emitted
+    /// start/static-param forms. Mutation test: any divergence in the emitted
     /// string (operator shorthand, callback arg-set ordering, quoting/escaping,
     /// relationship-alias stripping) fails the exact-equality assertion.
     #[test]

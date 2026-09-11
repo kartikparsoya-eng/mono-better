@@ -3,7 +3,7 @@
 //! advance_to_head_stream), hunting the live-prod Take bound divergences:
 //!   take.rs:545 "Take: boundNode must be found during fetch"
 //!   take.rs:702 "Bound should be set"
-//! observed on zero-02-rust (2026-08-12) and preprod hf2cg, plus the SILENT
+//! observed in production, plus the SILENT
 //! sibling: wrong LIMIT/page rows without any panic.
 //!
 //! Shape: one table with a NULLABLE REAL order-by column (NULLs + duplicate
@@ -15,7 +15,7 @@
 //!   - optionality CONTRACT variants (declared non-optional => data never
 //!     contains NULL): optional:true with NULL-heavy data (the prod shape —
 //!     requires computeZqlSpecs to populate SchemaValue.optional, the
-//!     2026-08-12 root-cause fix in zero-cache/src/db/lite-tables.ts) and
+//!     root-cause fix in zero-cache/src/db/lite-tables.ts) and
 //!     optional:false with NULL-free data.
 //!   - LIMIT 1..=3 (Take) and no-limit (pure Skip).
 //!   - asc/desc ordering.

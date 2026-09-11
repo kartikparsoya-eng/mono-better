@@ -35,7 +35,7 @@ pub fn enabled() -> bool {
 /// (`[rust-ivm][PLANDBG] {"type":"node-cost",...}`) for PRODUCTION plans.
 /// Gated by `RUST_IVM_PLAN_DEBUG` ALONE — never by `RUST_IVM_PERF_TRACE`.
 ///
-/// Until 2026-09-08 the dump rode on the perf-trace env: on the GKE sandbox
+/// An earlier version tied the dump to the perf-trace env: on the GKE sandbox
 /// (`RUST_IVM_PERF_TRACE=1`) it was 54,355 of 55,608 log lines (19 MB in 11.5
 /// min for ONE user), made kubelet rotate the container log every ~80 s, and
 /// its synchronous `eprintln` per event ran inside `hydrate.build` (13,434
@@ -181,7 +181,7 @@ fn emit(line: &str) {
 mod plan_debug_gate_tests {
     use super::plan_debug_dump_enabled;
 
-    /// Non-vacuous: the pre-2026-09-08 gate was `RUST_IVM_PERF_TRACE` set (any
+    /// Mutation test: the earlier gate was `RUST_IVM_PERF_TRACE` set (any
     /// value) — reverting `plan_debug_dump_enabled` to `perf_trace.is_some()`
     /// fails the first assertion (the sandbox flood) and the third (the
     /// dedicated env did not exist).

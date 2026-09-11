@@ -469,7 +469,7 @@ mod tests {
         }
     }
 
-    /// F-31: a panic that held the JWKS lock must not disable the refetch
+    /// A panic that held the JWKS lock must not disable the refetch
     /// cooldown.
     ///
     /// `JWKS_CACHE` was a `std::sync::Mutex`, which POISONS when a panic
@@ -481,7 +481,7 @@ mod tests {
     /// prevent, and the comment calls it DoS protection. `parking_lot::Mutex`
     /// cannot poison, so the failure mode is deleted rather than handled.
     ///
-    /// NON-VACUOUS: restore
+    /// Mutation test: restore
     /// `static JWKS_CACHE: LazyLock<StdMutex<..>>` with
     /// `.lock().ok().and_then(..).unwrap_or(false)` and the post-panic
     /// assertion fails — the cooldown reports "not on cooldown".
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(*err.kind(), crate::protocol::ErrorKind::AuthInvalidated);
     }
 
-    /// G36 tampered-token: a validly-issued token with a corrupted signature
+    /// Tampered token: a validly-issued token with a corrupted signature
     /// must map to `AuthInvalidated` with the TS `resolveAuth` message shape
     /// (`Failed to decode auth token: ...`, auth/auth.ts catch), NOT
     /// `Unauthorized` — the live TS image closes with AuthInvalidated.

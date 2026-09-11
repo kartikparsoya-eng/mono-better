@@ -5,7 +5,7 @@
 //!
 //! A PRIVATE channel in a DIFFERENT workspace (me not a participant) must be
 //! excluded by the top-level `workspaceId = me-ws` conjunct. This pins the
-//! TableSource/SQL path that ART exercises. rust evaluates it correctly; the ART
+//! TableSource/SQL path that the release-gate replay exercises. rust evaluates it correctly; the ART
 //! G8 1-row diff was a transient in the full concurrent run, not an eval bug.
 
 use std::cell::RefCell;
@@ -29,7 +29,7 @@ fn seed() -> Rc<RefCell<Connection>> {
         CREATE TABLE channels (id TEXT PRIMARY KEY, workspaceId TEXT NOT NULL, visibility TEXT NOT NULL);
         CREATE TABLE channel_participants (id TEXT PRIMARY KEY, channelId TEXT NOT NULL, userId TEXT NOT NULL);
 
-        -- me-ws = wsme (EMPTY, like the real ART user's workspace), other-ws = wsother.
+        -- me-ws = wsme (EMPTY, like the replay user's workspace), other-ws = wsother.
         -- Every channel is in wsother, so `WHERE workspaceId = wsme` must return NOTHING.
         INSERT INTO channels VALUES ('dm1','wsother','PRIVATE');            -- LEAK target
         INSERT INTO channels VALUES ('pub_other','wsother','PUBLIC');       -- excluded by workspaceId

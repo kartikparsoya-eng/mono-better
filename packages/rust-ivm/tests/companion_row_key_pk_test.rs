@@ -13,7 +13,7 @@
 //!
 //! In normal wiring this asymmetry is UNREACHABLE: a companion is only produced
 //! for a table that passed `is_simple_subquery`, which requires the table's
-//! unique keys, which the driver/napi register together with the table's source
+//! unique keys, which the driver registers together with the table's source
 //! and PK. But the two maps (`primary_keys` vs `unique_keys`) are written in
 //! separate places, so the invariant was implicit, not enforced at the emission
 //! site. The fix captures the companion table's PK from its own pipeline schema

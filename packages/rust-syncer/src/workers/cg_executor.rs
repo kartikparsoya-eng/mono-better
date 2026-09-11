@@ -1,5 +1,5 @@
 //! CG executor substrate — RUST-ONLY INVENTION (no TS twin; see
-//! `parity/INVENTIONS.md` I-1/doc 91). TS gets per-client-group serialization
+//! `parity/INVENTIONS.md` I-1; `RUST-SYNCER-ARCHITECTURE.md` §3). TS gets per-client-group serialization
 //! from the `ViewSyncerService` `#lock` on a worker's event loop; rust hosts
 //! each (`!Send`) client-group task on one of `K` `current_thread` executor
 //! threads (`LocalSet` + `spawn_local`), serialized by an unbounded ordered
@@ -39,8 +39,8 @@ use crate::ws_sink::DirectWebSocketSink;
 pub enum CGMessage {
     /// A new connection was accepted — register its client handler with the
     /// SyncEngine. (`connected` is ALREADY sent by `handle_connection` on the
-    /// accept task, before this message is enqueued — the 2026-08-27 connect-ack
-    /// decoupling, task #152.)
+    /// accept task, before this message is enqueued — the connect-ack
+    /// decoupling.)
     NewConnection {
         params: Box<ConnectParams>,
         sink: DirectWebSocketSink,
@@ -82,7 +82,7 @@ pub enum CGMessage {
 }
 
 /// Handle to a client group's async task, which runs on one of the `K` shared
-/// executor threads (doc 91). The task itself is a `spawn_local` future on its
+/// executor threads (`RUST-SYNCER-ARCHITECTURE.md` §4). The task itself is a `spawn_local` future on its
 /// executor's `LocalSet`; this handle only carries the channel + shared counters
 /// used to route to it and account for it. There is no per-CG OS thread and thus
 /// no per-CG `JoinHandle` — draining is done by shutting down the executors.
@@ -198,7 +198,7 @@ pub(crate) async fn forward_inbound(
     let _ = cg_tx.send(CGMessage::ConnectionClosed { client_id, ws_id });
 }
 
-/// Run one executor thread (doc 91): a `current_thread` tokio runtime + `LocalSet`
+/// Run one executor thread (`RUST-SYNCER-ARCHITECTURE.md` §3): a `current_thread` tokio runtime + `LocalSet`
 /// that hosts a hash-shard of client groups as `spawn_local` tasks. The `!Send`
 /// `SyncEngine` of each hosted group lives on this one thread and its IVM compute
 /// runs inline; CVR/PG I/O is *offloaded* onto the shared-pool runtime (the

@@ -29,8 +29,8 @@ use crate::snapshotter::spec::LiteAndZqlSpec;
 /// AND re-runs its own query planner to pick indexes.
 ///
 /// This was 64 — a guess "above rusqlite's default 16" rather than the ported TS
-/// value — and a whale client group blew through it. Measured 2026-09-02 on the
-/// ART prod replay: `scopedCollections` (a 3-level nested-EXISTS chain over 6
+/// value — and a whale client group blew through it. Measured on a
+/// production-trace replay: `scopedCollections` (a 3-level nested-EXISTS chain over 6
 /// tables) logged 51,248 statement preparations in ONE hydrate and took ~10s
 /// against TS's ~1.5s for the identical AST and the identical 22,934 rows, with
 /// SQLite's parser (`yy_reduce`) visible in the CPU profile.
@@ -292,7 +292,7 @@ pub enum StalePinAction {
 }
 
 /// Pure decision core of the stale-pin guard: tracks pin PROGRESS and applies
-/// the two-strike rule. (It was split out so the napi cdylib's `stale_pin_check`
+/// the two-strike rule. (It was split out so a caller's `stale_pin_check`
 /// could be unit-tested from this crate; that addon was removed in a5e502ad9,
 /// but the split is still where the logic's tests live.)
 ///

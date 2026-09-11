@@ -18,7 +18,7 @@ use rust_syncer::workers::syncer_ws_message_handler::{
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-/// Drive the (now-async, L9 Stage 3d) handler dispatch to completion on a
+/// Drive the async handler dispatch to completion on a
 /// current-thread runtime — these unit tests are the synchronous twin of the
 /// CG task awaiting `handle_message` inline.
 trait HandleMessageBlocking {

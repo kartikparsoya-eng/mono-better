@@ -1,5 +1,5 @@
 //! Real-path regression guard using the EXACT transformed AST of
-//! `myChannelParticipations` (dumped from the xyne backend via the ART diff
+//! `myChannelParticipations` (dumped from the xyne backend via the release-gate diff
 //! oracle), replayed over a SQLite TableSource.
 //!
 //! The app query is trivially `channel_participants WHERE userId=me AND
@@ -19,7 +19,7 @@
 //! pipeline-driver) therefore attaches NO `channels` relationship to those rows
 //! and streams ZERO `channels` rows to the CVR (verified live: the real TS 1.9
 //! mirror emits 9 channel_participants and 0 channels for this query, while the
-//! rust syncer emitted 9 channels — the ART G8 divergence).
+//! rust syncer emitted 9 channels — the release-gate data divergence).
 //!
 //! This test pins the wire-visible contract: for a participant row that passes
 //! the OR via `userId = me`, the redundant EXISTS(channels) branch must NOT emit

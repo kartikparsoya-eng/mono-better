@@ -7,7 +7,7 @@
 //!
 //! Metrics are NOT served here: like TS, they are OTLP-pushed only
 //! (`server/otel_start.rs`; the hand-rolled `/metrics` registry was removed in
-//! 204359376, 2026-09-07 — the ART G17 gate scrapes the collector).
+//! 204359376 — the release-gate collector scrape covers it).
 //!
 //! Notifications are forwarded to the appropriate CG thread via a channel.
 

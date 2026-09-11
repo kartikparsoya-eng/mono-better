@@ -345,11 +345,11 @@ guarantees, error semantics) versus TS.
 - **Enforcement point (located):** the version a client is poked TO must equal
   the version the store actually PERSISTED. `flush_ops_to_store` returns whether
   the store *materially* flushed (`flush_ops_to_store` → `store_flushed`,
-  view_syncer.rs:6787); every caller that pokes gates the poked cookie on it:
+  view_syncer.rs:5448); every caller that pokes gates the poked cookie on it:
   `cfg_cvr = if store_flushed { bumped } else { cfg.base.orig.clone() }` then
   `pokers.end(cfg_cvr.version)` (view_syncer.rs). This is the 1:1 port of
   TS `CVRUpdater.flush`'s `if (!flushed) return {cvr: this._orig}` (cvr.ts) —
-  cited at view_syncer.rs:6754. Adopting the bumped CVR on a no-op flush would
+  cited at view_syncer.rs:5872. Adopting the bumped CVR on a no-op flush would
   advance client cookies past the stored version (the exact "poke to a
   non-durable version" divergence) AND fail the next material flush's version
   guard (`ConcurrentModification`).
@@ -382,7 +382,7 @@ guarantees, error semantics) versus TS.
 ## I-8 — Promote the ported ConnectionContextManager to single live owner
 - **Files (post-L9):** `services/view_syncer/connection_context_manager.rs` (the
   ported CCM), now owned by `ViewSyncerService.ccm: Arc<Mutex<ConnectionContextManager>>`
-  (`services/view_syncer/view_syncer.rs:432`); connection routing in
+  (`services/view_syncer/view_syncer.rs:1171`); connection routing in
   `workers/syncer.rs`; dispatch adapter (`CcmDispatchAdapter`) in `server/syncer.rs`.
 - **Status (2026-08-27): LARGELY DONE.** The ported CCM is now the single live
   owner of per-connection auth + custom-query context. DELETED the parallel

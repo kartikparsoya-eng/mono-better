@@ -1,4 +1,4 @@
-//! Regression guard for the TableSource same-advance fetch merge (G15 + its
+//! Regression guard for the TableSource same-advance fetch merge (the same-advance staleness + its
 //! symmetric edit/remove gaps). This is the SQLite-backed test the earlier
 //! MemorySource probes could NOT be: the merge only runs on the SQLite fetch
 //! path (db_conn set), reading the PREV snapshot. A MemorySource fetch reads

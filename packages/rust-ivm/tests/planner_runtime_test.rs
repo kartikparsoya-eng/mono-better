@@ -1,6 +1,6 @@
 //! Validates the runtime planner path (plan_ast_flips + the snapshot-connection
 //! cost model) end to end against a REAL SQLite with known table sizes — the
-//! step-3/4 wiring, minus the napi boundary.
+//! step-3/4 wiring, minus the driver boundary.
 
 use std::cell::RefCell;
 use std::rc::Rc;

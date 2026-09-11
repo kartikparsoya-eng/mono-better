@@ -1,7 +1,7 @@
 //! Zero protocol message types — Rust serde equivalents of the TypeScript
-//! valita schemas in `packages/zero-protocol/src/`, mirrored file-for-file
-//! (L9 Stage 5a): each submodule ports its same-named TS file. The re-exports
-//! keep every `crate::protocol::X` path stable.
+//! valita schemas in `packages/zero-protocol/src/`, mirrored file-for-file:
+//! each submodule ports its same-named TS file. The re-exports keep every
+//! `crate::protocol::X` path stable.
 //!
 //! Wire format: all messages are JSON tuples `["messageType", bodyObject]`.
 //! We use untagged enums + `#[serde(tag = "op")]` to match the TS union types.
@@ -11,7 +11,7 @@
 /// JS has ONE numeric type, so a `v.number()` field accepts `1`, `1.5`, `1E5`,
 /// `-0` and `1e-330` (-> 0) alike. Typing such a field `i64` in rust rejected
 /// all of those and CLOSED the connection where TS served the query — `1E5` is
-/// an ordinary way to write a timestamp (M13 R1).
+/// an ordinary way to write a timestamp.
 ///
 /// Plain `f64` fixes the inbound half and breaks the outbound half: serde
 /// renders `404.0` where `JSON.stringify` renders `404`. `JsNumber` does both —
@@ -19,7 +19,7 @@
 /// and serializes the way `JSON.stringify` renders a JS number (integral values
 /// as integers, non-finite as `null`, exactly as JS does).
 ///
-/// STILL DIVERGENT (M13 R6, `parity/ZERO-DIVERGENCE-PLAN.md` "Remaining"): a
+/// STILL DIVERGENT (`parity/ZERO-DIVERGENCE-PLAN.md` "Remaining"): a
 /// literal that OVERFLOWS f64 — `1e309`, which `JSON.parse` coerces to
 /// `Infinity` and valita's `v.number()` accepts — is rejected by `serde_json`
 /// as `NumberOutOfRange` before this type ever sees it, so rust still closes
@@ -79,8 +79,8 @@ impl<'de> serde::Deserialize<'de> for JsNumber {
 /// `null`.
 ///
 /// TS `v.object({x: v.string().optional()})` REJECTS `{"x": null}` — `.optional()`
-/// widens the field to "may be missing", not "may be null" (verified by the M13
-/// oracle: `wrongtype/*/null` frames are rejected by valita). serde's
+/// widens the field to "may be missing", not "may be null" (verified against
+/// the TS valita oracle in `tests/frame_parity_test.rs`: `wrongtype/*/null` frames are rejected by valita). serde's
 /// `Option<T>` accepts BOTH a missing key and an explicit `null`, so every
 /// `.optional()` field needs this to match.
 ///
@@ -154,7 +154,7 @@ pub use version::*;
 mod tests {
     use super::*;
 
-    /// G36 malformed-init: TS valita-parses every ws message against
+    /// Malformed init: TS valita-parses every ws message against
     /// `upstreamSchema` (connection.ts `#handleMessage`), so an initConnection
     /// body with a non-array `desiredQueriesPatch` is rejected at PARSE time
     /// (→ InvalidMessage), never reaching init handling (which used to
@@ -270,9 +270,9 @@ mod tests {
     /// close the connection. Rust typed the field `Option<Value>` behind
     /// `optional_no_null`, and `Value` deserializes ANY JSON, so every one of
     /// these was accepted and the handler then treated `null` as "no schema".
-    /// The M13 corpus had no `clientSchema` case, which is how it hid
+    /// The frame-parity corpus had no `clientSchema` case, which is how it hid
     /// (`wrongtype/initConnection.clientSchema/*`, `clientschema/*` now cover
-    /// it against the TS oracle). Non-vacuous: restore `optional_no_null` on
+    /// it against the TS oracle). Mutation test: restore `optional_no_null` on
     /// the field and the `null` case (the first rejected frame below) parses.
     #[test]
     fn init_connection_client_schema_is_validated_like_client_schema_schema() {
@@ -344,7 +344,7 @@ mod tests {
     }
 
     /// Port of TS `errorBodySchema` wire shapes (zero-protocol/src/error.ts +
-    /// error-origin-enum.ts: `ZeroCache = 'zeroCache'`). G36 error-semantics
+    /// error-origin-enum.ts: `ZeroCache = 'zeroCache'`). Error-semantics
     /// surface: the serialized `["error", body]` frames for the ClientNotFound
     /// and VersionNotSupported constructors must be byte-exact — kind is the
     /// PascalCase ErrorKind string, origin the camelCase `zeroCache`, and the

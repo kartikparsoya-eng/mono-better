@@ -1,20 +1,20 @@
 //! `TimeSliceTimer` must measure EXECUTION time, not wall time.
 //!
 //! TS reads `performance.now()` (wall) but runs one event loop per sync-worker
-//! PROCESS (`ZERO_NUM_SYNC_WORKERS`, 6 in the ART sandbox), so a running slice
+//! PROCESS (`ZERO_NUM_SYNC_WORKERS`, 6 in the replay sandbox), so a running slice
 //! is never preempted and its wall time IS its execution time. Rust's shard
 //! model (INVENTIONS.md I-12) runs `ZERO_SYNCER_SHARDS` `current_thread`
-//! executors as OS threads — 1,523 on a 20-core cpuset in the ART sandbox — so
+//! executors as OS threads — 1,523 on a 20-core cpuset in the replay sandbox — so
 //! wall time additionally counts OS preemption TS never experiences.
 //!
 //! That difference is not cosmetic: `MIN_ADVANCEMENT_TIME_LIMIT_MS` (50ms) is an
 //! ABSOLUTE floor, and it is what stops TS's advance budget from firing on short
-//! advances. Inflated wall time walks straight through it. Measured 2026-09-06,
-//! same image, same compressed 60m trace, ONLY `ZERO_SYNCER_SHARDS` changed:
+//! advances. Inflated wall time walks straight through it. Measured on the
+//! same image and the same compressed 60m trace, ONLY `ZERO_SYNCER_SHARDS` changed:
 //! 1500 shards/1523 threads -> 1,194 `advancement-timeout` resets per 10 min;
 //! 40 shards/63 threads -> 3. Identical work, only the preemption differed.
 //!
-//! NON-VACUOUS: revert the lap clock to `Instant::now()`/`elapsed()` and the
+//! Mutation test: revert the lap clock to `Instant::now()`/`elapsed()` and the
 //! blocked-thread assertion fails, because a sleeping thread accrues wall time.
 
 use rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer;

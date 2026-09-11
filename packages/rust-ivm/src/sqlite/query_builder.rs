@@ -330,7 +330,7 @@ fn nullable_aware_equality(
     optional: bool,
     params: &mut Vec<SqlParam>,
 ) -> String {
-    // VALUE-aware NULL guard (2026-08-12, take-bound divergence fix): a NULL
+    // VALUE-aware NULL guard (take-bound divergence fix): a NULL
     // bound value with `=` yields always-false SQL (`col = NULL`), so a Take
     // bound/At fetch silently returns EMPTY and the operator's persisted
     // bound diverges from the source — the prod take.rs:545/:702 panic class

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// An EMPTY object — valita `v.object` accepts only an object and, being
 /// strict, rejects any key in it. Rust previously ignored the ping body, so
 /// `["ping", null]`, `["ping", "x"]` and `["ping", []]` were all accepted where
-/// TS rejects them (M13 R5).
+/// TS rejects them.
 ///
 /// The `Deserialize` impl is hand-written because a derived empty struct also
 /// accepts an empty SEQUENCE (serde's struct visitor implements `visit_seq`),

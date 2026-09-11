@@ -551,7 +551,7 @@ fn partial_success_transform_hydrates_healthy_query() {
     // query. TS routes `transformError` by the query's CVR clientState
     // (`#sendQueryTransformErrorToClients` → `getAffectedClientIDs`,
     // view-syncer.ts:1728), so the sibling is poked (got-del is group-wide)
-    // but must NOT receive the error frame (frame-capture #4, 2026-09-03).
+    // but must NOT receive the error frame (seen in a frame capture).
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink2: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx2));
     engine.register_client("client2", "ws2", "cg1", &shard, None, sink2);
@@ -643,7 +643,7 @@ fn partial_success_transform_hydrates_healthy_query() {
     );
     // The client is told the query errored (`transformError`) and then, in the
     // sync poke, that the server dropped it (got-`del`) — the exact frame
-    // sequence TS emits (captured per client on the xyne ART sandbox:
+    // sequence TS emits (captured per client on the replay sandbox:
     // transformError → pokeStart → pokePart{gotQueriesPatch:[del]} → pokeEnd).
     // Before this port rust sent the transformError and no del, so the client
     // kept the query as pending/got forever.
@@ -830,7 +830,7 @@ mod common;
 /// empty map and no snapshot is ever taken, which is why the store-less tests
 /// cannot see this.
 ///
-/// NON-VACUOUS: in `hydrate_and_sync`, delete the `drop(existing_rows_owned)`
+/// Mutation test: in `hydrate_and_sync`, delete the `drop(existing_rows_owned)`
 /// after `drop(processor)` and this fails with `cow_copies == 1`.
 #[test]
 fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
@@ -977,7 +977,7 @@ fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
 /// `#catchupClients(lc, cvr, finalVersion, addQueries ids, pokers)`
 /// (view-syncer.ts:2350-2356) bounds the config-patch scan at the PRE-hydrate
 /// CVR version; bounding it at the final version made every hydrate poke carry
-/// the new query's got-`put` TWICE (every pass of the xyne ART frame capture;
+/// the new query's got-`put` TWICE (every pass of the frame capture;
 /// TS once). Needs the real store: without PG the catch-up scan is empty and
 /// the duplicate cannot appear, which is why the store-less tests never saw it.
 #[test]

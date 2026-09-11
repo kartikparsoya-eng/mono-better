@@ -1,6 +1,5 @@
 //! Port of `packages/zero-protocol/src/connect.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 use super::*;
 use base64::Engine as _;
@@ -29,13 +28,13 @@ pub struct ConnectedBody {
 // objects, not tuples — a wire-shape drift) was DEAD code and has been removed.
 
 // initConnectionBodySchema uses userPushURL/userQueryURL (capital URL)
-// valita `v.object` rejects unknown keys (M13 R3).
+// valita `v.object` rejects unknown keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InitConnectionBody {
     pub desired_queries_patch: UpQueriesPatch,
     // Every `.optional()` below is absent-or-value, never an explicit `null`
-    // (M13 R4) — valita `.optional()` does not admit null, serde's `Option`
+    // — valita `.optional()` does not admit null, serde's `Option`
     // does.
     // `clientSchemaSchema.optional()` — the VALUE is validated against the
     // ported client-schema.ts shape, not just non-null (see

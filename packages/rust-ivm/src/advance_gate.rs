@@ -475,7 +475,7 @@ mod tests {
     /// resets in a 60-minute prod-replay against TS's ~45, each one destroying
     /// every pipeline in the group and forcing a full re-hydrate.
     ///
-    /// NON-VACUOUS: restore `start.elapsed()` and the first assertion reads
+    /// Mutation test: restore `start.elapsed()` and the first assertion reads
     /// ~200ms instead of the timer's 30ms.
     #[test]
     fn the_budget_reads_the_time_slice_timer_not_wall_clock() {

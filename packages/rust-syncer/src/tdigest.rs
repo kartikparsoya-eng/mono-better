@@ -470,7 +470,7 @@ mod tests {
 
     /// TS-golden: drive the exact same `add` sequence the real
     /// `shared/src/tdigest.ts` was driven with (via tsx) and pin `to_json` +
-    /// `quantile` + `cdf` to its output. NON-VACUOUS: the golden exercises the
+    /// `quantile` + `cdf` to its output. Mutation test: the golden exercises the
     /// `#process` sort + the `integratedQ`-driven merge `limit` (a wrong
     /// `integratedQ` merges centroids that TS keeps separate → the array's length
     /// and contents change) and the `quantile`/`cdf` interpolation

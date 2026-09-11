@@ -55,7 +55,7 @@ pub struct ClientSchema {
 /// JSON) happily, so `{"clientSchema": null}` came through as `Some(Null)` and
 /// `{"clientSchema": {}}` as an object with no `tables` — both frames valita
 /// REJECTS, closing the connection where rust silently served the client with
-/// no schema (M13 corpus `wrongtype/initConnection.clientSchema/*`,
+/// no schema (frame-parity corpus `wrongtype/initConnection.clientSchema/*`,
 /// `clientschema/*`). Absent stays `None` via `#[serde(default)]`.
 ///
 /// Rust-only helper (AGENTS.md rule 5): exists only to reproduce valita's

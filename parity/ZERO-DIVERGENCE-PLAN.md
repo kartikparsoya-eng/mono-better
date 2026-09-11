@@ -785,7 +785,7 @@ Closed 2026-09-04 (each with a test proven failing-first):
 - [x] **P11-a** — DONE 2026-08-28. TS's purge path throws `ClientNotFoundError(
       'Client has been purged due to inactivity')` (cvr-store.ts:423-424); rust
       emitted `self.cvr_id` instead, and that string reaches the client verbatim
-      as the `["error",…]` frame (view_syncer.rs:1807). Fixed byte-exact +
+      as the `["error",…]` frame (view_syncer.rs:761). Fixed byte-exact +
       PG test `pg_cvr_store_load_purged_yields_exact_client_not_found_message`
       (proven failing-first).
 
@@ -906,7 +906,7 @@ pipeline-driver.ts to the view-syncer's row loops, which do
 takes a FIFO turn at ~10 ms granularity.
 
 **Rust.** There is no yield at all. `pipelines.hydrate(queries, |rc| ...)` and
-`pipelines.advance(...)` (view_syncer.rs:8768, :8919) take a **synchronous**
+`pipelines.advance(...)` (view_syncer.rs:7176, :7412) take a **synchronous**
 `FnMut(&RowChange)` callback; SQLite reads, IVM materialization and the CVR row
 processing all run to completion inline before the call returns.
 

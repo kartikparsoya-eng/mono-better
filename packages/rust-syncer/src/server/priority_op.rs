@@ -60,7 +60,7 @@ pub fn is_priority_op_running() -> bool {
 mod tests {
     use super::*;
 
-    /// Non-vacuous: the counter is observable only DURING the op, and a
+    /// Mutation test: the counter is observable only DURING the op, and a
     /// dropped (cancelled) op releases it — the RAII twin of TS `finally`.
     #[tokio::test]
     async fn priority_op_is_running_only_while_the_op_is_in_flight() {

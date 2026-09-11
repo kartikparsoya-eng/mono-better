@@ -9,7 +9,7 @@
 //!    catches in prod) — the live-instance census for planner graphs and
 //!    planner nodes returns to zero. A nonzero census is exactly the
 //!    "plan graph leaks per planAst" bug class, and the same counters are
-//!    printed by the napi teardown census in prod logs (`pgraph=`/`pnode=`),
+//!    printed by the teardown census in prod logs (`pgraph=`/`pnode=`),
 //!    so a future regression is visible in the field, not just here.
 //! 2. The unwound plan also releases its strong refs to the snapshot
 //!    connection (`Rc::strong_count` restored) — the conn-retention class

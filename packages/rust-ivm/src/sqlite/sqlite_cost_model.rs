@@ -130,7 +130,7 @@ pub fn is_typed_unwind_payload(payload: &(dyn std::any::Any + Send)) -> bool {
 /// `query-pipeline-hydrate-failed` / `closing connection with error` lines —
 /// whereas the default Rust hook wrote three raw non-JSON stderr lines per
 /// probe failure (`thread 'cg-exec-N' panicked at …`, `Box<dyn Any>`, the
-/// `RUST_BACKTRACE` note), 229 times in the 2026-09-11 60-min prod replay.
+/// `RUST_BACKTRACE` note), 229 times in a 60-minute production-trace replay.
 /// Idempotent; `main.rs` calls it at process entry, before any Engine runs.
 pub fn install_typed_unwind_panic_hook() {
     static TYPED_UNWIND_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
@@ -164,11 +164,11 @@ pub fn get_scanstatus_loops(
         // TS `db.prepare(sql)` hands better-sqlite3 the JS string WITH ITS
         // LENGTH, so an embedded NUL is not an error on the caller's side:
         // SQLite parses up to it and reports what it found — `unrecognized
-        // token: "'\uffff "` on the 2026-09-08 sandbox TS arm. Passing
+        // token: "'\uffff "` on the TS arm of a sandbox replay. Passing
         // `nByte = len` (no C string) reproduces that byte-for-byte; a
         // `CString` guard used to short-circuit with a rust-only
         // `probe SQL contains NUL byte` message that paired with nothing in
-        // the TS log (G44).
+        // the TS log (the runtime log differential).
         let rc = rusqlite::ffi::sqlite3_prepare_v2(
             db,
             sql.as_ptr() as *const c_char,
@@ -700,10 +700,10 @@ mod tests {
     /// TS `db.prepare(sql)` (sqlite-cost-model.ts:78) passes the JS string by
     /// LENGTH, so an embedded NUL reaches SQLite, which parses up to it and
     /// fails on the unterminated literal; `Database#run` (db.ts:127-135) then
-    /// appends `: ${sql}`. The 2026-09-08 sandbox TS arm logged exactly
+    /// appends `: ${sql}`. The TS arm of a sandbox replay logged exactly
     /// `unrecognized token: "'\uffff ": SELECT …`. rust used to refuse the NUL
     /// itself with `probe SQL contains NUL byte: …`, a message TS never
-    /// produces. Non-vacuous: restore the `CString` guard and this fails.
+    /// produces. Mutation test: restore the `CString` guard and this fails.
     #[test]
     fn nul_in_probe_sql_reports_sqlites_tokenizer_error_like_ts() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

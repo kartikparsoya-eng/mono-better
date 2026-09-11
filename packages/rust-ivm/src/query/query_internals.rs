@@ -68,7 +68,7 @@ mod tests {
     /// `return true` for every input, which is what made the unchecked
     /// `as_query` cast reachable with a non-`Query`.
     ///
-    /// NON-VACUOUS: restore `pub fn is_query_internals(_obj: &dyn Any) -> bool
+    /// Mutation test: restore `pub fn is_query_internals(_obj: &dyn Any) -> bool
     /// { true }` and this fails on the first assertion.
     #[test]
     fn is_query_internals_answers_false_for_a_value_without_the_tag() {

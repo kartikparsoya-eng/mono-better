@@ -4,5 +4,5 @@ use serde_json::Value;
 
 /// Port of TS `closeConnectionBodySchema = v.array(v.unknown())`
 /// (close-connection.ts:3) — the body must be an ARRAY. Rust previously ignored
-/// it (M13 R5).
+/// it.
 pub type CloseConnectionBody = Vec<Value>;

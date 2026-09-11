@@ -86,7 +86,7 @@ CONFIRMED_FOLD = {
     "ref": "combine_pushes", "unref": "combine_pushes", "hasrefs": "combine_pushes",
     "assertarecompatiblepushes": "combine_key_of + combine_pushes",
     # pipeline-driver.ts → engine/view_syncer
-    "buildprimarykeys": "client_primary_keys_from_schema (view_syncer.rs:8361)",
+    "buildprimarykeys": "client_primary_keys_from_schema (view_syncer.rs:7830)",
     "rowsetsignature": "accumulate_signature + row_signature_unit",
     # custom-queries/transform-query.ts methods → free fns (transform_query.rs)
     "transform": "transform_custom_queries", "validate": "validate_custom_queries",
@@ -95,8 +95,8 @@ CONFIRMED_FOLD = {
     # view-syncer.ts → query_covering.rs (ledger L1 misfiled-map confirmed)
     "findquerycoverageshadowhit": "query_covering.rs::QueryCoverageShadowHit",
     # view-syncer.ts private methods → restructured into the CG event loop (view_syncer.rs)
-    "runauthmaintenance": "on_auth_maintenance_tick (view_syncer.rs:1369)",
-    "scheduleauthmaintenance": "arm_auth_maintenance (view_syncer.rs:1337)",
+    "runauthmaintenance": "run_auth_maintenance (view_syncer.rs:2018)",
+    "scheduleauthmaintenance": "schedule_auth_maintenance (view_syncer.rs:1986)",
     "scheduleshutdown": "cg_event_loop shutdown deadline",
     "hasexpiredqueries": "TTL-expiry branch in the event loop",
     "processtransformedcustomqueries": "custom_queries/transform_query.rs::CustomTransformed",
@@ -114,7 +114,7 @@ CONFIRMED_FOLD = {
     "apifailedbody": "fetch.rs error-body handling",
     "legacypusherrorreason": "fetch.rs error classification",
     # pipeline-driver.ts internals → hydrate/advance public methods
-    "hydrateinternal": "IvmPipelines::hydrate (pipeline_driver.rs:625)",
+    "hydrateinternal": "IvmPipelines::hydrate (pipeline_driver.rs:958)",
     "fetch": "IvmPipelines::advance / engine fetch",
     # server/syncer.ts bootstrap — folded into main.rs, or intentionally NOT ported
     "getcustomqueryconfig": "main.rs config wiring",

@@ -1,6 +1,6 @@
 //! Port of `zero-cache/src/custom/fetch.ts` — the API-server fetch helpers:
 //! URL-pattern allowlist matching, retry backoff, and the error body preview
-//! (L9 Stage 5b consolidation out of `transform_query.rs` / `pusher.rs`).
+//!.
 
 use urlpattern::{UrlPattern, UrlPatternInit, UrlPatternMatchInput, UrlPatternOptions};
 

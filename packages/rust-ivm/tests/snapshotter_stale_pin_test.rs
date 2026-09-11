@@ -246,7 +246,7 @@ fn repin_heals_a_txn_less_connection_from_a_prior_failed_repin() {
 }
 
 /// The guard's two-strike decision core (`StalePinTracker`) — the exact
-/// state machine the napi guard runs every tick. Window ZERO makes every
+/// state machine the stale-pin guard runs every tick. Window ZERO makes every
 /// observation "a full window elapsed" so the strike logic itself is under
 /// test, not the clock.
 #[test]

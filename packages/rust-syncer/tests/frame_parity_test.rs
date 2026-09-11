@@ -1,4 +1,4 @@
-//! M13 — protocol frame differential: rust `parse_upstream` vs the real TS
+//! Protocol frame differential: rust `parse_upstream` vs the real TS
 //! `JSON.parse` + `valita.parse(upstreamSchema)`.
 //!
 //! The surrogate divergence this layer was built for — rust closed the socket

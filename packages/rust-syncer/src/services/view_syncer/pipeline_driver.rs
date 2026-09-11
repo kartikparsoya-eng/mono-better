@@ -1,9 +1,8 @@
 //! IvmPipelines — the pure-Rust IVM bridge (Stage A of the Phase 7 wiring).
 //!
 //! Port of the engine-side of `pipeline-driver.ts` (behavior) and of the
-//! `EngineState` construction/hydrate/advance logic that the removed napi
-//! cdylib carried (deleted in a5e502ad9), with its TSFN / actor-thread
-//! machinery stripped out. This struct is owned by the ViewSyncer and lives on
+//! `EngineState` construction/hydrate/advance logic the removed native bridge
+//! carried (a5e502ad9), with its thread-hop machinery stripped out. This struct is owned by the ViewSyncer and lives on
 //! its dedicated CG thread — it is intentionally NOT `Send`/`Sync` because the
 //! `rust-ivm` `Engine` holds `Rc<RefCell<..>>` sources.
 //!
@@ -39,11 +38,11 @@ use rust_ivm::snapshotter::{SharedConn, Snapshotter};
 use rust_ivm::sqlite::table_source::TableSource;
 use rust_ivm::streamer::RowChange;
 
-// ─── Input specs (mirrors napi's NapiTableSpec / NapiColumnSchema) ───────────
+// ─── Input specs (the TS `LiteTableSpec` / column shape, zero-cache db/specs.ts) ─
 
 /// Column schema for a syncable table. `type` is one of
 /// `"string" | "number" | "boolean" | "json"` (anything else is treated as
-/// `string`, matching the napi/TS mapping).
+/// `string`, matching the TS mapping).
 #[derive(Clone, Debug)]
 pub struct IvmColumnSchema {
     pub r#type: String,
@@ -134,8 +133,8 @@ pub enum AdvanceOutcome {
 
 // ─── IvmPipelines ────────────────────────────────────────────────────────────
 
-/// The engine + snapshotter + sources for a single client group, mirroring the
-/// napi `EngineState`.
+/// The engine + snapshotter + sources for a single client group — the state
+/// TS keeps on `PipelineDriver` (`#pipelines`, `#snapshotter`, `#tables`).
 ///
 /// ── FIELD ORDER IS LOAD-BEARING — DO NOT REORDER ─────────────────────────
 /// Rust drops struct fields in declaration order, and every CG teardown in
@@ -153,7 +152,7 @@ pub enum AdvanceOutcome {
 ///      that point, `Snapshot::drop` early-returns and the eventual close is
 ///      rusqlite's implicit `Drop`, which calls `sqlite3_close` and SWALLOWS
 ///      the error — a `SQLITE_BUSY` close then silently leaks the whole
-///      handle (~11.5MB page cache + fds per CG churn; ART G6).
+///      handle (~11.5MB page cache + fds per CG churn; the release leak gate).
 ///
 /// Port of TS `PipelineHydrationReason` (pipeline-driver.ts:123-125): why a
 /// pipeline was (re)hydrated, carried on every lifecycle log line.
@@ -576,8 +575,8 @@ impl IvmPipelines {
     /// when `None`, in-memory `MemorySource`s are used (test/dev mode — no
     /// snapshotter, so `advance()` is unavailable).
     ///
-    /// Port of `EngineState`/`init` as the removed napi cdylib carried it
-    /// (deleted in a5e502ad9); TS twin is `pipeline-driver.ts` `init`.
+    /// Port of TS `PipelineDriver.init` (pipeline-driver.ts:325), via the
+    /// removed native bridge's `EngineState::init` (a5e502ad9).
     pub fn init(
         &mut self,
         tables: Vec<IvmTableSpec>,
@@ -605,7 +604,7 @@ impl IvmPipelines {
 
         // A per-table connection fallback would serve rows outside the pinned
         // snapshot and mix DB versions within one hydrate, so propagate every
-        // snapshotter failure (matches napi/TS).
+        // snapshotter failure, as TS `init` does (pipeline-driver.ts:325).
         let snapshot_conn = if let Some(path) = db_path {
             if self.snapshotter.is_none() {
                 let mut snap = Snapshotter::new(path, app_id, None);
@@ -730,7 +729,7 @@ impl IvmPipelines {
         // Parity with TS `buildPipeline` → `planQuery(ast, costModel)`: give the
         // engine the replica connection so it plans correlated-subquery `flip`s
         // before building. Without this, exists-in-OR is built non-flipped and
-        // over-emits WHERE-EXISTS backing rows to the CVR (ART G8). Only the
+        // over-emits WHERE-EXISTS backing rows to the CVR (the release-gate data differential). Only the
         // replica-backed (TableSource) path gets a cost model; MemorySource
         // fallbacks (some tests) stay unplanned. Gated on `enable_query_planner`
         // exactly like TS (`#costModels = enablePlanner ? new WeakMap() :
@@ -744,8 +743,8 @@ impl IvmPipelines {
             // (pipeline-driver.ts:436): the scanstatus model probes with the
             // visible zql columns of every syncable table. Without specs the
             // engine degrades (loudly) to the filter-blind COUNT model —
-            // the exact wiring gap behind the 2026-08-29 prod 144s
-            // flipped-join tickets hydrate.
+            // the exact wiring gap behind the 144 s
+            // flipped-join `tickets` hydrate incident.
             let specs: HashMap<String, HashMap<String, ColumnType>> = self
                 .syncable_tables
                 .iter()
@@ -955,7 +954,8 @@ impl IvmPipelines {
     /// the clock each query's `hydration_time_ms` is measured on (:703).
     ///
     /// Row-set-signature maintenance is intentionally NOT done here — it is
-    /// caller-driven (Stage B / view-syncer), matching the napi path.
+    /// caller-driven (the view-syncer), as TS `#trackRowSetSignatures` is
+    /// (pipeline-driver.ts:884-899).
     pub fn hydrate<Q: Clone + Into<HydrateQuery>>(
         &mut self,
         queries: &[Q],
@@ -1019,7 +1019,7 @@ impl IvmPipelines {
 
         // A hydrate panic (e.g. a source-drift assert) must roll back the
         // partially-wired source connections before re-throwing, so a follow-up
-        // rehydrate builds a clean graph — matching napi `HydrateAndSyncTask`.
+        // rehydrate builds a clean graph.
         // The build (phase 1) is guarded here; every later pull is guarded by
         // `HydrateChanges::next`.
         let eng = self.engine.as_mut().expect("checked above");
@@ -1634,7 +1634,8 @@ fn zql_column_type(cs: &ColumnSchema) -> ColumnType {
     }
 }
 
-/// Extract a message from a caught panic payload. Port of napi `panic_message`.
+/// Extract a message from a caught panic payload — the twin of reading
+/// `e.message` in a TS `catch`. Rust-only helper (AGENTS.md rule 5).
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     payload
         .downcast_ref::<&str>()
@@ -1654,7 +1655,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// `sqlite_cost_model::SqliteError` payload there); every other payload (an
 /// `assert`, a Take/Cap invariant) is a plain `Error`. TS's `String(e)` in
 /// `ClientHandler.fail` prints that name — `SqliteError: unrecognized token…`
-/// on the 2026-09-08 sandbox TS arm — so the name has to travel with the
+/// on the TS arm of a sandbox replay — so the name has to travel with the
 /// message.
 fn hydrate_js_error(payload: &Box<dyn std::any::Any + Send>) -> JsError {
     match payload.downcast_ref::<rust_ivm::sqlite::sqlite_cost_model::SqliteError>() {
@@ -1676,8 +1677,8 @@ struct QueryLogInfo<'a> {
 ///
 /// TS takes `message: string`; rust takes the closed set instead, because
 /// `tracing` interns the message at the CALLSITE — a `"{message}"` template
-/// would put a placeholder on the wire where TS puts the text, and the M14 log
-/// differential joins rust lines to TS lines by exactly that text. The values
+/// would put a placeholder on the wire where TS puts the text, and
+/// `parity/log_differential.py` joins rust lines to TS lines by exactly that text. The values
 /// are TS's verbatim (AGENTS.md rule 5: a labeled adaptation that preserves
 /// what an operator sees).
 enum QueryFailureMessage {
@@ -1740,8 +1741,9 @@ fn log_query_failure(
     }
 }
 
-/// If a caught advance panic is a `ScalarResetError`, return its message. Port
-/// of napi `scalar_reset_message` — maps to an in-place `scalar-subquery` reset.
+/// If a caught advance panic is a `ScalarResetError`, return its message — the
+/// twin of TS's `instanceof ResetPipelinesSignal` check; maps to an in-place
+/// `scalar-subquery` reset. Rust-only helper (AGENTS.md rule 5).
 fn scalar_reset_message(payload: &Box<dyn std::any::Any + Send>) -> Option<String> {
     payload
         .downcast_ref::<ScalarResetError>()
@@ -1751,8 +1753,8 @@ fn scalar_reset_message(payload: &Box<dyn std::any::Any + Send>) -> Option<Strin
 // ─── TS AST → Rust AST conversion ────────────────────────────────────────────
 // The TS AST JSON uses `{ type: "..." }` internal tagging, camelCase field
 // names, `[string, string]` order-by tuples, and `correlation: { parentField,
-// childField }`. Ported verbatim from the removed napi cdylib (deleted in
-// a5e502ad9) so the syncer path deserializes transformed ASTs identically to
+// childField }`. Carried over verbatim from the removed native bridge
+// (a5e502ad9) so the syncer path deserializes transformed ASTs identically to
 // the parity-tested path it replaced.
 
 #[derive(serde::Deserialize, Clone)]
@@ -1942,8 +1944,8 @@ pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value 
             }
         }
         serde_json::Value::String(s) => rust_ivm::ivm::data::Value::Str(s.into()),
-        // Arrays/objects (e.g. an `IN [ids]` list literal) -> JSON string,
-        // matching the napi path (falling through to Null silently drops every
+        // Arrays/objects (e.g. an `IN [ids]` list literal) -> JSON string
+        // (falling through to Null silently drops every
         // row of any IN / NOT IN query).
         other => rust_ivm::ivm::data::Value::Json(other.to_string().into()),
     }
@@ -1994,10 +1996,10 @@ mod tests {
     ///     flow, and logging it at ERROR would page on normal operation. Rust's
     ///     twin in a caught payload is `ScalarResetError`.
     ///
-    /// NON-VACUOUS: drop the `scalar_reset_message` guard from
+    /// Mutation test: drop the `scalar_reset_message` guard from
     /// `log_query_failure` and the reset case logs (third assertion fails);
     /// drop the identity fields and the first fails; change either message
-    /// string and the M14 log differential unpairs it from its TS twin.
+    /// string and `parity/log_differential.py` unpairs it from its TS twin.
     ///
     /// Safe as a lib test — these two ERROR callsites are unique to
     /// `log_query_failure`, so the process-global callsite-interest cache
@@ -2121,7 +2123,7 @@ mod tests {
         assert_eq!(scalar_reset_message(&strpanic), None);
     }
 
-    /// Port of napi `panic_message`: extracts `&str` and `String` panic
+    /// `panic_message` extracts `&str` and `String` panic
     /// payloads verbatim; any other payload type falls back to the fixed
     /// "engine job panicked" string (the message the advance error embeds).
     #[test]
@@ -2264,14 +2266,14 @@ mod tests {
     // lib tests installing their own subscribers would poison it (the 2-field
     // `-start` callsite got cached disabled by an unrelated test).
 
-    /// Non-vacuous: the `VENDED` per-table debug log (port of TS `#addQueryImpl`
+    /// Mutation test: the `VENDED` per-table debug log (port of TS `#addQueryImpl`
     /// pipeline-driver.ts:704-721) must, for a slow query, emit a `<table>
     /// VENDED` line per table AND a `Total rows considered: <sum>` line whose
     /// value is the grand total across every table+SQL. The synthetic counts
     /// below total 204 (200 + 4), so a dropped table, a missing line, or a
     /// wrong sum (e.g. per-table instead of grand-total) all fail distinctly.
     ///
-    /// F-15: TS builds the VENDED table list INSIDE the flag check
+    /// TS builds the VENDED table list INSIDE the flag check
     /// (`if (runtimeDebugFlags.trackRowCountsVended)` then
     /// `for (const tableName of this.#tables.keys())`, pipeline-driver.ts:
     /// 704-710), so a production process with the flag off does no work for
@@ -2284,7 +2286,7 @@ mod tests {
     /// path: flag off => no list and no VENDED line; flag on => the full
     /// sorted list and the line still fires.
     ///
-    /// NON-VACUOUS: drop the early return from `vended_table_names` and the
+    /// Mutation test: drop the early return from `vended_table_names` and the
     /// flag-off assertions fail (the list is populated, and the line appears);
     /// make it return `Vec::new()` unconditionally and the flag-on assertions
     /// fail.

@@ -26,17 +26,17 @@
 //! `unrecognized token: "'￿ "` errors — the SAME queries, surfaced as error
 //! frames, with the groups still serving afterwards.
 //!
-//! NON-VACUOUS: restore `std::panic::resume_unwind(payload)` in
+//! Mutation test: restore `std::panic::resume_unwind(payload)` in
 //! `pipeline_driver::hydrate` / `HydrateChanges::next` and both tests below
 //! abort with that panic instead of reporting an `Err`.
 //!
 //! LOG SURFACE (third test): the carrier unwind is caught, but the DEFAULT
 //! panic hook still reported it — three raw non-JSON stderr lines per probe
 //! failure (`thread 'cg-exec-N' panicked at …/sqlite_cost_model.rs:632`,
-//! `Box<dyn Any>`, the `RUST_BACKTRACE` note), 229 times in the 2026-09-11
-//! 60-min replay, while the TS arm's caught throw printed nothing beyond its
+//! `Box<dyn Any>`, the `RUST_BACKTRACE` note), 229 times in a 60-minute
+//! production-trace replay, while the TS arm's caught throw printed nothing beyond its
 //! JSON log lines. `install_typed_unwind_panic_hook` (INVENTIONS.md I-22)
-//! silences exactly the two carrier payloads. NON-VACUOUS: make that installer a
+//! silences exactly the two carrier payloads. Mutation test: make that installer a
 //! no-op and the child process's stderr carries `sqlite_cost_model.rs` again.
 
 use std::cell::RefCell;

@@ -154,7 +154,7 @@ impl QueryCoveringIndex {
     /// normalization is a full recursive rebuild — flatten the where-clause,
     /// sort conditions, sort and recursively normalize `related`. So the memo
     /// moves to the CALL SITE: the caller normalizes once and hands the result
-    /// to both. A process-global cache instead would repeat F-16's mistake —
+    /// to both. A process-global cache instead would repeat the row-key memo's mistake —
     /// TS's WeakMap is per-worker-process and lock-free, so a mutex-guarded map
     /// here would trade CPU for contention across ~1000 CG threads. The pass
     /// is default-on (`enableQueryCovering`) and LOG-ONLY, so it was paying

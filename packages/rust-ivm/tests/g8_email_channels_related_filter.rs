@@ -7,7 +7,7 @@
 //! row (passes the root filter) but must be excluded by the related('channel')
 //! subquery's `type IN [...]` WHERE. This pins that the related-subquery (Join)
 //! child WHERE filter (`type IN [array]`) IS enforced. rust evaluates this
-//! correctly; the ART G8 diff pointed here but was a transient, not an eval bug.
+//! correctly; the release-gate data diff pointed here but was a transient, not an eval bug.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

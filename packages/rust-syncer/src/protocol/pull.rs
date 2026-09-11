@@ -1,7 +1,7 @@
 //! Port of `packages/zero-protocol/src/pull.ts` — the upstream pull request
 //! body. Rust previously kept the `pull` body as a raw `Value` and validated
 //! NOTHING, so every wrong type, missing field and null field sailed through
-//! where TS rejected it against `pullRequestBodySchema` (M13 R2).
+//! where TS rejected it against `pullRequestBodySchema`.
 
 use serde::{Deserialize, Serialize};
 

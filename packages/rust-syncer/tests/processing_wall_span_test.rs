@@ -12,11 +12,11 @@
 //! `fetch_started.elapsed()` — the initial-fetch loop ALONE. So the identical
 //! log line meant a different thing on each engine, and the one line built to
 //! expose post-fetch cost hid exactly the CVR flush, catch-up and poke it was
-//! supposed to show. On the 2026-09-05 A/B that read as rust `wall == process`
+//! supposed to show. On an A/B replay that read as rust `wall == process`
 //! against TS `wall >> process`, which would have been read as "rust never
 //! yields" if taken at face value.
 //!
-//! NON-VACUOUS: the sink below stalls the `pokeEnd` frame, which is inside TS's
+//! Mutation test: the sink below stalls the `pokeEnd` frame, which is inside TS's
 //! span and outside the old rust one. Move the log back into `hydrate_and_sync`
 //! and the reported `wall` drops to the fetch time, failing the assertion.
 

@@ -234,7 +234,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 mod value_parity_tests {
     use super::*;
 
-    /// F-07: a relationship NAME must be allocated once and shared, not copied
+    /// A relationship NAME must be allocated once and shared, not copied
     /// into the map and the order vec separately, and not re-allocated when the
     /// node is cloned.
     ///
@@ -248,7 +248,7 @@ mod value_parity_tests {
     /// parent node) re-allocated every name again — 4-6 allocations per name
     /// per row per join level.
     ///
-    /// NON-VACUOUS: revert either field to `String` and both assertions fail —
+    /// Mutation test: revert either field to `String` and both assertions fail —
     /// `Rc::ptr_eq` is the observable that a `String` key cannot satisfy.
     #[test]
     fn a_relationship_name_is_allocated_once_and_shared() {
@@ -320,7 +320,7 @@ mod value_parity_tests {
         assert_eq!(js_stringify_value(&Value::F64(-0.0)), "0");
     }
 
-    /// NON-VACUOUS (2026-09-05): an AST literal beyond ±(2^53-1) must be
+    /// Mutation test: an AST literal beyond ±(2^53-1) must be
     /// ROUNDED like `JSON.parse`, not rejected.
     ///
     /// TS parses inbound protocol messages with a plain `JSON.parse`
@@ -330,8 +330,8 @@ mod value_parity_tests {
     /// query runs. Rust's `Deserialize` rejected it, so `parse_ts_ast` failed
     /// and the whole client group went down with
     /// `Internal: AST parse error for qid=...: integer 9007199254740993 is
-    /// outside of supported bounds` (observed once in the 2026-09-05 60-minute
-    /// prod-replay). The bounds check has a real TS twin only in the opposite
+    /// outside of supported bounds` (observed in a 60-minute production-trace
+    /// replay). The bounds check has a real TS twin only in the opposite
     /// direction, reading a stored SQLite integer
     /// (`table_source.rs` <- `fromSQLiteType`), where it is kept.
     ///

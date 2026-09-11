@@ -4,8 +4,8 @@
 //! of the view-syncer's TimeSliceTimer, which the engine reads through the
 //! advance gate's clock.
 //!
-//! NON-VACUOUS: the gate clock here is a constant, so the TS-parity value is
-//! exactly 0.0 for every change; the pre-2026-09-09 site recorded
+//! Mutation test: the gate clock here is a constant, so the TS-parity value is
+//! exactly 0.0 for every change; an earlier site recorded
 //! `Instant::elapsed()` wall-clock, which is never exactly 0.0.
 //!
 //! Run: cargo test --test ivm_advance_time_metric_test

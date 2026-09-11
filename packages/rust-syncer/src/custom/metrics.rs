@@ -1,6 +1,5 @@
 //! Port of `zero-cache/src/custom/metrics.ts` — the query-API request
-//! instruments (`zero.server.api.*`) and their recorders (L9 Stage 5b move
-//! out of the process metric registry).
+//! instruments (`zero.server.api.*`) and their recorders.
 
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram as OtelHistogram, UpDownCounter};
@@ -192,8 +191,8 @@ mod tests {
     }
 
     /// TS `apiRequestMetricAttrs` (custom/fetch.ts:516-526) +
-    /// `apiResponseErrorMetricAttrs` (:528-547). NON-VACUOUS: until 2026-09-09
-    /// request attrs were `{operation, result}` only and `request_duration`
+    /// `apiResponseErrorMetricAttrs` (:528-547). Mutation test: an earlier
+    /// version's request attrs were `{operation, result}` only and `request_duration`
     /// carried `{operation}` alone.
     #[test]
     fn api_request_attrs_carry_attempt_count_status_class_and_error_kind() {

@@ -1,7 +1,8 @@
-//! F-26: the PK strings `Cap` copies on the per-row removal path must be
+//! The PK strings `Cap` copies on the per-row removal path must be
 //! SHARED (`Rc<str>` refcount bumps), because TS shares them by reference.
 //!
-//! Same shape as F-05 and F-07: a JS array or Set of strings copies POINTERS,
+//! Same shape as the table-map and relationship-name sharing: a JS array or
+//! Set of strings copies POINTERS,
 //! so TS pays nothing per element, while the Rust `Vec<String>` equivalent
 //! deep-cloned every element. TS's removal path does
 //! `const pks = [...capState.pks]` (cap.ts:210), `new Set(pks)` (:216) and
@@ -10,13 +11,13 @@
 //! `pks.clone()` again: ~3N `String` allocations per removed row on every
 //! capped query, scaling with the limit.
 //!
-//! `Rc::ptr_eq` is the observable a `String` cannot satisfy, so this is
-//! NON-VACUOUS: revert `CapState.pks` to `Vec<String>` and the
+//! `Rc::ptr_eq` is the observable a `String` cannot satisfy, so this is a
+//! mutation test: revert `CapState.pks` to `Vec<String>` and the
 //! pointer-identity assertions cannot compile. Behaviour is unchanged by
 //! design — ordering and membership stay pinned by the existing `cap` suite,
 //! which must remain green alongside this.
 //!
-//! F-30 (the `Streamer` frame path) is NOT tested here: unlike `CapState`, the
+//! The `Streamer` frame path is NOT tested here: unlike `CapState`, the
 //! path has no TS twin at all — TS's `#streamNodes` recurses with the resolved
 //! `childSchema` and never builds a path (pipeline-driver.ts:1385) — so the
 //! invariant is that the path RESOLVES to that schema, which is pinned next to

@@ -3,7 +3,7 @@
 //!
 //! ## What bug this catches
 //!
-//! Sandbox incident (2026-08-22, rust image `rust-cvr-v1.0.0-478b00a`): the
+//! Sandbox incident (rust image `rust-cvr-v1.0.0-478b00a`): the
 //! client crash-looped on every poke with
 //! `TypeError: Expected string, number or boolean. Got undefined` thrown from
 //! `toPrimaryKeyString` (packages/zero-client/src/client/keys.ts). That error

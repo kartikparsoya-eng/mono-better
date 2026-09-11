@@ -95,4 +95,4 @@ pub fn make_edit_change(node: Node, old_node: Node) -> Change {
 }
 
 // `SourceChange` + `makeSourceChange*` live in TS `ivm/source.ts`, so their
-// Rust twins live in `ivm/source.rs` (moved 2026-08-31 for 1:1 file parity).
+// Rust twins live in `ivm/source.rs` (1:1 file parity, bc697a486).

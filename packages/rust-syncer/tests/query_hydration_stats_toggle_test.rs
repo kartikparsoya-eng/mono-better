@@ -7,7 +7,7 @@
 //! co-located test could race parallel tests. A dedicated binary gets a clean
 //! process.
 //!
-//! NON-VACUOUS: with `query_hydration_stats = true` the flag turns ON; reverting
+//! Mutation test: with `query_hydration_stats = true` the flag turns ON; reverting
 //! `apply_runtime_debug_flags` to a no-op leaves it OFF and the assertion fails.
 
 use rust_ivm::builder::debug_delegate::runtime_debug_flags;

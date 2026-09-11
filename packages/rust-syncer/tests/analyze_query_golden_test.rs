@@ -12,7 +12,7 @@
 //! Requires `node`/`npx tsx` + an installed workspace (node_modules). When tsx
 //! cannot be invoked (a minimal CI without `pnpm install`), the test SKIPS with
 //! a clear message rather than failing — mirroring the PG-gated tests. When it
-//! DOES run it is non-vacuous: a divergence in the Rust port (a different SQL
+//! DOES run it is mutation test: a divergence in the Rust port (a different SQL
 //! string, a missing row-version column, a wrong row count) fails the
 //! `assert_eq!` on the normalized results.
 

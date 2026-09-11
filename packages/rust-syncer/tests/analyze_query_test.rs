@@ -5,7 +5,7 @@
 //! drive `analyze_query` — the port of TS `analyzeQuery` (analyze.ts) that the
 //! `analyze-query` inspector op calls on a blocking thread.
 //!
-//! NON-VACUOUS (A1, applyPermissions): the SAME 3-row query returns 0 rows under
+//! Mutation test (applyPermissions): the SAME 3-row query returns 0 rows under
 //! a deny-all permissions config and all 3 under ANYONE_CAN. Reverting the
 //! read-permission transform in `run_ast` (dropping `transform_and_hash_query`)
 //! makes the deny-all case return 3 rows and the assertion fails.
@@ -146,10 +146,10 @@ fn analyze_applies_read_permissions() {
     cleanup(&path);
 }
 
-/// A4: the requesting connection's decoded JWT claims (`authData`) bind the
-/// permission rules' static parameters. NON-VACUOUS: a rule `name = authData.name`
+/// The requesting connection's decoded JWT claims (`authData`) bind the
+/// permission rules' static parameters. Mutation test: a rule `name = authData.name`
 /// returns only the matching row when auth is present, and 0 rows (+ the no-auth
-/// warning) when auth is absent. If A4's auth threading is reverted (auth forced
+/// warning) when auth is absent. If the auth threading is reverted (auth forced
 /// to `None`), the authed case returns 0 instead of 1 and the assertion fails.
 #[test]
 fn analyze_binds_auth_data_into_permission_rules() {
@@ -214,11 +214,11 @@ fn analyze_binds_auth_data_into_permission_rules() {
     cleanup(&path);
 }
 
-/// A5: after analyze, `sqlitePlans` carries a plan for EVERY vended SQL in
+/// After analyze, `sqlitePlans` carries a plan for EVERY vended SQL in
 /// `readRowCountsByQuery` — the explainQueries fallback (analyze.ts:112-119)
 /// fills any query SQLite prepared but did not populate a scanstatus EXPLAIN
 /// for. This is the TS post-condition: no vended query is left without a plan.
-/// NON-VACUOUS on builds without SQLITE_ENABLE_STMT_SCANSTATUS (where run_ast
+/// Mutation test on builds without SQLITE_ENABLE_STMT_SCANSTATUS (where run_ast
 /// captures no plans and the fallback is the ONLY source): reverting the
 /// fallback leaves sqlitePlans empty while readRowCountsByQuery is non-empty.
 #[test]
@@ -259,9 +259,9 @@ fn analyze_fills_sqlite_plans_for_every_vended_query() {
     cleanup(&path);
 }
 
-/// B6: when permissions are applied, `afterPermissions` renders the transformed
+/// When permissions are applied, `afterPermissions` renders the transformed
 /// query back to ZQL (`ast.table + astToZQL(ast)`); with no permissions it is
-/// absent. NON-VACUOUS: reverting the afterPermissions wiring in run_ast leaves
+/// absent. Mutation test: reverting the afterPermissions wiring in run_ast leaves
 /// the field `None` even under applyPermissions and the is_some assertion fails.
 #[test]
 fn analyze_populates_after_permissions() {
@@ -352,10 +352,10 @@ fn exists_ast() -> String {
     .to_string()
 }
 
-/// B7: with `joinPlans` enabled, `join_plans` carries the planner's decision
+/// With `joinPlans` enabled, `join_plans` carries the planner's decision
 /// trace (attempt-start / plan-complete / best-plan-selected / node-cost) for a
 /// query with a flippable join; with `joinPlans` disabled it is absent.
-/// NON-VACUOUS: reverting the planner instrumentation (or the run_ast wiring)
+/// Mutation test: reverting the planner instrumentation (or the run_ast wiring)
 /// leaves `join_plans` empty/None and the assertions fail.
 #[test]
 fn analyze_join_plans_emits_planner_events() {

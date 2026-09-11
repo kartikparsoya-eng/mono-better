@@ -674,7 +674,7 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
 /// must fail with `ClientNotFound` carrying the BYTE-EXACT TS message
 /// (`'Client has been purged due to inactivity'`, cvr-store.ts:423-424). The
 /// message reaches the client verbatim as the `["error",…]` frame that drives it
-/// to wipe local state and start a fresh client group. Non-vacuous: reverting the
+/// to wipe local state and start a fresh client group. Mutation test: reverting the
 /// message to `self.cvr_id` (or the retry-path wording) fails the exact-match.
 #[test]
 fn pg_cvr_store_load_purged_yields_exact_client_not_found_message() {
@@ -1355,10 +1355,10 @@ fn pg_advance_lmid_change_with_no_queries() {
 /// `must(this.#pipelines.currentPermissions()).permissions ?? {tables: {}}`
 /// into `transformAndHashQuery`, and `transformQueryInternal` deny-by-defaults
 /// any table without `row.select` rules. Rust previously passed the AST
-/// through UNTRANSFORMED (served every row) — caught by ART G8 (#158 rider:
+/// through UNTRANSFORMED (served every row) — caught by the release-gate data differential (b4754f12d:
 /// TS returned 0 `channels` rows on a null permissions doc; rust served all).
 ///
-/// NON-VACUOUS: written before the fix — it FAILS on the passthrough branch
+/// Mutation test: written before the fix — it FAILS on the passthrough branch
 /// ("secret row" reaches the wire) and passes once `config_and_hydrate`
 /// substitutes the empty config. The ANYONE_CAN control below guards the
 /// other direction (a permissive config must still serve rows).
@@ -1559,7 +1559,7 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
 /// ("01"-based) version — the client's cookie never reaches the never-persisted
 /// "02". The PG stored version must also stay at "01".
 ///
-/// NON-VACUOUS: revert the sync_engine no-op fallback (adopt the bumped `cfg_cvr`
+/// Mutation test: revert the sync_engine no-op fallback (adopt the bumped `cfg_cvr`
 /// unconditionally) and the second-cycle `pokeEnd` carries an "02"-based cookie —
 /// a version the store never wrote — failing the `no poke past the stored version`
 /// assertion.

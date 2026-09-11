@@ -1,4 +1,4 @@
-//! Non-vacuous test for the `VENDED` per-query vended-row counting — the
+//! Mutation-tested guard for the `VENDED` per-query vended-row counting — the
 //! engine half of the port of TS `PipelineDriver.#addQueryImpl`'s
 //! `runtimeDebugFlags.trackRowsVended` path (pipeline-driver.ts:616) +
 //! `zqlite/table-source.ts` `#fetch` `debug?.rowVended` (table-source.ts:398).
@@ -14,7 +14,7 @@
 //! process-global `AtomicBool`: a lib/co-located test toggling it could race
 //! parallel tests. A dedicated binary gets a clean process.
 //!
-//! NON-VACUOUS: the source is seeded with exactly 3 rows and a full scan, so a
+//! Mutation test: the source is seeded with exactly 3 rows and a full scan, so a
 //! reverted wiring fails distinctly — dropping the engine's per-query `Debug`
 //! (delegate `debug: None`) yields `None` (not `Some`), and dropping the
 //! `debug?.rowVended` call in `#fetch` yields a count of 0 (not 3).
@@ -129,7 +129,7 @@ fn vended_row_counts_track_rows_scanned_only_when_flag_on() {
 /// an explicit delegate (the port of TS `runAst`'s `host.debug = new Debug()`),
 /// a normal `add_queries_streaming` hydrate must populate that SAME delegate with
 /// the vended-row counts (during hydrate) AND the nvisit + plans (on fetch drop),
-/// so `run_ast` can read all three back off it. Non-vacuous: reverting the
+/// so `run_ast` can read all three back off it. Mutation test: reverting the
 /// `analyze_debug` precedence in the engine build leaves the caller's delegate
 /// empty and the vended assertion fails.
 #[test]
@@ -185,7 +185,7 @@ fn set_analyze_debug_populates_the_callers_delegate() {
     }
 }
 
-/// Non-vacuous (when the linked SQLite has SQLITE_ENABLE_STMT_SCANSTATUS): a
+/// Mutation test (when the linked SQLite has SQLITE_ENABLE_STMT_SCANSTATUS): a
 /// `TableSource` fetch carrying a `Debug` must, on drop, record NVISIT (rows
 /// visited) + EXPLAIN via `record_nvisit`/`record_explain` — the port of TS
 /// `#fetch`'s `finally` scanstatus block (zqlite/table-source.ts:343-372) that

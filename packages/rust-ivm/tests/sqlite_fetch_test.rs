@@ -526,7 +526,7 @@ fn test_sqlite_row_set_signature() {
         ast,
     }]);
 
-    // F-22 tightens this from `is_some() && != 0`. The signature is a SET
+    // This tightens the assertion from `is_some() && != 0`. The signature is a SET
     // signature: TS's `#trackRowSetSignatures` XORs one unit per non-EDIT
     // change (pipeline-driver.ts:884-899). `!= 0` is the assertion shape that
     // let the FxHasher-vs-h64 divergence ship — it passes for any non-zero

@@ -4,7 +4,7 @@
 //! binary that links the crate, so this integration test observes the same
 //! allocator the production binary runs on.
 //!
-//! Non-vacuous: with the `#[global_allocator]` line removed, Rust allocations
+//! Mutation test: with the `#[global_allocator]` line removed, Rust allocations
 //! come from glibc / the system allocator, `mi_is_in_heap_region` is false for
 //! both sizes, and the test fails (proven on revert, see the I-13 commit).
 
@@ -87,7 +87,7 @@ fn lock_sqlite_test() -> std::sync::MutexGuard<'static, ()> {
 /// SQLite is C and never sees Rust's global allocator; I-13 also installs
 /// mimalloc as SQLite's `sqlite3_mem_methods`. This test runs in its own
 /// process (integration test binary) so the hook precedes SQLite's
-/// initialization exactly as in `main`. Non-vacuous: with the hook a no-op,
+/// initialization exactly as in `main`. Mutation test: with the hook a no-op,
 /// `sqlite3_malloc` returns a glibc/system pointer and the assertion fails.
 #[test]
 fn sqlite_allocations_come_from_mimalloc_after_the_config_hook() {
@@ -118,11 +118,11 @@ fn sqlite_allocations_come_from_mimalloc_after_the_config_hook() {
 /// deps/defines.gypi: `SQLITE_DEFAULT_MEMSTATUS=0`): memory statistics OFF, so
 /// `sqlite3Malloc`/`sqlite3_free` never take SQLite's global `mem0.mutex`.
 ///
-/// Non-vacuous: with memstatus on (the pre-2026-09-07 rust build), SQLite keeps
+/// Mutation test: with memstatus on (the earlier rust build), SQLite keeps
 /// `SQLITE_STATUS_MEMORY_USED` current/highwater counters and this reports the
 /// live bytes of the connection + the 1 MiB block below (> 0) — under a 110-
-/// connection ART burst that mutex was 30 % of the process's inclusive CPU
-/// (`pthread_mutex_lock` under `sqlite3Prepare`, perf 2026-09-07) and the futex
+/// connection replay burst that mutex was 30 % of the process's inclusive CPU
+/// (`pthread_mutex_lock` under `sqlite3Prepare`, per `perf`) and the futex
 /// storm behind rust's 110-vs-230 capacity knee. With memstatus off the
 /// counters are never maintained and both stay 0.
 #[test]

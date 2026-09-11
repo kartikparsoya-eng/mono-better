@@ -1,6 +1,5 @@
 //! Port of `packages/zero-protocol/src/up.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -148,7 +147,7 @@ pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {
 pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error> {
     // TS `v.tuple([v.literal(...), bodySchema])` pins the frame to EXACTLY two
     // elements — a 3-element array fails the tuple, it is not truncated. Rust
-    // checked only `< 2` and ignored the extras (M13 R5).
+    // checked only `< 2` and ignored the extras.
     if arr.len() != 2 {
         return Err(serde::de::Error::custom(
             "message must be a tuple [type, body]",
@@ -174,7 +173,7 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
         "ping" => {
             // TS `pingBodySchema = v.object({})` (ping.ts:3) — the body must be
             // an object, and valita rejects any key in it. Rust ignored the
-            // ping body entirely (M13 R5).
+            // ping body entirely.
             serde_json::from_value::<PingBody>(body.clone())?;
             Upstream::Ping
         }
@@ -187,7 +186,7 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
         "pull" => {
             // TS validates the body against `pullRequestBodySchema`
             // (pull.ts:5). Rust kept the raw `Value` and validated NOTHING, so
-            // wrong types, missing fields and null fields all passed (M13 R2).
+            // wrong types, missing fields and null fields all passed.
             // Keep the raw Value afterwards: the handler forwards it verbatim.
             serde_json::from_value::<PullRequestBody>(body.clone())?;
             Upstream::Pull(body.clone())
@@ -199,7 +198,7 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
         "closeConnection" => {
             // TS `closeConnectionBodySchema = v.array(v.unknown())`
             // (close-connection.ts:3) — the body must be an ARRAY. Rust ignored
-            // it (M13 R5).
+            // it.
             serde_json::from_value::<CloseConnectionBody>(body.clone())?;
             Upstream::CloseConnection
         }

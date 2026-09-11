@@ -164,7 +164,7 @@ impl Database {
 /// different pattern: the `Database` provides methods that prepare and
 /// execute within a single borrow scope.
 /// Port of TS `Statement` (zqlite/src/db.ts). STATUS: mirrored API surface,
-/// NOT the production query path (2026-08-29, L2 enrichment commit): the hot
+/// NOT the production query path (f0518d063): the hot
 /// fetch path goes through `table_source.rs`'s cached-prepared streaming
 /// (`stream_query`) — an invention-class replacement — because this wrapper
 /// re-prepares per call (TS's better-sqlite3 caches natively). Wire ONLY

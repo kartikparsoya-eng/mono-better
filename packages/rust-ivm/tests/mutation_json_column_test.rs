@@ -3,8 +3,8 @@
 //! text. TS re-parses it to an OBJECT on read (`fromSQLiteTypes` →
 //! `case 'json': JSON.parse(v)`), and the client-handler's `mutationRowSchema`
 //! REQUIRES `result` to be an object. If rust-ivm emits the column as a JSON
-//! STRING (`Value::Str`) instead of a parsed object (`Value::Json`), the napi
-//! boundary serializes it as a JSON string and TS `v.parse(mutationRowSchema)`
+//! STRING (`Value::Str`) instead of a parsed object (`Value::Json`), the
+//! driver serializes it as a JSON string and TS `v.parse(mutationRowSchema)`
 //! throws a fatal `ProtocolError` that tears down the WebSocket connection —
 //! even for a lawful app-level mutation error.
 //!
@@ -91,13 +91,13 @@ fn mutations_result_json_column_is_parsed_object_on_fetch() {
 
     match &result {
         Value::Json(j) => {
-            // Value::Json carries the raw JSON text; the napi boundary re-parses
+            // Value::Json carries the raw JSON text; the driver re-parses
             // it into a nested object. Confirm it is the object we stored.
             assert_eq!(j.as_ref(), RESULT_JSON);
         }
         Value::Str(_) => panic!(
             "BUG 6: `result` json column emitted as Value::Str (JSON string) — \
-             napi would serialize it as a JSON string, breaking mutationRowSchema \
+             the driver would serialize it as a JSON string, breaking mutationRowSchema \
              and fatally tearing down the connection. Expected Value::Json."
         ),
         other => panic!("unexpected value for `result`: {other:?}"),

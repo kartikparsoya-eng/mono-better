@@ -57,7 +57,7 @@ impl std::io::Write for BufGuard {
     }
 }
 
-/// Non-vacuous: a real in-memory hydrate must emit the per-query hydrate
+/// Mutation test: a real in-memory hydrate must emit the per-query hydrate
 /// lifecycle log. Reverting the `Self::log_query_pipeline_lifecycle(...)` calls
 /// in `hydrate` (or renaming an event) makes the captured buffer empty and this
 /// fails. (Proven: neutering the log fn body → "lifecycle message emitted;
@@ -115,7 +115,7 @@ fn hydrate_emits_query_pipeline_lifecycle_log() {
     assert!(logged.contains("q1"), "query hash present; got: {logged}");
 }
 
-/// Non-vacuous: tearing a hydrated pipeline down must emit `query-pipeline-stop`
+/// Mutation test: tearing a hydrated pipeline down must emit `query-pipeline-stop`
 /// (port of TS `#destroyPipeline`, pipeline-driver.ts:846) carrying `stopReason`,
 /// `pipelineLifetimeMs`, and the pipeline's hydration stats. Reverting the log in
 /// `destroy_pipeline` (or dropping a field) makes this fail.
@@ -191,7 +191,7 @@ fn pipeline_run_ids(logged: &str) -> Vec<String> {
         .collect()
 }
 
-/// Non-vacuous (log parity, 2026-09-08): every TS lifecycle line carries the
+/// Mutation test: every TS lifecycle line carries the
 /// pipeline's identity — `pipelineRunID` (a fresh `randomID()` per `addQuery`,
 /// pipeline-driver.ts:607), `transformationHash`, `queryName` (when defined) and
 /// `hydrationReason` (:470-505, :608-615, :784-792, :851-856) — which is what

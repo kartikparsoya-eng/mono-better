@@ -83,7 +83,7 @@ flowchart TB
 | **rust-ivm** | Runs ZQL queries incrementally over the SQLite replica | SQLite (read) | `rusqlite` | **!Send** |
 | **rust-cvr** | Tracks what each client has seen; computes diffs; persists to PG | Postgres (read+write) | `sqlx` | Send (async) |
 
-`rust-syncer` depends on both; `rust-ivm` and `rust-cvr` do not depend on each other — the syncer's **`ViewSyncerService`** stitches them together (`packages/rust-syncer/src/services/view_syncer/view_syncer.rs:629`). (This struct was called `SyncEngine` in `sync_engine.rs` before the L9 refactor; the old file is gone. The name `SyncEngineConfig` survives as the config struct, `view_syncer.rs:195`.)
+`rust-syncer` depends on both; `rust-ivm` and `rust-cvr` do not depend on each other — the syncer's **`ViewSyncerService`** stitches them together (`packages/rust-syncer/src/services/view_syncer/view_syncer.rs:1125`). (This struct was called `SyncEngine` in `sync_engine.rs` before the L9 refactor; the old file is gone. The name `SyncEngineConfig` survives as the config struct, `view_syncer.rs:193`.)
 
 ---
 
@@ -131,10 +131,10 @@ The resolution ("doc 91, Iteration C"):
 
 - **K executor threads** are the compute lanes. Each is a `tokio` **`current_thread` runtime + `LocalSet`** (`workers/cg_executor.rs:204-208`), hosting a hash/least-loaded shard of client groups as `spawn_local` tasks.
 - **The main multi-thread runtime** owns the reactor (accept loop, HTTP, JWKS fetches) **and the one shared PG pool**.
-- When a CG needs Postgres I/O, it does **not** run it on its executor thread. It **offloads** the future onto the main runtime via `ViewSyncerService::offload` (`view_syncer.rs:6618`), so the pool's connections are always polled by the reactor that created them.
+- When a CG needs Postgres I/O, it does **not** run it on its executor thread. It **offloads** the future onto the main runtime via `ViewSyncerService::offload` (`view_syncer.rs:5023`), so the pool's connections are always polled by the reactor that created them.
 
 ```rust
-// view_syncer.rs:6618 — the offload primitive
+// view_syncer.rs:5023 — the offload primitive
 async fn offload<F, T>(&self, fut: F) -> T
 where F: Future<Output = T> + Send + 'static, T: Send + 'static,
 {
@@ -158,10 +158,10 @@ A **client group (CG)** is one browser app instance's set of clients+queries. He
 
 ```mermaid
 flowchart TB
-    NC["New WS connection"] --> HC["create_connection (main runtime)<br/>workers/syncer.rs:829"]
+    NC["New WS connection"] --> HC["create_connection (main runtime)<br/>workers/syncer.rs:855"]
     HC --> EXIST{"CG already<br/>hosted?"}
     EXIST -->|yes| ROUTE["route message to existing CG task<br/>via CGHandle.tx (unbounded)"]
-    EXIST -->|no| PLACE["place_cg → least-loaded executor<br/>workers/syncer.rs:1148"]
+    EXIST -->|no| PLACE["place_cg → least-loaded executor<br/>workers/syncer.rs:1198"]
     PLACE --> SPAWN["SpawnCg command → executor thread<br/>workers/cg_executor.rs:119"]
     SPAWN --> BUILD["executor builds !Send ViewSyncerService<br/>+ spawn_local(cg_event_loop)<br/>cg_executor.rs:270"]
     BUILD --> ROUTE
@@ -171,9 +171,9 @@ The rules, each grounded in code:
 
 1. **A CG is pinned to exactly one executor thread for its whole life.** The `ViewSyncerService` is `!Send`; migrating it would force a full IVM rehydrate, which is rejected by design. Placement is chosen **once**.
 
-2. **Placement is least-loaded** (`place_cg`, `workers/syncer.rs:1148`): count live groups per executor, pick the emptiest, break ties by hashing `cg_id`. Because placement is serialized under `cg_creation_lock` (`workers/syncer.rs:579`, taken at `:1024`) and the new group is inserted before the lock releases, it degenerates to **round-robin** — per-executor group counts stay within 1 of each other (`workers/syncer.rs:1134`).
+2. **Placement is least-loaded** (`place_cg`, `workers/syncer.rs:1198`): count live groups per executor, pick the emptiest, break ties by hashing `cg_id`. Because placement is serialized under `cg_creation_lock` (`workers/syncer.rs:579`, taken at `:1024`) and the new group is inserted before the lock releases, it degenerates to **round-robin** — per-executor group counts stay within 1 of each other (`workers/syncer.rs:1134`).
 
-3. **Many CGs share one OS thread cooperatively.** The CG's event loop is a `spawn_local` future on the executor's `LocalSet` (`cg_executor.rs:270`). There is **no per-CG OS thread** and no per-CG `JoinHandle` — the router keeps only a lightweight `CGHandle` (a channel + shared counters, `cg_executor.rs:72-143`), stored in a `DashMap<String, CGHandle>` (`workers/syncer.rs:576`). Draining is done by shutting the executors down.
+3. **Many CGs share one OS thread cooperatively.** The CG's event loop is a `spawn_local` future on the executor's `LocalSet` (`cg_executor.rs:270`). There is **no per-CG OS thread** and no per-CG `JoinHandle` — the router keeps only a lightweight `CGHandle` (a channel + shared counters, `cg_executor.rs:72-143`), stored in a `DashMap<String, CGHandle>` (`workers/syncer.rs:585`). Draining is done by shutting the executors down.
 
 4. **The executor count is tuned for tail latency, not throughput.** This is the single richest comment in the repo (`main.rs:157-212`; the default is computed in `config/zero_config.rs:245-252`). Each executor **serializes** its client groups: a 12k-row hydrate + poke serialization holds the thread ~200ms, and any CG sharing that thread eats that latency. Measured A/B (ART G25, 4-CPU container):
 
@@ -190,7 +190,7 @@ The rules, each grounded in code:
 
 ### The CG event loop
 
-Once spawned, each CG runs `cg_event_loop` (`view_syncer.rs:2922`, invoked from `cg_executor.rs:278`), a `tokio::select!` (**biased**, `view_syncer.rs:3029-3030`) over the message channel plus deadline timers:
+Once spawned, each CG runs `cg_event_loop` (`view_syncer.rs:4200`, invoked from `cg_executor.rs:285`), a `tokio::select!` (**biased**, `view_syncer.rs:4317-3030`) over the message channel plus deadline timers:
 
 ```mermaid
 stateDiagram-v2
@@ -206,7 +206,7 @@ stateDiagram-v2
     Teardown --> [*]: Drop runs Engine destroy
 ```
 
-Notifications are **coalesced** — the `Notification` arm drains consecutive `Notification`s with `try_recv()` and merges them into a single advance, newest state winning but keeping the oldest commit time (TS `notifier.ts` pattern, `view_syncer.rs:3114-3174`).
+Notifications are **coalesced** — the `Notification` arm drains consecutive `Notification`s with `try_recv()` and merges them into a single advance, newest state winning but keeping the oldest commit time (TS `notifier.ts` pattern, `view_syncer.rs:4582-4640`).
 
 ---
 
@@ -227,7 +227,7 @@ sequenceDiagram
     A->>R: create_connection(ctx)
     R->>R: validate JWT (may fetch JWKS)
     R-->>C: ["connected", {wsid, timestamp, appID, shardNum}]
-    Note over R: ack emitted HERE on the accept task,<br/>BEFORE any hydrate (syncer.rs:970 — prod fix #152)
+    Note over R: ack emitted HERE on the accept task,<br/>BEFORE any hydrate (syncer.rs:970 — the connect-ack fix)
     R->>R: place_cg → least-loaded executor
     R->>E: SpawnCg (first conn) / route (existing)
     C->>E: initConnection + changeDesiredQueries (ZQL)
@@ -244,18 +244,18 @@ sequenceDiagram
     E-->>C: poke (delta only)
 ```
 
-> **⚠ The `connected` ack is NOT on the CG thread.** It is emitted from `create_connection` (`workers/syncer.rs:829`, the port of TS `syncer.ts#handleConnection`) on the **per-connection accept task, before any hydrate** (emit at `workers/syncer.rs:956-970`; body built by `check_version`, `workers/connection.rs:608`). This is the fix for the **2026-08-27 prod outage** (task #152): the old code sent `connected` from `Connection::init()` *inside* the serial CG thread, so a slow hydrate (79–254s prod queries) blocked the ack past the client's 10s connect timeout → disconnect → IVM-graph reap → cold-rehydrate thrash. TS sends the ack from the per-connection worker (concurrent), and now so does Rust. The L3 `call_topology.py` guard pins this emission to the accept-task context.
+> **⚠ The `connected` ack is NOT on the CG thread.** It is emitted from `create_connection` (`workers/syncer.rs:855`, the port of TS `syncer.ts#handleConnection`) on the **per-connection accept task, before any hydrate** (emit at `workers/syncer.rs:956-970`; body built by `check_version`, `workers/connection.rs:608`). This is the fix for the **2026-08-27 prod outage** (task #152): the old code sent `connected` from `Connection::init()` *inside* the serial CG thread, so a slow hydrate (79–254s prod queries) blocked the ack past the client's 10s connect timeout → disconnect → IVM-graph reap → cold-rehydrate thrash. TS sends the ack from the per-connection worker (concurrent), and now so does Rust. The L3 `call_topology.py` guard pins this emission to the accept-task context.
 
 **Hop-by-hop with code anchors:**
 
 | # | What | Where |
 |---|---|---|
 | WS accept | handshake, echo subprotocol, 10MB cap, spawn reader+writer | `ws_server.rs:112`, `:119`, `:302-341` |
-| Route + auth | auth **before** touching existing conns (anti-DoS) | `workers/syncer.rs:829` (`create_connection`) |
+| Route + auth | auth **before** touching existing conns (anti-DoS) | `workers/syncer.rs:855` (`create_connection`) |
 | `connected` frame | `["connected",{wsid,timestamp,appID,shardNum}]` on the accept task | `workers/syncer.rs:970`, `protocol/connect.rs:52` |
-| Placement/spawn | least-loaded → SpawnCg → build engine + `spawn_local` | `workers/syncer.rs:1148`, `cg_executor.rs:119`, `:270` |
-| Hydrate → diff → poke | `config_and_hydrate` → `hydrate_and_sync` | `view_syncer.rs:6940`, `:7883` |
-| Advance | `advance_and_sync` on commit notification | `view_syncer.rs:8074` |
+| Placement/spawn | least-loaded → SpawnCg → build engine + `spawn_local` | `workers/syncer.rs:1198`, `cg_executor.rs:119`, `:270` |
+| Hydrate → diff → poke | `config_and_hydrate` → `hydrate_and_sync` | `view_syncer.rs:5627`, `:7003` |
+| Advance | `advance_and_sync` on commit notification | `view_syncer.rs:7368` |
 
 ---
 
@@ -292,7 +292,7 @@ Key design points:
 
 ## 7. The ViewSyncerService hot path — hydrate / advance / diff / poke
 
-`ViewSyncerService` (`view_syncer.rs:629`) is the `!Send` object that owns one CG's world. Representative fields (the struct grew in the L9 refactor to absorb what were once free functions on the router):
+`ViewSyncerService` (`view_syncer.rs:1125`) is the `!Send` object that owns one CG's world. Representative fields (the struct grew in the L9 refactor to absorb what were once free functions on the router):
 
 ```rust
 pub struct ViewSyncerService {
@@ -315,35 +315,35 @@ pub struct ViewSyncerService {
 }
 ```
 
-### Hydrate path — `hydrate_and_sync` (`view_syncer.rs:7883`)
+### Hydrate path — `hydrate_and_sync` (`view_syncer.rs:7003`)
 
 ```mermaid
 flowchart TB
     A["config_and_hydrate (6940)<br/>transform queries + read-permissions"]
     A --> B["CVRQueryDrivenUpdater::new"]
     B --> C["updater.track_queries<br/>emit got-query patches"]
-    C --> D["pipelines.hydrate (pipeline_driver.rs:625)<br/>run each query through IVM"]
+    C --> D["pipelines.hydrate (pipeline_driver.rs:958)<br/>run each query through IVM"]
     D --> E["per RowChange → diff vs CVR → MultiPoker patch<br/>+ accumulate_signature"]
     E --> F["updater.flush<br/>apply patches → CVR + store ops"]
     F --> G["flush_to_store via offload<br/>write PG (main runtime)"]
     G --> H["record inspector materialization + add_query (§16)<br/>return (SyncResult, MultiPoker)"]
 ```
 
-- `pipelines.hydrate` (`pipeline_driver.rs:625`) calls the IVM engine's streaming add-queries, invoking a callback per row. Panic-safe: it checkpoints source connections and rolls back on panic.
-- The diff is `CVRQueryDrivenUpdater::received` (`cvr.rs:1034`): for each row it calls `merge_ref_counts` (`cvr.rs:40`) — if all refs drop to zero the row is a **del**, otherwise a **put** with a version compare to avoid a needless version bump.
+- `pipelines.hydrate` (`pipeline_driver.rs:958`) calls the IVM engine's streaming add-queries, invoking a callback per row. Panic-safe: it checkpoints source connections and rolls back on panic.
+- The diff is `CVRQueryDrivenUpdater::received` (`cvr.rs:1054`): for each row it calls `merge_ref_counts` (`cvr.rs:41`) — if all refs drop to zero the row is a **del**, otherwise a **put** with a version compare to avoid a needless version bump.
 - The poke is **not** ended inside `hydrate_and_sync`; the caller appends catch-up patches (rows missed while the client was away) and then calls `pokers.end()`.
 - After the hydrate loop, per query it records `add_metric(QueryMaterializationServer, ms, qid)` + `add_query(qid, ast)` into the per-CG `InspectorDelegate` (mirrors TS `#addQueryMaterializationServerMetric` at view-syncer.ts:2296; see §16).
 
-### Advance path — `advance_and_sync` (`view_syncer.rs:8074`)
+### Advance path — `advance_and_sync` (`view_syncer.rs:7368`)
 
 Runs on each commit notification:
 
-1. `pipelines.advance` (`pipeline_driver.rs:793`) streams the replica delta tail→head, returning `AdvanceOutcome::Advanced{version, num_changes}` or `AdvanceOutcome::Reset{reason}` (scalar-subquery / schema change → caller rehydrates).
+1. `pipelines.advance` (`pipeline_driver.rs:1259`) streams the replica delta tail→head, returning `AdvanceOutcome::Advanced{version, num_changes}` or `AdvanceOutcome::Reset{reason}` (scalar-subquery / schema change → caller rehydrates).
 2. Build a `CVRQueryDrivenUpdater` at the **actual post-advance version from the engine header** (using the empty string here used to be a bug).
 3. Diff each collected `RowChange`, `updater.flush()`, then `flush_to_store()` via `offload`.
-4. `pokers.end(version)` — **only clients at the pre-advance version are poked**; lagging clients are excluded (`advance_poke_targets`, `view_syncer.rs:7542`).
+4. `pokers.end(version)` — **only clients at the pre-advance version are poked**; lagging clients are excluded (`advance_poke_targets`, `view_syncer.rs:6521`).
 
-### `hydrateUnchangedQueries` (`view_syncer.rs:7778`)
+### `hydrateUnchangedQueries` (`view_syncer.rs:6806`)
 
 A same-transformation-hash re-hydrate path (TS `#hydrateUnchangedQueries`): re-materializes queries whose transformation hash is unchanged, records the inspector metric keyed by `transformationHash` (mirrors view-syncer.ts:1640), and feeds `accumulate_signature`.
 
@@ -422,7 +422,7 @@ flowchart TB
 The **CVR** is the Postgres-backed record of what each client group has seen.
 
 ```rust
-// cvr.rs:1344
+// cvr.rs:1364
 pub struct CVR {
     pub id: String,                          // == client group id
     pub version: CVRVersion,
@@ -444,19 +444,19 @@ The version serializes to a cookie/watermark like `"01"` or `"01:01"` and is wha
 
 ```mermaid
 flowchart TB
-    L["store.load (cvr_store.rs:1183)<br/>BEGIN REPEATABLE READ READ ONLY<br/>retry if rows lag CVR"]
-    U["CVRQueryDrivenUpdater::received (cvr.rs:1034)<br/>merge_ref_counts → put / del patches"]
-    F["store.flush (cvr_store.rs:582)<br/>ONE atomic tx, synchronous"]
-    RC["RowRecordCache.flush_loop (row_record_cache.rs:610)<br/>async write-behind"]
+    L["store.load (cvr_store.rs:1451)<br/>BEGIN REPEATABLE READ READ ONLY<br/>retry if rows lag CVR"]
+    U["CVRQueryDrivenUpdater::received (cvr.rs:1054)<br/>merge_ref_counts → put / del patches"]
+    F["store.flush (cvr_store.rs:734)<br/>ONE atomic tx, synchronous"]
+    RC["RowRecordCache.flush_loop (row_record_cache.rs:728)<br/>async write-behind"]
     L --> U --> F
     U -.-> RC
 ```
 
-- **Load** (`cvr_store.rs:1183`) — a single read-only `REPEATABLE READ` transaction pulling instance + clients + queries + desires, with a `rowsVersion` check and retries if the row data lags the CVR head.
-- **Diff** (`cvr.rs:1034`) — `CVRQueryDrivenUpdater::received(rows, existing_rows)` compares new rows against the CVR's `refCounts` via `merge_ref_counts` (`cvr.rs:40`): refs→zero means **del**, otherwise **put** (reusing the existing patch version if the row is unchanged). The three updater classes live in `cvr.rs` (there is no separate `updater.rs`), matching TS `cvr.ts`.
-- **Write** (`cvr_store.rs:582`) — the CVR store flush is **one synchronous atomic transaction**: instance upsert, clients insert/delete, query upserts/partial updates, desire upserts, `rowsVersion` bump, and row-record deletes+inserts. Batched writes use `json_to_recordset()` (one statement instead of N; clients batch at `cvr_store.rs:789`).
+- **Load** (`cvr_store.rs:1451`) — a single read-only `REPEATABLE READ` transaction pulling instance + clients + queries + desires, with a `rowsVersion` check and retries if the row data lags the CVR head.
+- **Diff** (`cvr.rs:1054`) — `CVRQueryDrivenUpdater::received(rows, existing_rows)` compares new rows against the CVR's `refCounts` via `merge_ref_counts` (`cvr.rs:41`): refs→zero means **del**, otherwise **put** (reusing the existing patch version if the row is unchanged). The three updater classes live in `cvr.rs` (there is no separate `updater.rs`), matching TS `cvr.ts`.
+- **Write** (`cvr_store.rs:734`) — the CVR store flush is **one synchronous atomic transaction**: instance upsert, clients insert/delete, query upserts/partial updates, desire upserts, `rowsVersion` bump, and row-record deletes+inserts. Batched writes use `json_to_recordset()` (one statement instead of N; clients batch at `cvr_store.rs:789`).
 
-> **Sync vs write-behind — read this carefully.** The store flush *logic* is a synchronous transaction (it awaits `COMMIT`). But from the CG thread's perspective it is **offloaded onto the main runtime** via `ViewSyncerService::offload` (§3), so it does not block the serving thread's CPU. Separately, **row records** have their own **async write-behind** flush loop (`row_record_cache.rs:610`, `flush_one_iteration:683`) that bulk-inserts via `json_to_recordset` (`:773`) but still issues **per-row DELETEs** (not batched — a known inefficiency that matches TS). Historically a *synchronous inline* CVR write on the serving thread caused hydrate stalls; the offload + write-behind split is the fix. Catch-up row streaming is bounded-memory: `CATCHUP_PAGE_SIZE = 10000` (`row_record_cache.rs:207`, matches TS `.cursor(10000)`).
+> **Sync vs write-behind — read this carefully.** The store flush *logic* is a synchronous transaction (it awaits `COMMIT`). But from the CG thread's perspective it is **offloaded onto the main runtime** via `ViewSyncerService::offload` (§3), so it does not block the serving thread's CPU. Separately, **row records** have their own **async write-behind** flush loop (`row_record_cache.rs:728`, `flush_one_iteration:683`) that bulk-inserts via `json_to_recordset` (`:773`) but still issues **per-row DELETEs** (not batched — a known inefficiency that matches TS). Historically a *synchronous inline* CVR write on the serving thread caused hydrate stalls; the offload + write-behind split is the fix. Catch-up row streaming is bounded-memory: `CATCHUP_PAGE_SIZE = 10000` (`row_record_cache.rs:207`, matches TS `.cursor(10000)`).
 
 ### Row keys
 
@@ -485,7 +485,7 @@ flowchart LR
 | **Access** | read-only, snapshot-isolated | read + write |
 | **Driver** | `rusqlite` (sync, thread-local) | `sqlx` (async, pooled) |
 | **Connection model** | one connection **per IVM Source**, pinned to the CG thread | **one shared pool** for the whole process (`main.rs:228`) |
-| **Who polls it** | the executor thread directly | the main runtime, via `offload` (`view_syncer.rs:6618`) |
+| **Who polls it** | the executor thread directly | the main runtime, via `offload` (`view_syncer.rs:5023`) |
 | **Concurrency unit** | one snapshot per advance (Snapshotter leapfrog) | `pool.begin()` per transaction |
 
 The pool is created eagerly but falls back to a **lazy** pool if the CVR PG is unreachable at boot — deliberate TS parity (TS also comes up "ready" with CVR down and connects lazily). `/readyz` reports the true health for the load balancer.
@@ -506,12 +506,12 @@ The pool is created eagerly but falls back to a **lazy** pool if the CVR PG is u
 |---|---|---|
 | Accept + I/O reactor | main multi-thread `tokio` runtime | `main.rs:159` |
 | Per-CG compute | K `current_thread` executors + `LocalSet` | `workers/cg_executor.rs:194-208` |
-| CG placement | least-loaded, pinned for life | `workers/syncer.rs:1148` |
+| CG placement | least-loaded, pinned for life | `workers/syncer.rs:1198` |
 | CG isolation unit | `spawn_local` task per CG | `workers/cg_executor.rs:270` |
 | Cross-thread routing | `mpsc::UnboundedSender` in `CGHandle` | `workers/cg_executor.rs:72` |
-| Connection map | `DashMap` (lock-free shards) | `workers/syncer.rs:576` |
+| Connection map | `DashMap` (lock-free shards) | `workers/syncer.rs:585` |
 | Shared state locks | `parking_lot::Mutex`, `Arc<AtomicU64/Bool>` | throughout |
-| DB I/O offload | `ViewSyncerService::offload` → main runtime | `view_syncer.rs:6618` |
+| DB I/O offload | `ViewSyncerService::offload` → main runtime | `view_syncer.rs:5023` |
 | Backpressure | atomic depth/byte counters + `watch` kill | `ws_sink.rs:158`/`:173` |
 
 **The core idea:** IVM can't be parallelized *within* a group (it's `!Send`), so throughput comes from *spreading groups across executor threads*, while all blocking I/O is kept off those threads.

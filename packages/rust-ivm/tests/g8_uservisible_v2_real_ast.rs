@@ -5,7 +5,7 @@
 //! to another user; the root `userId = me` + boolean filters must exclude it so its
 //! related `channel` is never fetched. isClosed/isDeleted are declared boolean and
 //! stored as 0/1 to exercise the SQLite->Value coercion. rust evaluates this
-//! correctly; the ART G8 diff was a transient, not this path.
+//! correctly; the release-gate data diff was a transient, not this path.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -149,6 +149,6 @@ fn user_visible_v2_excludes_other_users_status_row() {
     );
     assert!(
         ids.is_empty(),
-        "ART user has no status rows; nothing may be emitted — got {ids:?}"
+        "the replay user has no status rows; nothing may be emitted — got {ids:?}"
     );
 }

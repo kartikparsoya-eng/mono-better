@@ -9,7 +9,7 @@
 //! i.e. EXISTS-within-OR-within-EXISTS. A PRIVATE, cross-workspace DM where the
 //! querying user is NOT a participant makes the inner EXISTS(participants userId=me)
 //! false → the whole gate is false → the DM channel must NOT be emitted. rust
-//! evaluates this correctly (this is the exact shape the ART G8 diff pointed at;
+//! evaluates this correctly (this is the exact shape the release-gate data diff pointed at;
 //! the diff itself was a transient in the full concurrent run, not an eval bug).
 
 use std::cell::RefCell;
@@ -64,7 +64,7 @@ fn seed() -> Rc<RefCell<Connection>> {
         INSERT INTO channel_stats VALUES ('dm1', 100);
         INSERT INTO channel_participants VALUES ('cp_other','dm1','other');
 
-        -- mine_dm: DM the ART user participates in -> must be emitted
+        -- mine_dm: DM the replay user participates in -> must be emitted
         INSERT INTO channels VALUES ('mine_dm','DM','PRIVATE','wsme');
         INSERT INTO channel_stats VALUES ('mine_dm', 200);
         INSERT INTO channel_participants VALUES ('cp_me','mine_dm','me');

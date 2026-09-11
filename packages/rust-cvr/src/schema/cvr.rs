@@ -166,7 +166,7 @@ mod tests {
     /// `serde_json::to_string(&inserts)` (text bound straight to `$1::json`):
     /// the bytes must be identical, and this is what says so.
     ///
-    /// NON-VACUOUS: change any `#[serde(rename)]` on `RowsRow` — e.g.
+    /// Mutation test: change any `#[serde(rename)]` on `RowsRow` — e.g.
     /// `clientGroupID` to `client_group_id` — and this fails. Before it existed
     /// such a rename produced an all-NULL insert with no error anywhere.
     #[test]

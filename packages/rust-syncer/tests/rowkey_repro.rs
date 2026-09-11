@@ -1,4 +1,4 @@
-//! REPRO for the sandbox row-key poison (2026-08-22).
+//! REPRO for the sandbox row-key poison incident.
 //!
 //! Symptom: client crash-loops on every poke with
 //! `TypeError: Expected string, number or boolean. Got undefined` from

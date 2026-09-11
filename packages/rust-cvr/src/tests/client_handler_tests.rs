@@ -7,8 +7,8 @@
 use super::*;
 use std::sync::Mutex as StdMutex;
 
-/// PRECONDITION for F-10 (moving `pokePart` serialization off the serial
-/// client-group thread): `flush_body` builds
+/// PRECONDITION for moving `pokePart` serialization off the serial
+/// client-group thread: `flush_body` builds
 /// `serde_json::json!(["pokePart", body])` — a whole `Value` tree, on the
 /// CG thread — and the writer task then walks that tree to produce text.
 /// Handing the writer the TYPED body instead is only safe if the two
@@ -23,7 +23,7 @@ use std::sync::Mutex as StdMutex;
 /// is missing from the `Value` tree in the first place rather than
 /// becoming `null`.
 ///
-/// NON-VACUOUS: this fails the moment either property stops holding — drop
+/// Mutation test: this fails the moment either property stops holding — drop
 /// `preserve_order` from Cargo.toml and the `desiredQueriesPatches` /
 /// `lastMutationIDChanges` maps come back sorted, which is a different
 /// frame on the wire.
@@ -256,7 +256,7 @@ fn make_handler_observing_lifecycle() -> (
 /// `getLogLevel(e)`, then forwards to `downstream.fail` — and does NOT
 /// cancel.
 ///
-/// NON-VACUOUS (2026-09-08): the forwarding half passed both before and
+/// Mutation test: the forwarding half passed both before and
 /// after — rust's `fail` had the `downstream.fail` call and no log at all,
 /// so this test could not have caught the missing line. The level is WARN
 /// because the only caller, `send_query_transform_failed_error`, passes
@@ -348,7 +348,7 @@ fn make_row_patch_put(table: &str, contents: Value) -> PatchToVersion {
 /// the client-group thread at 100% CPU indefinitely — no ack, no poke, for
 /// every client in the group.
 ///
-/// NON-VACUOUS, but by HANGING rather than failing: restore the unbounded
+/// Mutation test, but by HANGING rather than failing: restore the unbounded
 /// `while` loop in `acquire_chain` and this test never returns (verified by
 /// running it with a kill timeout). That hang IS the bug.
 #[test]
@@ -489,7 +489,7 @@ fn test_noop_poke_sends_nothing() {
 /// fabricated from-scratch `pokeStart {baseCookie: null}` + `pokeEnd` and
 /// REGRESSED the client's cookie. TS returns an object whose
 /// addPatch/end/cancel are empty functions (client-handler.ts).
-/// NON-VACUOUS (2026-09-05): `already caught up, not sending poke.` is TS
+/// Mutation test: `already caught up, not sending poke.` is TS
 /// `startPoke`'s line (client-handler.ts:196), compared against the
 /// TENTATIVE version. TS's `end` returns SILENTLY in the equivalent
 /// situation (`return; // Nothing changed and nothing was sent.`,
@@ -1098,7 +1098,7 @@ fn multipoker_drops_dead_client_after_first_failure() {
     );
 }
 
-/// NON-VACUOUS (2026-09-08): `any_started()` must report whether a patch was
+/// Mutation test: `any_started()` must report whether a patch was
 /// actually SENT, because that is the only condition under which TS's `end()`
 /// can raise `Patches were sent but finalVersion ... is not greater than
 /// baseVersion` (client-handler.ts:327-334) — the view-syncer gates its
@@ -1221,7 +1221,7 @@ fn invalid_final_version_after_patches_releases_chain() {
 /// 20 rows of ~40 KiB keep the part COUNT well under 100, so a split here
 /// can only come from the byte cap.
 ///
-/// NON-VACUOUS: set `DEFAULT_POKE_PART_MAX_BYTES` to 0 (or drop the
+/// Mutation test: set `DEFAULT_POKE_PART_MAX_BYTES` to 0 (or drop the
 /// `state.body_est_bytes >= byte_cap` term from the flush condition) and
 /// all 20 rows ride in ONE part, failing the split assertion; drop the
 /// `state.body_est_bytes +=` accumulation and the same assertion fails.

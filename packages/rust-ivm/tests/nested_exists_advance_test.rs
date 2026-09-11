@@ -1,4 +1,4 @@
-//! G15 repro: Two-level nested EXISTS where a NEW parent, its intermediate
+//! Same-advance staleness repro: Two-level nested EXISTS where a NEW parent, its intermediate
 //! EXISTS-enabling child, and the leaf EXISTS-enabling grandchild are all
 //! added in the SAME advance.
 //!

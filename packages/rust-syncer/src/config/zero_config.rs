@@ -1,5 +1,5 @@
 //! Port of `zero-cache/src/config/zero-config.ts` — the syncer worker's
-//! env-derived configuration (L9 Stage 5c move out of `main.rs`). Rust reads
+//! env-derived configuration. Rust reads
 //! the same ZERO_* environment the TS zero-config parser normalizes; option
 //! names mirror the TS config fields.
 
@@ -34,7 +34,7 @@ pub fn host_parallelism() -> usize {
 
 /// Log when the cgroup cpu quota is far below the host core count the shard
 /// default is derived from. We deliberately do NOT auto-shrink the shard pool
-/// to the quota — an A/B (ART G25) showed quota-sized `current_thread` shards
+/// to the quota — an A/B replay showed quota-sized `current_thread` shards
 /// serialize whole client groups behind each other and destroy tail latency —
 /// but a 3x+ mismatch is worth an operator's attention (ZERO_SYNCER_SHARDS).
 pub fn warn_if_quota_capped() {
@@ -114,10 +114,10 @@ pub struct SyncerConfig {
     pub server_version: String,
     /// Max CVR Postgres connections for this worker (parity with the TS
     /// `--cvr-max-conns-per-worker` flag: whole budget divided across syncers).
-    /// The whole budget is ONE shared pool on the main runtime (doc 91
+    /// The whole budget is ONE shared pool on the main runtime (`RUST-SYNCER-ARCHITECTURE.md`
     /// Iteration C); executors offload CVR I/O onto it via `SyncEngine::offload`.
     pub cvr_max_conns: u32,
-    /// Number of executor threads (doc 91). Client groups are least-loaded
+    /// Number of executor threads (`RUST-SYNCER-ARCHITECTURE.md` §4). Client groups are least-loaded
     /// placed across them; each runs a `current_thread` runtime + `LocalSet`
     /// and draws CVR I/O from the shared pool. Defaults to the HOST core
     /// count via the affinity mask (`host_parallelism`), deliberately
@@ -249,7 +249,7 @@ impl SyncerConfig {
             // idle shards are parked; busy ones get OS time-slices — so the
             // default is sized for CG-per-shard isolation at realistic
             // concurrency, NOT for the core count. Measured A/B on a
-            // 4-cpu-capped container (ART G25 25-conn drive, 2026-08-19):
+            // 4-cpu-capped container (25-connection latency drive):
             // 4 shards → 41+ of 51 queries breach 2x-of-TS parity (p95 to
             // multi-second); 14 shards (2 CGs/shard on ~11 shards) → 10-17
             // violations, p95 to 1.6s; 28 shards (1 CG/shard) → 0 violations.
@@ -356,7 +356,7 @@ fn parse_query_config() -> Option<crate::FetchConfig> {
 /// configured admin password must be non-empty and match. rust previously
 /// omitted the dev-mode branch (`admin_password.is_some_and(...)` alone), so a
 /// dev sandbox with no `ZERO_ADMIN_PASSWORD` LOCKED the inspector where TS
-/// OPENED it — caught by the G49/E inspect-auth differential (2026-08-28: rust
+/// OPENED it — caught by the inspect-auth differential (rust
 /// authenticated:false, TS answered `queries` as an authenticated CG).
 pub fn is_admin_password_valid(
     password: &str,
@@ -374,8 +374,8 @@ mod admin_password_tests {
     use super::is_admin_password_valid;
 
     /// Port fidelity for TS `isAdminPasswordValid` (config/zero-config.ts). The
-    /// dev-mode-no-password branch is the one rust omitted (G49/E finding).
-    /// Non-vacuous: dropping that branch (the pre-fix `admin_password.is_some_and`
+    /// dev-mode-no-password branch is the one rust omitted (inspect-auth differential).
+    /// Mutation test: dropping that branch (the pre-fix `admin_password.is_some_and`
     /// alone) makes the first assertion fail — dev sandbox would lock the inspector.
     #[test]
     fn is_admin_password_valid_matches_ts() {

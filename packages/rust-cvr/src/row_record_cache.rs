@@ -207,7 +207,7 @@ fn cvr(schema: &str, table: &str) -> String {
 /// `Clone` is cheap — every field is either an `Arc`/`PgPool` (both refcounted)
 /// or a small value — and all clones share the same `state`/`pool`. The syncer
 /// offloads CVR I/O onto its shared-pool runtime by moving a clone of the cache
-/// into a spawned task (doc 91 spawn-offload), so the clone must alias the same
+/// into a spawned task (`RUST-SYNCER-ARCHITECTURE.md` §3 spawn-offload), so the clone must alias the same
 /// underlying state.
 #[derive(Clone)]
 
@@ -374,7 +374,7 @@ impl RowRecordCache {
         // never queued the records into `pending`, and never started the
         // background flush — i.e. it DROPPED row records the CVR had already
         // poked to clients. TS cannot reach that state because it loads here.
-        // (G44 runtime log differential, 2026-09-08: 342 `[cvr] row cache apply
+        // (runtime log differential: 342 `[cvr] row cache apply
         // failed: cache not loaded` warnings on rust in one 6-minute replay,
         // with no TS twin.)
         self.load().await?;
@@ -576,8 +576,7 @@ impl RowRecordCache {
         // (:464), i.e. only on a flush that actually upserts rows. Rust logged it
         // unconditionally, so 6104 of its 6513 flush lines in one 6-minute replay
         // were `flushing 0 rows (0 inserts, 0 deletes)` against ZERO such lines on
-        // TS — the 5.7x volume gap the G44 runtime log differential reported
-        // (2026-09-08).
+        // TS — the 5.7x volume gap the runtime log differential reported.
         if !inserts.is_empty() {
             tracing::info!(
                 "flushing {total_count} rows ({} inserts, {} deletes)",
@@ -808,7 +807,7 @@ async fn flush_loop(context: FlushLoopContext) {
                 // 1:1 with TS: `lc.info?.(`flushed ${rows} rows@${versionString(
                 // rowsVersion)} (${elapsed} ms)`)` (row-record-cache.ts:289-291).
                 // The CG id rides as a structured FIELD, not in the message, so
-                // the text matches TS exactly (M14 log differential, 2026-09-08).
+                // the text matches TS exactly (pinned by `parity/log_differential.py`).
                 tracing::info!(
                     cg = %cvr_id,
                     "flushed {rows_count} rows@{} ({elapsed_ms:.1} ms)",
@@ -1313,11 +1312,11 @@ mod tests {
     /// caller (`CVRStore::flush_internal`) only warned, so the records were never
     /// queued into `pending`, the background flush never started, and `row_count`
     /// stayed stale — row records silently dropped after the CVR had already
-    /// poked them to clients. Found by the G44 runtime log differential
-    /// (2026-09-08): 342 `[cvr] row cache apply failed: cache not loaded`
+    /// poked them to clients. Found by the runtime log differential:
+    /// 342 `[cvr] row cache apply failed: cache not loaded`
     /// warnings on rust in one 6-minute replay, with no TS twin.
     ///
-    /// NON-VACUOUS: restore the `if state.cache.is_none() { return Err(...) }`
+    /// Mutation test: restore the `if state.cache.is_none() { return Err(...) }`
     /// guard and this fails — `apply` answers `Err` and queues nothing.
     #[tokio::test]
     async fn apply_ensures_the_cache_is_loaded_like_ts_rather_than_failing() {
@@ -1399,7 +1398,7 @@ mod tests {
     /// copy rust makes is rust-only cost. This pins that the copy happens ONLY
     /// under a live snapshot.
     ///
-    /// NON-VACUOUS: move step (2)'s `drop(snapshot2)` to AFTER its `apply` —
+    /// Mutation test: move step (2)'s `drop(snapshot2)` to AFTER its `apply` —
     /// the shape this fix removed from `hydrate_and_sync`/`advance_and_sync` —
     /// and the second assertion fails with `cow_copies == 2`. (Holding step
     /// (1)'s snapshot instead proves nothing: `make_mut` already unshared the
@@ -1461,7 +1460,7 @@ mod tests {
     /// in `cvr.rows` carrying the deletion's patchVersion — which is what
     /// catchup reads to emit a row DEL to a reconnecting client.
     ///
-    /// Non-vacuous: restore the `Some(r) if r.ref_counts.is_none() => deletes`
+    /// Mutation test: restore the `Some(r) if r.ref_counts.is_none() => deletes`
     /// arm and the tombstone lands in `deletes`, failing both length asserts.
     /// This path was dead code until the store started consulting the cache, so
     /// the divergence had never been observable.

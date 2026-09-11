@@ -6,7 +6,7 @@
 //! dropped sub-stream yields, and the filter chain's `filter(node) -> bool`
 //! could not surface the yields of an EXISTS child fetch, so a 33 s prod
 //! hydrate of these shapes reported `yields=0` and froze its shard thread
-//! (ART run 20260903-012323). TS forwards yields through all of them
+//! (a production-trace replay). TS forwards yields through all of them
 //! (flipped-join.ts:180/289, memory-source.ts:1117-1136, exists.ts:254-258,
 //! filter-operators.ts:37).
 

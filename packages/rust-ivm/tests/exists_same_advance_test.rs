@@ -1,4 +1,4 @@
-//! G15 repro probe: EXISTS 0→1 flip when a NEW parent and its EXISTS-enabling
+//! Same-advance staleness repro probe: EXISTS 0→1 flip when a NEW parent and its EXISTS-enabling
 //! child are added in the SAME advance.
 //!
 //! Models joinChannel: a new `convos` row (a channel conversation) and a new
@@ -7,7 +7,7 @@
 //! within the advance must end with the convo emitted (it becomes visible the
 //! moment the membership exists). If the engine drops the convo (pushed with
 //! EXISTS=0 before the membership indexes, and never re-triggered), that is the
-//! persistent live-advance under-emission the G15 matrix caught.
+//! persistent live-advance under-emission the same-advance matrix caught.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -232,7 +232,7 @@ fn exists_flip_emits_parent_with_related_message_same_advance() {
     // membership (flips the permission EXISTS), and the "X joined" system
     // message (the convo's related message) — all in ONE advance. The live view
     // must gain BOTH the convo AND its related message, exactly as a fresh
-    // hydrate would. This is the G15 divergence: convo + message only_mirror.
+    // hydrate would. This is the same-advance divergence: convo + message only_mirror.
     let mut engine = setup_with_related();
     let changes = engine.advance(&[
         (

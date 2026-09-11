@@ -230,7 +230,7 @@ async fn flush_matches_ts_golden() {
 /// row-record-cache.ts:418-427); this port's store takes the cache as a
 /// parameter and asks it at the same call site.
 ///
-/// Non-vacuous: before the wiring the store always wrote every row inline
+/// Mutation test: before the wiring the store always wrote every row inline
 /// (`stats.rows_flushed` did not exist and `cvr.rows` held all 150 rows after
 /// the flush), so every assertion below fails.
 ///
@@ -468,7 +468,7 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
 /// may have called while the transaction was committing") stays pending and is
 /// written by the next loop iteration.
 ///
-/// Non-vacuous: the previous rust loop cloned `pending`, ran the tx, and only
+/// Mutation test: the previous rust loop cloned `pending`, ran the tx, and only
 /// THEN cleared `pending` — wiping batch 2 without ever writing it, then bumping
 /// `rowsVersion` to '03' over an empty map. With that shape this test fails on
 /// the row-set assertion (`["a","b"]`, not `["a","b","c","d"]`).
@@ -774,7 +774,7 @@ async fn config_flush_disables_the_session_statement_timeout_like_ts_run_tx() {
     );
 }
 
-/// NON-VACUOUS (fix, 2026-09-05): a custom query whose args contain a character
+/// Mutation test: a custom query whose args contain a character
 /// PG cannot convert to `text` must still persist.
 ///
 /// TS pre-stringifies `queryArgs` for its batched config write
@@ -897,7 +897,7 @@ async fn custom_query_args_with_nul_survive_the_flush() {
 /// consecutive versions is five physical writes. Rust's write-behind holds
 /// `pending: HashMap<rowIdString, ..>` and drains it in batches, so those five
 /// collapse to ONE write. That is the whole reason the two engines' `flushing N
-/// rows` volumes differ (measured 2026-09-08 over one prod-trace replay: rust
+/// rows` volumes differ (measured over one production-trace replay: rust
 /// 26,992 rows in 14 flushes against TS 145,669 in 494) — a SCHEDULING
 /// difference, which I-6 is allowed to make.
 ///
@@ -907,7 +907,7 @@ async fn custom_query_args_with_nul_survive_the_flush() {
 /// `rowsVersion` must reach the LAST applied version — byte-identical to the
 /// state TS's two separate writes would have left.
 ///
-/// NON-VACUOUS: make `pending` insert-if-absent (`entry().or_insert`) instead of
+/// Mutation test: make `pending` insert-if-absent (`entry().or_insert`) instead of
 /// `insert`, i.e. first-write-wins, and the assertions fail with r2/03/{"q1":2}
 /// — the v04 apply is swallowed by the v03 entry already sitting in the batch.
 /// The two later applies MUST land in the same batch for this to bite, which is

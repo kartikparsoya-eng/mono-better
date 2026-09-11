@@ -704,7 +704,7 @@ mod pk_serialization_tests {
         }
     }
 
-    /// NON-VACUOUS (2026-09-06): `deserializePKToConstraint` (cap.ts:319) is the
+    /// Mutation test: `deserializePKToConstraint` (cap.ts:319) is the
     /// inverse of `serializePK` (cap.ts:315), and `Cap::fetch` rebuilds the
     /// child constraint from a stored PK with it. It had no named twin in rust
     /// — the body was inlined in `fetch`, so nothing could call it and the

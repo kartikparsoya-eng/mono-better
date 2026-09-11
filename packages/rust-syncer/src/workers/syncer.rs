@@ -524,7 +524,7 @@ mod tests {
     }
 }
 
-// ─── Syncer connection management (L9 Stage 2a) ──────────────────────────────
+// ─── Syncer connection management ────────────────────────────────────────────
 // Port of the `Syncer` class's connection-management half
 // (workers/syncer.ts:288+): accept-path connection creation, the live
 // connection map, group user pinning, drain. The CG executor substrate
@@ -577,7 +577,7 @@ pub(crate) fn check_and_pin_user(group: &mut GroupAuthState, incoming: &str) -> 
 }
 
 /// The connection router — hosts client groups on a bounded pool of `K` executor
-/// threads and routes connections to them (doc 91, sharded async executors).
+/// threads and routes connections to them (`RUST-SYNCER-ARCHITECTURE.md` §3, sharded async executors).
 ///
 /// Port of the `Syncer` class's connection management.
 pub struct Syncer {
@@ -654,10 +654,10 @@ impl ConnectionSinks {
     /// TS `#failDownstream` → `downstream.fail(...)` → `closeWithError` does
     /// (pusher.ts:612-617, types/streams.ts:88-93). Returns whether delivered.
     ///
-    /// Until 2026-09-03 this only sent the frame and left the socket open; the
+    /// An earlier version only sent the frame and left the socket open; the
     /// client's NEXT push then died with `InvalidConnectionRequest` ("Connection
     /// auth state was not available") — a different error kind and a later
-    /// disconnect than TS (frame-capture #3, cg art-trcd59a3b0e154).
+    /// disconnect than TS (seen in a frame capture).
     ///
     /// The `ws_id` guard is the rust-only addition (INVENTIONS.md I-3): by the time a relay POST fails the client may
     /// have reconnected (new socket, same `client_id`). The replacement
@@ -764,7 +764,7 @@ impl Syncer {
 
     /// Full constructor: spawn `num_shards` executor threads, each running a
     /// `current_thread` runtime + `LocalSet` hosting a hash-shard of client
-    /// groups (doc 91). `cvr_pool` is the ONE shared CVR `PgPool` (built on the
+    /// groups (`RUST-SYNCER-ARCHITECTURE.md` §3). `cvr_pool` is the ONE shared CVR `PgPool` (built on the
     /// process's main runtime); a clone is handed to every executor so groups
     /// draw from a single bounded connection budget, and CVR I/O is offloaded
     /// back onto that pool's runtime (`SyncEngine::offload`). `None` selects
@@ -849,7 +849,7 @@ impl Syncer {
 
     /// Handle a new WebSocket connection.
     ///
-    /// Port of `Syncer.#createConnection()` (1:1 name since L9 Stage 2b).
+    /// Port of `Syncer.#createConnection()`.
     /// This runs on the tokio runtime (async) because auth validation
     /// may require HTTP fetches (JWKS).
     pub async fn create_connection(&self, ctx: ConnectionContext) {
@@ -1174,7 +1174,7 @@ impl Syncer {
     }
 
     /// Choose the executor to host a NEW client group: the one currently hosting
-    /// the fewest groups (least-loaded placement, doc 91). Replaces blind
+    /// the fewest groups (least-loaded placement, `RUST-SYNCER-ARCHITECTURE.md` §4). Replaces blind
     /// `shard_for` hashing, which is load-oblivious and leaves executors lumpy
     /// when the hash happens to cluster. A group's `!Send` `SyncEngine` pins it to
     /// its executor for life, so we balance by *placement*, never by migration

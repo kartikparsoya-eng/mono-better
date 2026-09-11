@@ -4,7 +4,7 @@
 //! :975-977). Real path: Snapshotter + TableSource + `_zero.changeLog2`
 //! writes, exactly as the replication stream feeds prod.
 //!
-//! Non-vacuous pins (each was proven to FAIL on the pre-phase-2 behaviour):
+//! Mutation-tested pins (each was proven to FAIL on the earlier behaviour):
 //!   * a `should_yield` hook that is always true surfaces one `Yield` before
 //!     EVERY change and never re-asks for the same change after resuming;
 //!   * no hook (`None`) → zero yields on the identical diff;
@@ -373,7 +373,7 @@ fn the_advance_gate_is_disarmed_while_the_stream_is_suspended_at_a_yield() {
 /// right but (1) badly wrong: the `timer.start().await` queue turn landed
 /// inside the budget. On a shard hosting ~1000 client groups that turn costs
 /// tens of ms, so advances blew the 50ms floor at `pos: 0` — before processing
-/// a single change. Measured on the 2026-09-05 60-minute prod-replay: 5,934
+/// a single change. Measured on a 60-minute production-trace replay: 5,934
 /// `advancement-timeout` resets (27% of them against a budget of exactly 0ms)
 /// versus ~45 on TS, each destroying every pipeline in the group and forcing a
 /// full re-hydrate — 2.9x TS's total hydrations.

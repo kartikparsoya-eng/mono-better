@@ -5,7 +5,7 @@
 //! and poke handlers every `CURSOR_PAGE_SIZE` rows.
 //!
 //! On the unified Rust architecture, this runs inside the engine's
-//! `FnMut(&RowChange)` callback — same thread, zero napi boundary crossings.
+//! `FnMut(&RowChange)` callback — same thread, no FFI boundary.
 
 use std::collections::HashMap;
 
@@ -28,8 +28,7 @@ const ZERO_VERSION_COLUMN_NAME: &str = "_0_version";
 // "Expected CVR version to have been bumped above original" assert (TS
 // #assertNewVersion, cvr.ts:769: the poke-start cookie must be final before
 // any received part streams). Lowering the default to 100 panicked prod CG
-// tasks within 25 minutes on 2026-08-29 (PARITY-EXCEPTIONS.md D-11 post-
-// mortem). `CVR_CURSOR_PAGE_SIZE` remains for experiments ONLY — values
+// tasks within 25 minutes (PARITY-EXCEPTIONS.md D-11 post-mortem). `CVR_CURSOR_PAGE_SIZE` remains for experiments ONLY — values
 // below a pass's churn window are NOT safe; invalid or 0 falls back to
 // the TS value.
 const DEFAULT_CURSOR_PAGE_SIZE: usize = 10000;
@@ -406,11 +405,11 @@ mod tests {
             processor.cursor_page_size(),
             10000,
             "default must be the TS CURSOR_PAGE_SIZE (the 100 default \
-             panicked prod on 2026-08-29 — D-11 post-mortem)"
+             panicked production — D-11 post-mortem)"
         );
     }
 
-    /// The 2026-08-29 prod panic, reproduced: a flush boundary SMALLER than
+    /// The production panic (D-11), reproduced: a flush boundary SMALLER than
     /// the pass's churn window splits the Add from its cancelling Remove, so
     /// `received` sees a non-net-zero row in a pass that never bumped the
     /// CVR version → TS `#assertNewVersion` (cvr.ts:769) fires. Pins WHY

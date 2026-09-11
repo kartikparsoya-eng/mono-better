@@ -1,4 +1,4 @@
-//! F-11 precondition: an engine pipeline's collector is ALWAYS in streaming
+//! Precondition: an engine pipeline's collector is ALWAYS in streaming
 //! mode, so `CollectOutput.changes` is dead for every pipeline in
 //! `Engine::pipelines`.
 //!
@@ -28,7 +28,7 @@
 //! `debug_assert` is compiled out of a release build and the loops run on the
 //! hot advance path; this test pins it unconditionally.
 //!
-//! NON-VACUOUS: delete the `b.collector.borrow_mut().configure_streaming(...)`
+//! Mutation test: delete the `b.collector.borrow_mut().configure_streaming(...)`
 //! call in `add_queries_streaming` and `push` falls into its non-streaming
 //! branch — `collector_changes_total` becomes 1 after the advance and
 //! `an_engine_pipeline_never_fills_the_non_streaming_changes_buffer` fails on
@@ -108,7 +108,7 @@ fn an_engine_pipeline_never_fills_the_non_streaming_changes_buffer() {
         "hydration must leave the non-streaming `changes` buffer empty"
     );
 
-    // Advance: this is the loop F-11 is about. `advance_streaming` runs the
+    // Advance: this is the loop the precondition is about. `advance_streaming` runs the
     // clear loop over every pipeline once per source change.
     let mut delivered: Vec<RowChange> = Vec::new();
     let change =

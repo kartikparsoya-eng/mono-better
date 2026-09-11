@@ -1,4 +1,4 @@
-//! ART-class guard (self-contained, runs in normal CI — no replica/PG needed):
+//! Release-gate-class guard (self-contained, runs in normal CI — no replica/PG needed):
 //! for EVERY table whose client-declared primary key differs from the IVM
 //! `keyCmp[0]` (shortest replicated unique key), the emitted client-facing
 //! rowKey MUST be keyed by the CLIENT PK.

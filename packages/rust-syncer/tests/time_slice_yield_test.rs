@@ -1,4 +1,4 @@
-//! Non-vacuous guards for the IVM time-slicing port (D1): the `'yield'`
+//! Mutation-tested guards for the IVM time-slicing port: the `'yield'`
 //! sentinel produced by the SQLite `TableSource` (zqlite `generateWithYields`)
 //! reaches the view-syncer's consumer through the engine + driver as
 //! `StreamItem::Yield`; `yieldProcess` actually hands the shard's event loop to

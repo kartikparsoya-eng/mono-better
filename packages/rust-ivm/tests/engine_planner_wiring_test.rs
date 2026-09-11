@@ -7,7 +7,7 @@
 //!
 //! The model-LEVEL divergence is pinned by
 //! `sqlite_cost_model_test::selective_exists_flips_where_count_model_does_not`;
-//! this test pins the ENGINE-level selection. The 2026-08-29 prod incident was
+//! this test pins the ENGINE-level selection. The `tickets` incident was
 //! exactly this seam: the scanstatus port existed but `Engine::plan_ast` still
 //! built the COUNT model, which prices a constrained fetch at ~1 row (fanout
 //! 1.0), so the planner flipped a join whose real parent-side fanout was tens
@@ -132,7 +132,7 @@ fn engine_plans_with_scanstatus_model_not_count() {
     // 1. Conn + specs (the production pipeline_driver wiring) → the engine
     //    must produce the SCANSTATUS decision: flip the selective EXISTS.
     //    Pre-wiring (COUNT model) this returns [Some(false)] — the exact
-    //    divergence behind the 2026-08-29 144s tickets hydrate.
+    //    divergence behind the 144 s `tickets` hydrate incident.
     let mut eng = Engine::new(primary_keys());
     eng.set_cost_model_conn(conn.clone());
     eng.set_cost_model_table_specs(specs());
@@ -147,7 +147,7 @@ fn engine_plans_with_scanstatus_model_not_count() {
     // 2. Conn WITHOUT specs must run UNPLANNED — TS has no fallback cost model
     //    (builder.ts:140 `if (costModel)`), and the old COUNT(*) fallback that
     //    returned [Some(false)] here was the removed rust-only divergence
-    //    (option-b, 2026-08-31). None = no flip assigned = unplanned, never a
+    //    (fe849e862). None = no flip assigned = unplanned, never a
     //    panic, never a different-cost mis-flip.
     let mut eng_nospecs = Engine::new(primary_keys());
     eng_nospecs.set_cost_model_conn(conn.clone());

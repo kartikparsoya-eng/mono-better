@@ -35,7 +35,7 @@ where
 
 /// Trait for the ViewSyncer dispatch interface.
 ///
-/// Implemented live by the CG-side `CgViewSyncer` adapter (L9 Stage 3d), which
+/// Implemented live by the CG-side `CgViewSyncer` adapter, which
 /// executes each message body INLINE on the CG task — the twin of TS
 /// `viewSyncer.<method>` awaiting the view-syncer `#lock`. `async` + `?Send`
 /// (not `Send + Sync`): the live impl holds CG-local (`!Send`) state and must
@@ -73,7 +73,7 @@ pub trait ConnContextManagerDispatch: Send + Sync {
     /// ProtocolError) when no context is registered for `selector`. Callers on
     /// the push/CRUD paths surface the error to the client; they must NEVER
     /// proceed with a defaulted/empty context — a silently-defaulted
-    /// `auth: None` is how the 2026-08-29 prod relay POSTed pushes with no
+    /// `auth: None` is how the production relay once POSTed pushes with no
     /// Authorization at all ("No token provided" 401s).
     fn must_get_connection_context(
         &self,
@@ -124,7 +124,7 @@ pub struct PushRelayHeaders {
     /// site sets this from `ConnContextManagerDispatch::must_get_connection_context`
     /// immediately before relaying, so a token refreshed mid-session via
     /// `updateAuth` is always current — a connect-time snapshot would go stale and
-    /// the API server would reject it with 401 (the 2026-08-27 push-relay
+    /// the API server would reject it with 401 (the push-relay 401
     /// incident). No parallel auth copy is kept (I-8: one owner).
     pub auth: Option<String>,
     /// The connection-context revision `auth` was read at (TS
@@ -197,7 +197,7 @@ pub trait PusherDispatch: Send + Sync {
     /// relayed push comes back 401/403, the connection's context is removed at
     /// the captured revision, so the connection's next message must-fails and
     /// the client reconnects with FRESH auth instead of relaying a dead token
-    /// forever (the 2026-08-29 401 storm).
+    /// forever (the push-relay 401 storm).
     ///
     /// REQUIRED, not defaulted: a dispatch impl that silently inherited a
     /// no-op would lose push-auth invalidation with no compile error and no
@@ -236,7 +236,7 @@ pub type ValidateHook = std::sync::Arc<
 ///
 /// Routes upstream messages to ViewSyncer, Mutagen, Pusher.
 pub struct SyncerWsMessageHandler {
-    /// `Rc`, not `Arc` (L9 Stage 3d): the live dispatch is the CG-local
+    /// `Rc`, not `Arc`: the live dispatch is the CG-local
     /// `CgViewSyncer` (`!Send`); the handler lives and dies on the CG task.
     view_syncer: Rc<dyn ViewSyncerDispatch>,
     conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
@@ -380,8 +380,7 @@ impl MessageHandler for SyncerWsMessageHandler {
             }
 
             Upstream::InitConnection(_) => {
-                // This arm IS the production dispatch (L9 Stage 3d removed the
-                // CG-thread interception): `connContextManager.initConnection`
+                // This arm IS the production dispatch: `connContextManager.initConnection`
                 // records the connection context, then the ViewSyncer dispatch
                 // runs the config/hydrate pass inline on the CG task.
                 let body_value: serde_json::Value = {

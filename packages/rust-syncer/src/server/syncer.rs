@@ -1,5 +1,5 @@
 //! Port of `zero-cache/src/server/syncer.ts` — the syncer worker bootstrap's
-//! per-CG services seat (L9 Stage 5c move out of `main.rs`): TS builds the
+//! per-CG services seat: TS builds the
 //! view-syncer/mutagen/pusher services + their config there; rust's twin is
 //! the `CGServicesFactory` the executors call per client group.
 
@@ -167,7 +167,7 @@ impl CGServicesFactory for RealServicesFactory {
             },
             cvr_pg: Some(crate::CvrPgConfig {
                 // Identity only; the pool is supplied by the hosting executor
-                // (doc 91, §5.1). Every CG on a given executor draws from that
+                // (`RUST-SYNCER-ARCHITECTURE.md` §3). Every CG on a given executor draws from that
                 // executor's bounded pool.
                 schema: format!("{}_{}/cvr", app_id, self.config.shard),
                 cvr_id: cg_id.to_string(),
@@ -194,7 +194,7 @@ impl CGServicesFactory for RealServicesFactory {
 
 #[cfg(test)]
 mod tests {
-    /// F-37: the permissions load must open the replica exactly ONCE, and
+    /// The permissions load must open the replica exactly ONCE, and
     /// read-only.
     ///
     /// `LoadedPermissions` carries both halves (`{permissions, hash}`,
@@ -213,7 +213,7 @@ mod tests {
     /// open mode is used — is a property of the source, not of one run. Same
     /// idiom as the `parity/` guards.
     ///
-    /// NON-VACUOUS: restore the write-mode open, or the second
+    /// Mutation test: restore the write-mode open, or the second
     /// `load_permissions` parse, and the corresponding assertion fails.
     #[test]
     fn the_permissions_load_opens_the_replica_once_and_read_only() {

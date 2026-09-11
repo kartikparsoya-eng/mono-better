@@ -689,7 +689,7 @@ impl CVRStoreHandle {
     }
 
     /// Apply a batch of StoreOps directly to this store's pending writes buffer.
-    /// This is the internal Rust-to-Rust path — no napi boundary crossing.
+    /// This is the internal Rust-to-Rust path — no FFI boundary.
     pub fn apply_store_ops(&mut self, ops: Vec<StoreOp>) {
         for op in ops {
             match op {
@@ -2501,7 +2501,7 @@ mod tests {
     /// like a row the CVR never had, get pruned, and the client would never
     /// receive the row DEL — silent data divergence, reported as a clean flush.
     ///
-    /// Non-vacuous: restore the `if let Err(e) = load() { return empty }` swallow
+    /// Mutation test: restore the `if let Err(e) = load() { return empty }` swallow
     /// in `get_row_records` and this flush returns `Ok(None)` (the tombstone is
     /// pruned against the empty set) instead of `Err`, failing the assert. The
     /// cache is deliberately NOT seeded here, so `load()` hits the unreachable

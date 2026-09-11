@@ -6,7 +6,7 @@
 //! (cvr-store.ts:308-311) and `flush` (cvr-store.ts:1254-1264). rust-cvr
 //! ports both sites (otel_metrics.rs record_load / record_flush_attempt).
 //!
-//! Caught 2026-09-07 at the collector: rust reported 12 `cvr_load_attempts`
+//! Caught at the collector: rust reported 12 `cvr_load_attempts`
 //! against 6 `cvr_load_duration` samples for the same window because
 //! rust-syncer registered a SECOND `zero.sync.cvr.load_attempts` counter and
 //! bumped it around the same `CVRStore::load` call — every load counted twice.

@@ -18,7 +18,7 @@
 //! - `MAX_CLIENT_GROUPS` — Client-group memory backstop (default 1000)
 //! - `ZERO_LOG_SLOW_HYDRATE_THRESHOLD` — Slow-query warn threshold in ms (TS
 //!   `log.slowHydrateThreshold`, default 100); `ZERO_SLOW_HYDRATE_THRESHOLD_MS`
-//!   is the deprecated pre-2026-09-08 alias
+//!   is the deprecated earlier alias
 //! - `RUST_IVM_PLAN_DEBUG` — dump planner cost-model events per production plan
 //!   (`[rust-ivm][PLANDBG]`, ~300 lines/query; never enabled by `RUST_IVM_PERF_TRACE`)
 //! - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_METRICS_EXPORTER` — enable OTLP metrics
@@ -158,7 +158,7 @@ fn main() {
     // handle is injected into each CG's ViewSyncerService so CVR I/O is offloaded
     // onto this runtime (`ViewSyncerService::offload`; the CG executors are
     // current_thread runtimes that must not poll another reactor's connections —
-    // doc 91 §5.1).
+    // `RUST-SYNCER-ARCHITECTURE.md` §3).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -182,7 +182,7 @@ fn main() {
     let metrics = Arc::new(rust_syncer::metrics::Metrics::default());
 
     // Build the ONE shared CVR Postgres pool for the whole process, on THIS main
-    // multi-thread runtime (doc 91). The `K` executors host client groups on
+    // multi-thread runtime (`RUST-SYNCER-ARCHITECTURE.md` §3). The `K` executors host client groups on
     // their own single-threaded runtimes but offload every CVR I/O future back
     // onto this runtime via `SyncEngine::offload` — so the pool's connections are
     // always polled by the reactor that created them (avoiding the §5.1
@@ -219,7 +219,7 @@ fn main() {
     // QUEUES (unboundedly) and degrades to latency, never to an error. The
     // previous 10s timeout turned a cold-start convoy into `PoolTimedOut` →
     // fail_group → clients reconnect + cold-rehydrate → MORE pool demand — a
-    // self-amplifying storm (ART G25: 548 pool timeouts, 314 CG kills). A
+    // self-amplifying storm (a latency-drive replay: 548 pool timeouts, 314 CG kills). A
     // large-but-finite bound rides out convoys like TS while keeping wedge
     // safety TS lacks. Env-overridable for load experiments.
     let acquire_timeout_s: u64 = env::var("CVR_ACQUIRE_TIMEOUT_SECONDS")
@@ -378,7 +378,7 @@ fn main() {
 
     // Periodic allocator trim: pipeline/row memory freed on query-TTL expiry
     // and CG teardown stays in the allocator's free lists (RSS never falls),
-    // which the ART leak gate (G6) — and any operator watching the pod — reads
+    // which the release leak gate — and any operator watching the pod — reads
     // as an unbounded leak. Return free memory to the OS on a slow cadence,
     // well off the hot path. Rust and SQLite allocations both live in mimalloc
     // (INVENTIONS.md I-13, `alloc.rs`; `mi_collect(true)` releases its retained

@@ -1,6 +1,5 @@
 //! Port of `packages/zero-protocol/src/error-kind-enum.ts` — serde
-//! equivalents of the valita schemas (L9 Stage 5a split of the
-//! former single-file `protocol.rs`).
+//! equivalents of the valita schemas.
 
 use serde::{Deserialize, Serialize};
 

@@ -52,11 +52,11 @@ pub use table_source::*;
 /// (~136 per client group). That described `MemorySource::set_db_path`, the
 /// no-snapshotter TEST fallback — production `TableSource`s share the
 /// Snapshotter's two pinned connections exactly like TS (`pipeline_driver.rs`
-/// `build_engine`; measured 2026-09-09: 49 `replica.db` fds for 12 client
+/// `build_engine`; measured: 49 `replica.db` fds for 12 client
 /// groups). So the 24g OOM behind I-19 was 16 MiB × 2 × N client groups —
 /// the footprint TS carries too — and the 2 MiB budget cut each rust client
-/// group's page cache to 1/8 of TS's (sandbox pod 2026-09-09: a 60 s cold
-/// hydrate at 397 µs per sql_step vs a 49 µs median). Restored 2026-09-09.
+/// group's page cache to 1/8 of TS's (sandbox pod: a 60 s cold
+/// hydrate at 397 µs per sql_step vs a 49 µs median).
 pub const SERVING_CONNECTION_CACHE_SIZE_KIB: i64 = 16000;
 
 /// Apply [`SERVING_CONNECTION_CACHE_SIZE_KIB`] to a serving connection.
@@ -68,7 +68,7 @@ pub fn apply_serving_page_cache(conn: &rusqlite::Connection) -> rusqlite::Result
 mod page_cache_budget_tests {
     /// Every serving connection carries TS's effective page cache — the
     /// zero-sqlite3 compiled default, 16 MiB — regardless of what the
-    /// connection started with. Non-vacuous: the sentinel is set FIRST, so
+    /// connection started with. Mutation test: the sentinel is set FIRST, so
     /// dropping the pragma from `apply_serving_page_cache` leaves -500 and the
     /// assertion fails under both links (wal2 static lib in CI, whose compiled
     /// default already IS -16000, and rusqlite's bundled SQLite otherwise).

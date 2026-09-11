@@ -13,7 +13,7 @@
 //! corruption and interrupt. The fix classifies the error:
 //!  - SQLITE_INTERRUPT  → quiet clean stop (cancellation; the cancel path owns
 //!    teardown).
-//!  - SQLITE_CORRUPT/other → panic (propagate); the napi `catch_unwind`
+//!  - SQLITE_CORRUPT/other → panic (propagate); the driver's `catch_unwind`
 //!    surfaces it as a thrown error, matching TS.
 //!
 //! These tests drive the PUBLIC `Input::fetch` path over a real SQLite DB:

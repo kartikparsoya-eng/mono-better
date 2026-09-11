@@ -1,6 +1,6 @@
 //! HTTP server binary for the Rust IVM engine.
 //!
-//! Exposes the engine via a JSON HTTP API for testing with ART.
+//! Exposes the engine via a JSON HTTP API for testing with the release-gate harness.
 //! Single-threaded — the Engine uses Rc<RefCell<>> (not Send/Sync),
 //! matching the TS single-threaded event loop model.
 //!

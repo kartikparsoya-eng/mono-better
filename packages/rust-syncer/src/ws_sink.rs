@@ -1,4 +1,4 @@
-//! DirectWebSocketSink — replaces `NapiWebSocketSink` + TSFN.
+//! DirectWebSocketSink — the writer-task sink (Rust-only, AGENTS.md rule 5).
 //!
 //! The CG thread writes poke frames to a channel; a tokio task drains it and
 //! writes to the WebSocket.
@@ -255,7 +255,7 @@ impl DirectWebSocketSink {
 
 /// Adapt `DirectWebSocketSink` to `rust-cvr`'s `WebSocketSink` trait so
 /// `ClientHandler` / `PokeHandler` can push poke frames straight to the WS
-/// writer task. Replaces `NapiWebSocketSink` (the one napi-specific piece of
+/// writer task. Replaces the removed native bridge's sink (the one FFI-specific piece of
 /// the CVR hot path) with no TSFN — ordering comes from the unbounded channel,
 /// memory bounds from the slow-client shed policy (see module docs).
 impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {

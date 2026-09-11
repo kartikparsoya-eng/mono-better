@@ -218,7 +218,7 @@ pub struct PusherService {
     /// `.lock().ok().and_then(|g| g.clone())`, which yields `None` on a
     /// poisoned lock — so a 401/403 relay response would SILENTLY stop
     /// invalidating the connection context, with no log line. That is the
-    /// 2026-08-29 401-storm mechanism (see the push-relay auth-freshness fix),
+    /// push-relay 401-storm mechanism (see the auth-freshness fix),
     /// so the fail-open branch is deleted rather than handled. Written once at
     /// wiring time, read per push.
     auth_fail_hook: std::sync::Arc<parking_lot::Mutex<Option<AuthFailHook>>>,
@@ -419,7 +419,7 @@ impl PusherService {
                                 // client's next message must-fails and it
                                 // reconnects with FRESH auth instead of
                                 // retrying a dead token forever (the
-                                // 2026-08-29 401 storm).
+                                // push-relay 401 storm).
                                 if status == 401 || status == 403 {
                                     let hook =
                                         drainer_auth_fail_hook.lock().clone();
@@ -1079,7 +1079,7 @@ mod tests {
         (addr, seen)
     }
 
-    /// NON-VACUOUS wiring proof for `combinePushes`: with the first POST held,
+    /// Mutation-test wiring proof for `combinePushes`: with the first POST held,
     /// pushes that queue up behind it for the SAME connection snapshot must be
     /// drained as ONE merged POST (TS PushWorker: dequeue + drain →
     /// combinePushes → process). Written BEFORE the drainer wiring — it fails
@@ -1105,10 +1105,10 @@ mod tests {
         addr
     }
 
-    /// NON-VACUOUS auth-invalidation guard (TS pusher.ts:539: `isAuthErrorBody`
+    /// Mutation-tested auth-invalidation guard (TS pusher.ts:539: `isAuthErrorBody`
     /// → `failConnection(ctx, revision)`): a 401 relay response MUST fire the
     /// auth-fail hook with the enqueue-time (selector, revision); a plain 500
-    /// MUST NOT. Written against the 2026-08-29 prod 401 storm, where rust
+    /// MUST NOT. Written against the production push-relay 401 storm, where rust
     /// surfaced PushFailed but never invalidated the connection, so the client
     /// retried a dead token forever. Proven failing with the hook call removed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1228,9 +1228,8 @@ mod tests {
     /// response whose per-mutation result is `oooMutation` FAILS that client's
     /// downstream with `{PushFailed, origin: server, reason: oooMutation,
     /// message: "mutation was out of order", details, mutationIDs: <all of that
-    /// client's mutations in the response>}` — prod's most common push error
-    /// (Grafana VictoriaLogs, 2026-09-03: the majority of "returned a push
-    /// error" lines). Rust used to drain the 2xx body unread.
+    /// client's mutations in the response>}` — production's most common push
+    /// error (the majority of "returned a push error" log lines). Rust used to drain the 2xx body unread.
     #[tokio::test]
     async fn drainer_fails_downstream_on_ooo_mutation_result() {
         let addr = oneshot_http(
@@ -1483,7 +1482,7 @@ mod tests {
                 assert_eq!(msg[1]["status"], 500);
                 assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
                 // Wire key is TS `bodyPreview` (zero-protocol error.ts:90) —
-                // rust serialized `body_preview` until 2026-09-03.
+                // an earlier version serialized `body_preview`.
                 assert_eq!(msg[1]["bodyPreview"], "nope");
             }
             _ => panic!("expected WsCommand::Fail (error frame + close), got a non-closing frame"),

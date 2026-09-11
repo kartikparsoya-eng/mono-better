@@ -644,7 +644,7 @@ impl PokeHandler {
     /// — reachable only through an `.await` point this loop never reaches. So a
     /// contended chain was not a slow path, it was a permanent 100%-CPU wedge
     /// of the CG thread, and every client of the group stopped receiving acks
-    /// and pokes (the shape of the 2026-08-27 connect-ack outage).
+    /// and pokes (the shape of the connect-ack outage).
     ///
     /// A bounded retry is kept rather than failing on the first miss purely as
     /// insurance against a cross-thread holder this analysis has not foreseen;
@@ -710,8 +710,8 @@ impl PokeHandler {
                 // (client-handler.ts:385-388). Must go through `tracing`, not
                 // `eprintln!`: a raw stderr write has no level, so it ignores
                 // ZERO_LOG_LEVEL and is invisible to every error-count alert and
-                // to G13's error-volume watch, while TS's twin is a countable
-                // ERROR (M14 log differential, 2026-09-08).
+                // to the release gate's error-volume watch, while TS's twin is a countable
+                // ERROR (pinned by `parity/log_differential.py`).
                 tracing::error!(
                     client_group_id = %cg,
                     "Received clients row for wrong clientGroupID. Ignoring."
@@ -1158,7 +1158,7 @@ impl MultiPoker {
                 // calls `this.#downstream.fail(...)` (:306-308) — the failure
                 // reaches the operator through `sendError`, which IS ported.
                 // Keeping it visible at default level would invent an
-                // operator-facing event TS does not have (M14, 2026-09-08).
+                // operator-facing event TS does not have (pinned by `parity/log_differential.py`).
                 tracing::debug!(
                     "Poke add_patch failed for client, dropping from poke: {}",
                     e

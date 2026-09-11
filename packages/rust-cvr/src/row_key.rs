@@ -258,7 +258,7 @@ mod tests {
         }
     }
 
-    /// F-16: the `rowIDString` memo must be PER THREAD, not a process-global
+    /// The `rowIDString` memo must be PER THREAD, not a process-global
     /// `Mutex`.
     ///
     /// TS's memo is a module-level `WeakMap` (row-key.ts:57) reached from a
@@ -272,7 +272,7 @@ mod tests {
     /// A freshly spawned thread must therefore see an EMPTY cache even though
     /// this thread has already memoized the very same RowID.
     ///
-    /// NON-VACUOUS: restore
+    /// Mutation test: restore
     /// `static ROW_ID_STRING_CACHE: OnceLock<parking_lot::Mutex<..>>` with the
     /// `cache.lock()` body and `entries_seen_by_a_fresh_thread` comes back 1
     /// instead of 0 — the assertion that the spawned thread starts cold fails.

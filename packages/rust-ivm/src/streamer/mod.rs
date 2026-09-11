@@ -736,7 +736,7 @@ mod tests {
         }
     }
 
-    /// F-30: the frame `path` is a rust-only stand-in for the `childSchema`
+    /// The frame `path` is a rust-only stand-in for the `childSchema`
     /// argument TS's `#streamNodes` recursion carries in its call frame
     /// (pipeline-driver.ts:1385), so the property to pin is not the
     /// representation but the RESOLUTION: walking the path from the root must
@@ -744,7 +744,7 @@ mod tests {
     /// sharing is what makes the descent cheap (the pre-fix `Rc<[String]>` +
     /// `extend_from_slice` deep-cloned every element, per streamed node).
     ///
-    /// NON-VACUOUS: fold `schema_at` from the last segment, or push a
+    /// Mutation test: fold `schema_at` from the last segment, or push a
     /// transformed `rel` in `extend_path`, and the resolution assertions fail;
     /// change `path` back to `Rc<[String]>` and the sharing assertion cannot
     /// compile.
@@ -790,7 +790,7 @@ mod tests {
         assert!(
             Rc::ptr_eq(&p1[0], &p2[0]),
             "extending a path must share the prefix strings, not re-allocate \
-             them — this is the F-30 fix"
+             them — this is the fix"
         );
     }
 }

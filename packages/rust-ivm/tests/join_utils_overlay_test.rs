@@ -7,7 +7,7 @@
 //! at its sorted position, an EDIT re-inserts the old row and suppresses the
 //! new one, and the generator asserts the overlay was applied).
 //!
-//! Non-vacuous: the previous rust generator had "apply" semantics (ADD
+//! Mutation test: the previous rust generator had "apply" semantics (ADD
 //! inserted a second copy of the node, REMOVE appended the removed node at the
 //! end of the stream, nothing ever asserted) and dropped every `Yield`; all of
 //! the cases below fail against it.

@@ -2,7 +2,7 @@
 //! Connection lifecycle, the Syncer (connection management + serving-lag
 //! statistics, `syncer.ts`), and the WS message handler. `cg_executor` is the
 //! RUST-ONLY scheduling substrate those ported seats run on (no TS twin —
-//! INVENTIONS.md I-1/doc 91).
+//! INVENTIONS.md I-1; `RUST-SYNCER-ARCHITECTURE.md` §3).
 pub mod cg_executor;
 pub mod connect_params;
 pub mod connection;
