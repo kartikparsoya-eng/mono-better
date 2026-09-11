@@ -348,6 +348,56 @@ both engines rejected it and that whole slot tested nothing.
 Fixed in the same series: the unpaired-surrogate parse divergence itself
 (`parse_frame_json`, the rust twin of `connection.ts:203` `JSON.parse`).
 
+## M15 — schema-typed boundaries: the `valita → Value` blind spot (added + executed 2026-09-11/12)
+
+M13 pinned the *lexical* layer (bytes → parsed value) and R3/R4 made every
+upstream body type strict. It stopped at the fields the port had typed as
+`serde_json::Value` — the ledger's `valita → Value (D-17)` aliases — and at the
+replies rust reads back from the API server, which no frame corpus reaches.
+Each of those is a TS `v.parse(...)` with a schema and a **parse mode** that
+rust was not applying:
+
+| TS parse site | mode | rust before | port |
+|---|---|---|---|
+| `mustGetTableSpec` (lite-tables.ts:326) | throw | empty-input fallback, 0 rows | A 5fb06b576 |
+| `upstreamSchema` desired-queries patch + `astSchema` (queries-patch.ts, ast.ts) | strict | raw `Value` | B 5fcf98c0b |
+| `fetchFromAPIServer(queryResponseSchema)` (custom/fetch.ts:260) | **passthrough** | raw `Value`, synthesized per-query "missing ast" | C 0f292ee7e |
+| `v.parse(obj, permissionsConfigSchema)` (load-permissions.ts:50) | strict | hand-written `validate_*`, unknown keys accepted | D ec7c0b856 |
+| `v.parse(ensureSafeJSON(row), mutationRowSchema, 'passthrough')` (client-handler.ts:252) | passthrough | rust-only "if `result` is a string, parse it" | E e241c57d3 |
+| `apiFailedBody` / `ErrorOrigin.ZeroCache` (error-origin-enum.ts:3) | — | hand-built `"origin": "zero-cache"` (client schema rejects it) | F 1180aac78 |
+| `fetchFromAPIServer(mutateResponseSchema)` (pusher.ts:522) | passthrough | `from_slice(..).unwrap_or(Null)` → success | G c3ae602e8 |
+| `pushBodySchema.mutations` = `v.array(mutationSchema)` (push.ts:8) | strict | `Vec<Value>` | H 794dded35 |
+
+**Parse mode is part of the spec.** valita's default is strict (unknown keys,
+`null` for `.optional()`, literals outside a union all reject); `{mode:
+'passthrough'}` keeps unknown keys at every level and still checks every known
+field (verified with node against `packages/shared/src/valita.ts`). serde fixes
+`deny_unknown_fields` per type, so `protocol/ast.rs` and `mutation_id.rs` stamp
+one schema body out twice (`strict` / `passthrough` modules through a
+`macro_rules!`) — Rust-only machinery for a TS parameter, labelled as such.
+Validation is separate from representation: an accepted AST/patch/row stays
+JSON, as TS keeps the parsed object.
+
+**How each port was proven.** A fail-first per port: the new tests against the
+previous implementation (`git show HEAD:path` spliced with the new tests where
+they share a file), `--no-fail-fast`, the `FAILED` lines kept as evidence; then
+the port, then the same tests green. Port F's round-trip test
+(`ErrorBody::deserialize(&err)`) is the shape to reuse for any hand-built error
+body: it fails today on any literal the wire enums do not carry.
+
+**Residual, documented:** error *text* — serde's `unknown field \`x\`` vs valita's
+`Unexpected property x at .path` — is unchanged on every `InvalidMessage` /
+`parse` path; `elide` is byte-aware where TS's is char-based (differs only for
+non-ASCII permissions docs). Neither is a client-visible *decision* change.
+
+**Guard lessons.** `helper_imports.py` matches a valita `xxxSchema` twin by
+alias only (`XxxSchema` ≠ `Xxx` under `canon`) — repoint the alias at the real
+twin, never delete it. `prod_reachability.py` flags a rust-only stub whose
+method NAMES collide with ported symbols (`EmptyInput::fetch`) once nothing in
+prod reaches it — make it `#[cfg(test)]`, not an alias. A sweep of every
+hand-built `"origin"/"kind"/"reason"` literal against the TS enum values is
+now clean; keep it so by building bodies through `ErrorBody`.
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree

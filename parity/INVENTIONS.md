@@ -148,6 +148,15 @@ guarantees, error semantics) versus TS.
   Violated again 2026-08-29 (adapter defaulted a missing context to
   `auth: None` → headerless relays; no failConnection on 401 → dead-token
   retry storm) — both fixed with the tests above.
+- **Contract (reply parse, 2026-09-12):** the relay's 2xx body is parsed
+  against `mutateResponseSchema` in valita passthrough mode, exactly as
+  `fetchFromAPIServer` parses the API server's reply (custom/fetch.ts:258-262):
+  a body that is not JSON or is outside the schema is `PushFailed`/`parse`
+  carrying THIS push's `mutationIDs` and fails the client's downstream
+  (pusher.ts:301-305 + 563-567). The relay normally forwards the validated
+  `MutateResponse` verbatim, so this only fires when the loopback hop itself
+  misbehaves — but "a 2xx the client never hears about" is not a permitted
+  outcome. Test: `drainer_fails_downstream_on_unparseable_relay_reply`.
 - **Contract note (non-auth fields):** `cookie`/`origin`/`request_headers`/
   `user_id` are connect-time in BOTH — TS sets them once in the initial context
   and neither `updateAuth` nor `initConnection` mutate them (connection-context-
