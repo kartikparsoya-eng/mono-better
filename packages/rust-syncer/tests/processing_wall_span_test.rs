@@ -76,7 +76,23 @@ fn processing_wall_covers_the_poke_not_just_the_fetch() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",
             "_0_version" "text",

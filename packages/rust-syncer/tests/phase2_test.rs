@@ -444,7 +444,7 @@ fn test_push_with_crud_mutation_opaque_auth_is_rejected() {
     let mutagen = Arc::new(MockMutagen::default());
     let handler = create_handler(vs.clone(), ccm.clone(), Some(mutagen.clone()), None);
 
-    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
+    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"_zero_crud","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
     let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
@@ -478,7 +478,7 @@ fn test_push_with_crud_mutation_routes_to_mutagen() {
         Some(pusher.clone()),
     );
 
-    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
+    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"_zero_crud","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
     let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
@@ -496,7 +496,7 @@ fn test_push_with_crud_mutation_no_mutagen_returns_fatal() {
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
-    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
+    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"_zero_crud","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
     let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
@@ -525,7 +525,7 @@ fn test_push_with_crud_mutation_error_returns_transient() {
         Some(pusher.clone()),
     );
 
-    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
+    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"_zero_crud","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
     let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);

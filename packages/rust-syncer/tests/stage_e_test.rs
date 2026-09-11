@@ -30,7 +30,23 @@ fn hydrate_real_rows_produces_row_pokes() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",
             "_0_version" "text",
@@ -257,7 +273,23 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",
             "_0_version" "text",
@@ -394,7 +426,23 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",
             "_0_version" "text",
@@ -514,7 +562,10 @@ fn partial_success_transform_hydrates_healthy_query() {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0u8; 8192];
             let _ = stream.read(&mut buf); // drain request (we don't parse it)
-            let body = r#"{"queries":[{"id":"custom_ok","ast":{"table":"issue"}},{"id":"custom_err","error":{"message":"boom"}}]}"#;
+            // `querySuccessSchema` (query-server.ts:18-22): a `QueryResponse` whose
+            // entries are `transformedQuery | erroredQuery` (custom-queries.ts:15-39)
+            // — `name` on both, `error: 'app'` as the literal, `message` beside it.
+            let body = r#"{"kind":"QueryResponse","queries":[{"id":"custom_ok","name":"n","ast":{"table":"issue"}},{"error":"app","id":"custom_err","name":"n","message":"boom"}]}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -528,7 +579,23 @@ fn partial_success_transform_hydrates_healthy_query() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id"    "text|NOT_NULL",
             "title" "text",
             "_0_version" "text",
@@ -724,7 +791,23 @@ fn transform_failure_fails_only_the_offending_connection() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"
-        CREATE TABLE "issue" (
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "lastMutationID" INTEGER,
+            "userID"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  TEXT,
+            "clientID"       TEXT,
+            "mutationID"     INTEGER,
+            "result"         TEXT,
+            _0_version       TEXT NOT NULL,
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+CREATE TABLE "issue" (
             "id" "text|NOT_NULL", "title" "text", "_0_version" "text",
             PRIMARY KEY ("id")
         );
@@ -871,7 +954,23 @@ fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
-            CREATE TABLE "issue" (
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "lastMutationID" INTEGER,
+                "userID"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+            );
+CREATE TABLE "issue" (
                 "id"    "text|NOT_NULL",
                 "title" "text",
                 "_0_version" "text",
@@ -1023,7 +1122,23 @@ fn pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
-            CREATE TABLE "issue" (
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "lastMutationID" INTEGER,
+                "userID"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            CREATE TABLE "app_0.mutations" (
+                "clientGroupID"  TEXT,
+                "clientID"       TEXT,
+                "mutationID"     INTEGER,
+                "result"         TEXT,
+                _0_version       TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+            );
+CREATE TABLE "issue" (
                 "id"    "text|NOT_NULL",
                 "title" "text",
                 "_0_version" "text",
