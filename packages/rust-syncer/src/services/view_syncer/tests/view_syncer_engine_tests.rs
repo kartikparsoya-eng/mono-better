@@ -597,9 +597,11 @@ async fn quiet_commit_bump_discard_logs_only_when_patches_were_sent() {
                 &[],
                 &ws_ids,
                 &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
                 &std::collections::HashSet::new(),
             )
             .await
@@ -668,9 +670,11 @@ async fn hydrate_and_sync_emits_poke_frames() {
             &[],
             &["ws1".to_string()],
             &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
             &std::collections::HashSet::new(),
         )
         .await
@@ -767,9 +771,11 @@ async fn hydrate_and_sync_records_inspector_materialization_and_ast() {
             &[],
             &["ws1".to_string()],
             &[("q1".to_string(), ast.to_string())],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
             &std::collections::HashSet::new(),
         )
         .await
@@ -891,7 +897,16 @@ async fn advance_and_sync_uses_header_version_not_empty() {
         .store(7, std::sync::atomic::Ordering::Relaxed);
     *crate::metrics::LAST_ADVANCE_MS.lock().unwrap() = None;
     let result = engine
-        .advance_and_sync(make_cvr(), "v1".to_string(), &["ws1".to_string()], 0, 0, 0)
+        .advance_and_sync(
+            make_cvr(),
+            "v1".to_string(),
+            &["ws1".to_string()],
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
+        )
         .await;
     let row_map_reads = engine.existing_rows_calls.get();
     let row_count_after = engine.row_count();
@@ -1004,9 +1019,11 @@ async fn config_update_no_op_flush_does_not_close_client() {
                 false,
                 None,
                 None,
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
             )
             .await
             .unwrap();
@@ -1107,9 +1124,11 @@ async fn delete_clients_no_op_flush_does_not_close_client() {
             false,
             None,
             None,
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1129,9 +1148,11 @@ async fn delete_clients_no_op_flush_does_not_close_client() {
             &["client2".to_string()],
             &[],
             &["ws1".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1189,9 +1210,11 @@ async fn config_and_hydrate_from_desired_queries_pokes_client() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1306,9 +1329,11 @@ async fn slow_query_materialization_warns_per_query_with_its_ast() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await;
     drop(guard);
@@ -1462,9 +1487,11 @@ async fn expiry_tick_removes_nothing_until_pipelines_are_synced() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1484,9 +1511,11 @@ async fn expiry_tick_removes_nothing_until_pipelines_are_synced() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1575,9 +1604,11 @@ async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1597,9 +1628,11 @@ async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1616,9 +1649,11 @@ async fn delete_clients_resyncs_the_pipeline_set_like_update_cvr_config() {
             &["client1".to_string()],
             &[],
             &["ws2".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1679,9 +1714,11 @@ async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines()
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1702,9 +1739,11 @@ async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines()
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1716,7 +1755,15 @@ async fn remove_expired_queries_re_adds_a_cvr_query_missing_from_the_pipelines()
     assert!(!engine.pipelines().has_query("q2"));
 
     let (_cvr, removed) = engine
-        .remove_expired_queries(cvr, &ws, 0, 0, 2000)
+        .remove_expired_queries(
+            cvr,
+            &ws,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 2000,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(removed, 1, "q1 expired");
@@ -1770,9 +1817,11 @@ async fn expired_query_is_removed_after_ttl_elapses() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1795,9 +1844,11 @@ async fn expired_query_is_removed_after_ttl_elapses() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1805,7 +1856,15 @@ async fn expired_query_is_removed_after_ttl_elapses() {
 
     // 3) Not yet expired at ttl_clock=500 (< inactivated_at 0 + ttl 1000).
     let (cvr, removed) = engine
-        .remove_expired_queries(cvr, &ws, 0, 0, 500)
+        .remove_expired_queries(
+            cvr,
+            &ws,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 500,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(removed, 0);
@@ -1813,7 +1872,15 @@ async fn expired_query_is_removed_after_ttl_elapses() {
 
     // 4) Expired at ttl_clock=2000 → removed from pipeline + CVR.
     let (cvr, removed) = engine
-        .remove_expired_queries(cvr, &ws, 0, 0, 2000)
+        .remove_expired_queries(
+            cvr,
+            &ws,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 2000,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(removed, 1);
@@ -1861,9 +1928,11 @@ async fn clear_op_drops_all_desired_queries() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1882,7 +1951,8 @@ async fn clear_op_drops_all_desired_queries() {
             &shard,
             Vec::new(),
             Vec::new(),
-            true, // clear
+            true,
+            // clear
             None,
             CustomQueryTransformMode::All,
             None,
@@ -1890,9 +1960,11 @@ async fn clear_op_drops_all_desired_queries() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1948,9 +2020,11 @@ async fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -1973,9 +2047,11 @@ async fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2070,9 +2146,11 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
             Some(&ctx),
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await;
     assert_eq!(
@@ -2115,9 +2193,11 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
             Some(&ctx),
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await;
     assert!(
@@ -2157,9 +2237,11 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
             Some(&ctx),
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await;
     assert_eq!(
@@ -2220,9 +2302,11 @@ async fn hydrate_unchanged_runs_once_per_pipeline_init() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2249,9 +2333,11 @@ async fn hydrate_unchanged_runs_once_per_pipeline_init() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2279,9 +2365,11 @@ async fn hydrate_unchanged_runs_once_per_pipeline_init() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2334,9 +2422,11 @@ async fn changed_transformation_hash_rehydrates_query() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2374,9 +2464,11 @@ async fn changed_transformation_hash_rehydrates_query() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2706,9 +2798,11 @@ async fn delete_clients_removes_client_and_acks() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2728,9 +2822,11 @@ async fn delete_clients_removes_client_and_acks() {
             None,
             "00".to_string(),
             "v1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();
@@ -2748,9 +2844,11 @@ async fn delete_clients_removes_client_and_acks() {
             &["client2".to_string()],
             &[],
             &["ws1".to_string(), "ws2".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         )
         .await
         .unwrap();

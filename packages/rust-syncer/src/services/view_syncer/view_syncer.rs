@@ -1908,7 +1908,15 @@ impl ViewSyncerService {
         // `#rowCount` is maintained by the store during flush (cvr-store.ts:1068),
         // not recomputed at the top of every pass.
         match self
-            .remove_expired_queries(cvr, &client_ids, self.last_connect_time, now, ttl_clock)
+            .remove_expired_queries(
+                cvr,
+                &client_ids,
+                FlushTimes {
+                    last_connect_time: self.last_connect_time,
+                    last_active: now,
+                    ttl_clock,
+                },
+            )
             .await
         {
             Ok((cvr, n)) => {
@@ -3072,9 +3080,11 @@ impl ViewSyncerService {
                     query_ctx.as_ref(),
                     state_version,
                     replica_version,
-                    self.last_connect_time,
-                    now,
-                    ttl_clock,
+                    FlushTimes {
+                        last_connect_time: self.last_connect_time,
+                        last_active: now,
+                        ttl_clock,
+                    },
                 )
                 .await;
             // TEST SEAM: arm the next pass to answer `Err`, exactly as an
@@ -3572,9 +3582,11 @@ impl ViewSyncerService {
                 &ack_ids,
                 deleted_group_ids,
                 &poke_ws,
-                self.last_connect_time,
-                now,
-                ttl_clock,
+                FlushTimes {
+                    last_connect_time: self.last_connect_time,
+                    last_active: now,
+                    ttl_clock,
+                },
             )
             .await
         {
@@ -3814,9 +3826,11 @@ impl ViewSyncerService {
                 cvr,
                 self.replica_version.clone(),
                 &client_ids,
-                self.last_connect_time,
-                now,
-                ttl_clock,
+                FlushTimes {
+                    last_connect_time: self.last_connect_time,
+                    last_active: now,
+                    ttl_clock,
+                },
             )
             .await
         {
@@ -4010,9 +4024,11 @@ impl ViewSyncerService {
                 query_ctx.as_ref(),
                 state_version,
                 replica_version,
-                self.last_connect_time,
-                now,
-                ttl_clock,
+                FlushTimes {
+                    last_connect_time: self.last_connect_time,
+                    last_active: now,
+                    ttl_clock,
+                },
             )
             .await
         {
@@ -4715,6 +4731,21 @@ fn force_load_error_take() -> Option<CVRStoreError> {
 //   → `CVRStoreHandle::flush` (PG).
 //
 // Runs on the CG task; not `Send`/`Sync`.
+
+/// The three clock values TS passes positionally to `CVRUpdater.flush(lc,
+/// lastConnectTime, lastActive, ttlClock)` (cvr.ts:183-187). Rust-only bundling
+/// (AGENTS.md rule 5): the orchestration methods below thread them through
+/// several layers, and a named struct keeps their call sites legible; they are
+/// unpacked positionally at the `flush` call so that port stays 1:1.
+#[derive(Debug, Clone, Copy)]
+pub struct FlushTimes {
+    /// TS `lastConnectTime` — the CVR store's connect time for this service.
+    pub last_connect_time: i64,
+    /// TS `lastActive` — `Date.now()` at the start of the pass.
+    pub last_active: i64,
+    /// TS `ttlClock` — the client group's TTL clock reading for the pass.
+    pub ttl_clock: TTLClock,
+}
 
 /// Result of `hydrate_and_sync` / `advance_and_sync`.
 #[derive(Debug)]
@@ -5635,6 +5666,10 @@ impl ViewSyncerService {
     /// set — read-permission-transforming each client query (internal queries
     /// skip the transform) and hydrating those not already running — then pokes
     /// got-queries + rows.
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     pub async fn config_and_hydrate(
         &mut self,
@@ -5652,9 +5687,7 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<CVR, JsError> {
         self.config_and_hydrate_with_profile(
             cvr,
@@ -5672,13 +5705,15 @@ impl ViewSyncerService {
             custom_ctx,
             state_version,
             replica_version,
-            last_connect_time,
-            last_active,
-            ttl_clock,
+            times,
         )
         .await
     }
 
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     pub async fn config_and_hydrate_with_profile(
         &mut self,
@@ -5711,9 +5746,7 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<CVR, JsError> {
         // Snapshot each connected client's cookie BEFORE any poke advances it.
         // Both the config poke and the hydrate poke call `end()`, which advances
@@ -5756,9 +5789,7 @@ impl ViewSyncerService {
                 desired_clear,
                 client_schema,
                 profile_id,
-                last_connect_time,
-                last_active,
-                ttl_clock,
+                times,
             )
             .await?;
         // Phase profiling (SYNCER_TRACE): the config-update phase does query
@@ -5782,9 +5813,7 @@ impl ViewSyncerService {
             custom_ctx,
             state_version,
             replica_version,
-            last_connect_time,
-            last_active,
-            ttl_clock,
+            times,
             original_client_versions,
         )
         .await
@@ -5794,6 +5823,10 @@ impl ViewSyncerService {
     /// config patches. Port of TS `ViewSyncerService.#handleConfigUpdate` /
     /// `#updateCVRConfig` (view-syncer.ts) — the config-driven half of every
     /// initConnection / changeDesiredQueries / deleteClients cycle.
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     async fn handle_config_update(
         &mut self,
@@ -5806,10 +5839,13 @@ impl ViewSyncerService {
         desired_clear: bool,
         client_schema: Option<ClientSchema>,
         profile_id: Option<&str>,
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<CVR, JsError> {
+        let FlushTimes {
+            last_connect_time,
+            last_active,
+            ttl_clock,
+        } = times;
         // ── Phase 1: config-driven — record client + desired queries. ──
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         cfg.ensure_client(client_id);
@@ -5917,6 +5953,10 @@ impl ViewSyncerService {
     /// Sync the pipeline set to the CVR's FULL query set (transform, add/remove,
     /// hydrate, poke, catch up). Port of TS
     /// `ViewSyncerService.#syncQueryPipelineSet` (view-syncer.ts).
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     async fn sync_query_pipeline_set(
         &mut self,
@@ -5929,11 +5969,14 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
         original_client_versions: std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<CVR, JsError> {
+        let FlushTimes {
+            last_connect_time: _,
+            last_active: _,
+            ttl_clock,
+        } = times;
         // TS `#syncQueryPipelineSet` first runs `#hydrateUnchangedQueries`
         // (view-syncer.ts:592/1449) — a PROACTIVE re-hydrate of every
         // already-gotten same-hash query each sync, to drift-check still-alive
@@ -6452,9 +6495,7 @@ impl ViewSyncerService {
                     &remove_queries,
                     poke_ws_ids,
                     &queries,
-                    last_connect_time,
-                    last_active,
-                    ttl_clock,
+                    times,
                     &drifted_query_ids,
                 )
                 .await?;
@@ -7003,6 +7044,10 @@ impl ViewSyncerService {
     /// `(query_id, ast_json)` for the pipelines to hydrate. A hydrate panic
     /// (source-drift assert) propagates out for teardown, after the engine rolls
     /// back its partial source connections.
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     /// Hydrate queries and poke their rows. Returns the still-OPEN `MultiPoker`
     /// alongside the result: the caller MUST call `pokers.end(result.cvr.version)`
@@ -7021,11 +7066,14 @@ impl ViewSyncerService {
         remove_queries: &[String],
         client_ids: &[String],
         queries: &[(String, String)],
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
         drifted_query_ids: &std::collections::HashSet<String>,
     ) -> Result<(SyncResult, MultiPoker), JsError> {
+        let FlushTimes {
+            last_connect_time,
+            last_active,
+            ttl_clock,
+        } = times;
         // Port of TS `#lookupRowsForExecutedAndRemovedQueries` (cvr.ts:652-667).
         // TS kicks that off from `trackQueries` and it returns WITHOUT reading the
         // row cache when nothing was executed or removed — its own comment:
@@ -7376,16 +7424,18 @@ impl ViewSyncerService {
     /// TS `#advancePipelines` (view-syncer.ts:2567) through `#processChanges`
     /// (:2601). On a reset, the in-flight
     /// poke is cancelled and the caller is expected to rehydrate.
-    #[allow(clippy::too_many_arguments)]
     pub async fn advance_and_sync(
         &mut self,
         cvr: CVR,
         replica_version: String,
         client_ids: &[String],
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<SyncResult, String> {
+        let FlushTimes {
+            last_connect_time,
+            last_active,
+            ttl_clock,
+        } = times;
         // The pre-advance CVR version — only clients AT this version may receive
         // the advance delta (see the poke-target filter below).
         let cvr_version = cvr.version.clone();
@@ -7619,15 +7669,17 @@ impl ViewSyncerService {
     /// pipeline + CVR and poke the resulting query/row removals. Port of TS
     /// `#removeExpiredQueries` → the removal side of `#syncQueryPipelineSet`.
     /// Returns the flushed CVR and the number of queries removed (0 = no-op).
-    #[allow(clippy::too_many_arguments)]
     pub async fn remove_expired_queries(
         &mut self,
         cvr: CVR,
         client_ids: &[String],
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<(CVR, usize), String> {
+        let FlushTimes {
+            last_connect_time: _,
+            last_active: _,
+            ttl_clock,
+        } = times;
         // `get_inactive_queries` returns queries inactive for every client with
         // the longest per-client eviction time; expired = that time is at or
         // before the current ttl_clock. Internal queries never appear here.
@@ -7668,9 +7720,7 @@ impl ViewSyncerService {
                 custom_ctx.as_ref(),
                 state_version,
                 replica_version,
-                last_connect_time,
-                last_active,
-                ttl_clock,
+                times,
                 original_client_versions,
             )
             .await?;
@@ -7687,6 +7737,10 @@ impl ViewSyncerService {
     /// cleanup and explicit `deleted.clientIDs`); `ack_client_ids` is the subset
     /// the client explicitly asked to delete — TS only acks those (not the
     /// implicit inactive-client cleanup).
+    // TS reads these through `this` / `connCtx` at call time; rust passes them
+    // per pass so each value stays with its one TS-mirroring owner (AGENTS.md
+    // rule 9). `FlushTimes` bundles the tail TS itself passes as a unit; the
+    // rest are TS fields, one parameter each.
     #[allow(clippy::too_many_arguments)]
     pub async fn delete_clients(
         &mut self,
@@ -7698,10 +7752,13 @@ impl ViewSyncerService {
         ack_client_ids: &[String],
         ack_group_ids: &[String],
         poke_ws_ids: &[String],
-        last_connect_time: i64,
-        last_active: i64,
-        ttl_clock: TTLClock,
+        times: FlushTimes,
     ) -> Result<CVR, String> {
+        let FlushTimes {
+            last_connect_time,
+            last_active,
+            ttl_clock,
+        } = times;
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         let mut patches: Vec<PatchToVersion> = Vec::new();
         for cid in delete_client_ids {
@@ -7799,9 +7856,7 @@ impl ViewSyncerService {
                     custom_ctx.as_ref(),
                     state_version,
                     replica_version,
-                    last_connect_time,
-                    last_active,
-                    ttl_clock,
+                    times,
                     original_client_versions,
                 )
                 .await?;

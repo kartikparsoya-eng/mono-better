@@ -19,7 +19,7 @@
 //! Mutation test: the sink below stalls the `pokeEnd` frame, which is inside TS's
 //! span and outside the old rust one. Move the log back into `hydrate_and_sync`
 //! and the reported `wall` drops to the fetch time, failing the assertion.
-
+use rust_syncer::services::view_syncer::view_syncer::FlushTimes;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -143,9 +143,11 @@ fn processing_wall_covers_the_poke_not_just_the_fetch() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
     });

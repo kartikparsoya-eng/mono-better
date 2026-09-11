@@ -906,7 +906,7 @@ pipeline-driver.ts to the view-syncer's row loops, which do
 takes a FIFO turn at ~10 ms granularity.
 
 **Rust.** There is no yield at all. `pipelines.hydrate(queries, |rc| ...)` and
-`pipelines.advance(...)` (view_syncer.rs:7176, :7412) take a **synchronous**
+`pipelines.advance(...)` (view_syncer.rs:7236, :7412) take a **synchronous**
 `FnMut(&RowChange)` callback; SQLite reads, IVM materialization and the CVR row
 processing all run to completion inline before the call returns.
 

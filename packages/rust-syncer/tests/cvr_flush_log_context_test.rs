@@ -29,7 +29,7 @@
 //! PG-gated on `TEST_CVR_PG_URI`: the flush log only fires when a real store
 //! flushed something (`store_flushed.is_some()`), so a storeless engine never
 //! reaches the line.
-
+use rust_syncer::services::view_syncer::view_syncer::FlushTimes;
 mod common;
 use common::{cvr_ddl, pg_uri};
 
@@ -192,9 +192,11 @@ fn flushed_cvr_line_carries_the_ts_log_context() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("config_and_hydrate");
     });

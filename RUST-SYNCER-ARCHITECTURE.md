@@ -131,10 +131,10 @@ The resolution (the two-runtime model):
 
 - **K executor threads** are the compute lanes. Each is a `tokio` **`current_thread` runtime + `LocalSet`** (`workers/cg_executor.rs:204-208`), hosting a hash/least-loaded shard of client groups as `spawn_local` tasks.
 - **The main multi-thread runtime** owns the reactor (accept loop, HTTP, JWKS fetches) **and the one shared PG pool**.
-- When a CG needs Postgres I/O, it does **not** run it on its executor thread. It **offloads** the future onto the main runtime via `ViewSyncerService::offload` (`view_syncer.rs:5023`), so the pool's connections are always polled by the reactor that created them.
+- When a CG needs Postgres I/O, it does **not** run it on its executor thread. It **offloads** the future onto the main runtime via `ViewSyncerService::offload` (`view_syncer.rs:5066`), so the pool's connections are always polled by the reactor that created them.
 
 ```rust
-// view_syncer.rs:5023 — the offload primitive
+// view_syncer.rs:5066 — the offload primitive
 async fn offload<F, T>(&self, fut: F) -> T
 where F: Future<Output = T> + Send + 'static, T: Send + 'static,
 {
@@ -190,7 +190,7 @@ The rules, each grounded in code:
 
 ### The CG event loop
 
-Once spawned, each CG runs `cg_event_loop` (`view_syncer.rs:4200`, invoked from `cg_executor.rs:285`), a `tokio::select!` (**biased**, `view_syncer.rs:4317-3030`) over the message channel plus deadline timers:
+Once spawned, each CG runs `cg_event_loop` (`view_syncer.rs:4228`, invoked from `cg_executor.rs:285`), a `tokio::select!` (**biased**, `view_syncer.rs:4345-3030`) over the message channel plus deadline timers:
 
 ```mermaid
 stateDiagram-v2
@@ -206,7 +206,7 @@ stateDiagram-v2
     Teardown --> [*]: Drop runs Engine destroy
 ```
 
-Notifications are **coalesced** — the `Notification` arm drains consecutive `Notification`s with `try_recv()` and merges them into a single advance, newest state winning but keeping the oldest commit time (TS `notifier.ts` pattern, `view_syncer.rs:4582-4640`).
+Notifications are **coalesced** — the `Notification` arm drains consecutive `Notification`s with `try_recv()` and merges them into a single advance, newest state winning but keeping the oldest commit time (TS `notifier.ts` pattern, `view_syncer.rs:4610-4668`).
 
 ---
 
@@ -254,8 +254,8 @@ sequenceDiagram
 | Route + auth | auth **before** touching existing conns (anti-DoS) | `workers/syncer.rs:855` (`create_connection`) |
 | `connected` frame | `["connected",{wsid,timestamp,appID,shardNum}]` on the accept task | `workers/syncer.rs:970`, `protocol/connect.rs:52` |
 | Placement/spawn | least-loaded → SpawnCg → build engine + `spawn_local` | `workers/syncer.rs:1198`, `cg_executor.rs:119`, `:270` |
-| Hydrate → diff → poke | `config_and_hydrate` → `hydrate_and_sync` | `view_syncer.rs:5627`, `:7003` |
-| Advance | `advance_and_sync` on commit notification | `view_syncer.rs:7368` |
+| Hydrate → diff → poke | `config_and_hydrate` → `hydrate_and_sync` | `view_syncer.rs:5674`, `:7060` |
+| Advance | `advance_and_sync` on commit notification | `view_syncer.rs:7427` |
 
 ---
 
@@ -315,7 +315,7 @@ pub struct ViewSyncerService {
 }
 ```
 
-### Hydrate path — `hydrate_and_sync` (`view_syncer.rs:7003`)
+### Hydrate path — `hydrate_and_sync` (`view_syncer.rs:7060`)
 
 ```mermaid
 flowchart TB
@@ -334,16 +334,16 @@ flowchart TB
 - The poke is **not** ended inside `hydrate_and_sync`; the caller appends catch-up patches (rows missed while the client was away) and then calls `pokers.end()`.
 - After the hydrate loop, per query it records `add_metric(QueryMaterializationServer, ms, qid)` + `add_query(qid, ast)` into the per-CG `InspectorDelegate` (mirrors TS `#addQueryMaterializationServerMetric` at view-syncer.ts:2296; see §16).
 
-### Advance path — `advance_and_sync` (`view_syncer.rs:7368`)
+### Advance path — `advance_and_sync` (`view_syncer.rs:7427`)
 
 Runs on each commit notification:
 
 1. `pipelines.advance` (`pipeline_driver.rs:1259`) streams the replica delta tail→head, returning `AdvanceOutcome::Advanced{version, num_changes}` or `AdvanceOutcome::Reset{reason}` (scalar-subquery / schema change → caller rehydrates).
 2. Build a `CVRQueryDrivenUpdater` at the **actual post-advance version from the engine header** (using the empty string here used to be a bug).
 3. Diff each collected `RowChange`, `updater.flush()`, then `flush_to_store()` via `offload`.
-4. `pokers.end(version)` — **only clients at the pre-advance version are poked**; lagging clients are excluded (`advance_poke_targets`, `view_syncer.rs:6521`).
+4. `pokers.end(version)` — **only clients at the pre-advance version are poked**; lagging clients are excluded (`advance_poke_targets`, `view_syncer.rs:6574`).
 
-### `hydrateUnchangedQueries` (`view_syncer.rs:6806`)
+### `hydrateUnchangedQueries` (`view_syncer.rs:6859`)
 
 A same-transformation-hash re-hydrate path (TS `#hydrateUnchangedQueries`): re-materializes queries whose transformation hash is unchanged, records the inspector metric keyed by `transformationHash` (mirrors view-syncer.ts:1640), and feeds `accumulate_signature`.
 
@@ -485,7 +485,7 @@ flowchart LR
 | **Access** | read-only, snapshot-isolated | read + write |
 | **Driver** | `rusqlite` (sync, thread-local) | `sqlx` (async, pooled) |
 | **Connection model** | one connection **per IVM Source**, pinned to the CG thread | **one shared pool** for the whole process (`main.rs:228`) |
-| **Who polls it** | the executor thread directly | the main runtime, via `offload` (`view_syncer.rs:5023`) |
+| **Who polls it** | the executor thread directly | the main runtime, via `offload` (`view_syncer.rs:5066`) |
 | **Concurrency unit** | one snapshot per advance (Snapshotter leapfrog) | `pool.begin()` per transaction |
 
 The pool is created eagerly but falls back to a **lazy** pool if the CVR PG is unreachable at boot — deliberate TS parity (TS also comes up "ready" with CVR down and connects lazily). `/readyz` reports the true health for the load balancer.
@@ -511,7 +511,7 @@ The pool is created eagerly but falls back to a **lazy** pool if the CVR PG is u
 | Cross-thread routing | `mpsc::UnboundedSender` in `CGHandle` | `workers/cg_executor.rs:72` |
 | Connection map | `DashMap` (lock-free shards) | `workers/syncer.rs:585` |
 | Shared state locks | `parking_lot::Mutex`, `Arc<AtomicU64/Bool>` | throughout |
-| DB I/O offload | `ViewSyncerService::offload` → main runtime | `view_syncer.rs:5023` |
+| DB I/O offload | `ViewSyncerService::offload` → main runtime | `view_syncer.rs:5066` |
 | Backpressure | atomic depth/byte counters + `watch` kill | `ws_sink.rs:158`/`:173` |
 
 **The core idea:** IVM can't be parallelized *within* a group (it's `!Send`), so throughput comes from *spreading groups across executor threads*, while all blocking I/O is kept off those threads.

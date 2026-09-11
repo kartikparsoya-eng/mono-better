@@ -651,9 +651,11 @@ fn transform_rereads_permissions_through_the_snapshot_at_use_time() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
     assert!(result_cvr.queries.contains_key("q_issue"));

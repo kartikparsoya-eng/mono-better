@@ -9,7 +9,7 @@
 //!
 //! Uses `init_from_connection` (hydrate needs only a plain SQLite connection —
 //! the snapshotter/wal2 machinery is only required for `advance`).
-
+use rust_syncer::services::view_syncer::view_syncer::FlushTimes;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -98,9 +98,11 @@ fn hydrate_real_rows_produces_row_pokes() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
 
@@ -217,9 +219,11 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
 
@@ -337,9 +341,11 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
 
@@ -464,9 +470,11 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
             Some(&ctx),
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
 
@@ -593,9 +601,11 @@ fn partial_success_transform_hydrates_healthy_query() {
             Some(&ctx),
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .unwrap();
 
@@ -787,9 +797,11 @@ fn transform_failure_fails_only_the_offending_connection() {
         Some(&ctx),
         "00".to_string(),
         "01".to_string(),
-        0,
-        0,
-        0,
+        FlushTimes {
+            last_connect_time: 0,
+            last_active: 0,
+            ttl_clock: 0,
+        },
     ))
     .unwrap();
 
@@ -921,9 +933,11 @@ fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
                 None,
                 "00".to_string(),
                 "01".to_string(),
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
             )
             .await
             .unwrap();
@@ -956,9 +970,11 @@ fn pg_hydrate_releases_its_row_snapshot_before_the_flush() {
                 None,
                 "00".to_string(),
                 "01".to_string(),
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
             )
             .await
             .unwrap();
@@ -1068,9 +1084,11 @@ fn pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked() {
                 None,
                 "00".to_string(),
                 "01".to_string(),
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
             )
             .await
             .unwrap();
@@ -1096,9 +1114,11 @@ fn pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked() {
                 None,
                 "00".to_string(),
                 "01".to_string(),
-                0,
-                0,
-                0,
+                FlushTimes {
+                    last_connect_time: 0,
+                    last_active: 0,
+                    ttl_clock: 0,
+                },
             )
             .await
             .unwrap();

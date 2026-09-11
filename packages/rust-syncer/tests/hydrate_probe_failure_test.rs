@@ -38,7 +38,7 @@
 //! JSON log lines. `install_typed_unwind_panic_hook` (INVENTIONS.md I-22)
 //! silences exactly the two carrier payloads. Mutation test: make that installer a
 //! no-op and the child process's stderr carries `sqlite_cost_model.rs` again.
-
+use rust_syncer::services::view_syncer::view_syncer::FlushTimes;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -222,9 +222,11 @@ fn unpreparable_cost_probe_fails_the_group_with_an_error_not_a_dead_task() {
             None,
             "00".to_string(),
             "01".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect_err(
             "a hydrate whose cost probe cannot be prepared must return an ERROR \

@@ -32,7 +32,7 @@
 //! Regression coverage: `pg_repro_catchup_from_cg_thread` (the exact CG-thread
 //! model: non-worker thread + `Handle::block_on` + real flush + catchup) and
 //! `pg_repro_failed_flush_does_not_hang` (liveness on flush failure).
-
+use rust_syncer::services::view_syncer::view_syncer::FlushTimes;
 mod common;
 use common::{cvr_ddl, pg_uri};
 
@@ -1277,9 +1277,11 @@ fn pg_advance_lmid_change_with_no_queries() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("initial hydrate");
 
@@ -1317,9 +1319,11 @@ fn pg_advance_lmid_change_with_no_queries() {
             // c1 is still online, so the advance must poke it directly (unlike
             // the offline-catchup template, which passes no poke targets).
             &["ws1".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("lmid advance");
     assert_eq!(advanced.num_changes, 1, "one clients row changed");
@@ -1498,9 +1502,11 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("hydrate");
         let mut wire = String::new();
@@ -1695,9 +1701,11 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("initial hydrate");
     while rx1.try_recv().is_ok() {} // drain the hydrate poke
@@ -1747,9 +1755,11 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
             hydrated,
             "replica-1".to_string(),
             &["ws1".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("quiet advance");
     assert_eq!(
@@ -1986,9 +1996,11 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("initial hydrate");
     let hydrate_cookie = version_string(&hydrated.version);
@@ -2022,7 +2034,16 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         .unwrap();
     }
     let advanced = rt
-        .block_on(engine.advance_and_sync(hydrated, "replica-1".to_string(), &[], 0, 0, 0))
+        .block_on(engine.advance_and_sync(
+            hydrated,
+            "replica-1".to_string(),
+            &[],
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
+        ))
         .expect("offline advance");
     assert_eq!(advanced.num_changes, 1, "one replica row changed");
     assert!(advanced.reset_reason.is_none(), "advance must not reset");
@@ -2061,9 +2082,11 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             None,
             "02".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("reconnect catchup");
 
@@ -2421,9 +2444,11 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("initial hydrate");
 
@@ -2465,9 +2490,11 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
             // Poke the still-connected client (at the pre-advance version) so we
             // can observe the delta the advance produces.
             &["ws1".to_string()],
-            0,
-            0,
-            0,
+            FlushTimes {
+                last_connect_time: 0,
+                last_active: 0,
+                ttl_clock: 0,
+            },
         ))
         .expect("advance");
 
