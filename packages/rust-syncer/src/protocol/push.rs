@@ -24,6 +24,9 @@ use super::optional_no_null;
 pub struct PushBody {
     #[serde(rename = "clientGroupID")]
     pub client_group_id: String,
+    /// `v.array(mutationSchema)` (push.ts:8): each entry validated against
+    /// the strict `Mutation` twin, kept as JSON for the relay.
+    #[serde(deserialize_with = "crate::protocol::mutation::strict_mutations")]
     pub mutations: Vec<Value>,
     #[serde(rename = "pushVersion")]
     pub push_version: crate::protocol::JsNumber,

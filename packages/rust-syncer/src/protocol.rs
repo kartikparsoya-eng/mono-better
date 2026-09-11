@@ -115,6 +115,7 @@ pub mod client_schema;
 pub mod close_connection;
 pub mod connect;
 pub mod custom_queries;
+pub mod data;
 pub mod delete_clients;
 pub mod down;
 pub mod error;
@@ -129,6 +130,7 @@ pub mod mutations_patch;
 pub mod ping;
 pub mod poke;
 pub mod pong;
+pub mod primary_key;
 pub mod protocol_version;
 pub mod pull;
 pub mod push;
@@ -235,6 +237,32 @@ mod tests {
 
     /// `inspectAnalyzeQueryUpSchema` carries `astSchema.optional()` twice
     /// (inspect-up.ts:48,51); both are validated the same way.
+    /// `pushBodySchema.mutations` is `v.array(mutationSchema)` (push.ts:8),
+    /// parsed strictly at the boundary: a mutation with an unknown key, a
+    /// `type` outside `'crud' | 'custom'`, or CRUD `args` that is not a
+    /// one-element tuple fails the whole `push` message with an
+    /// `InvalidMessage`, before any handler runs.
+    #[test]
+    fn parse_upstream_rejects_malformed_mutations_in_push() {
+        let push = |mutation: &str| {
+            format!(
+                r#"["push",{{"clientGroupID":"cg","mutations":[{mutation}],"pushVersion":1,"timestamp":1,"requestID":"r"}}]"#
+            )
+        };
+        let ok =
+            push(r#"{"type":"custom","id":1,"clientID":"c1","name":"n","args":[],"timestamp":1}"#);
+        assert!(parse_upstream(&ok).is_ok(), "{ok}");
+        for bad in [
+            r#"{"type":"custom","id":1,"clientID":"c1","name":"n","args":[],"timestamp":1,"extra":1}"#,
+            r#"{"type":"other","id":1,"clientID":"c1","name":"n","args":[],"timestamp":1}"#,
+            r#"{"type":"crud","id":1,"clientID":"c1","name":"_zero_crud","args":[],"timestamp":1}"#,
+            r#"{"id":1,"clientID":"c1"}"#,
+        ] {
+            let msg = push(bad);
+            assert!(parse_upstream(&msg).is_err(), "must reject: {msg}");
+        }
+    }
+
     #[test]
     fn parse_upstream_rejects_unknown_keys_in_inspect_analyze_query_ast() {
         let good = r#"["inspect",{"op":"analyze-query","id":"1","ast":{"table":"issue"}}]"#;
