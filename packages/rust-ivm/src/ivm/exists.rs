@@ -42,7 +42,9 @@ pub struct Exists {
     parent_join_key: Vec<String>,
     /// If the parentJoinKey is the primary key, no sense in trying to reuse.
     no_size_reuse: bool,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
     output: Rc<RefCell<Option<FilterOutputHandle>>>,
     /// Per-filter-loop cache: cache_key -> exists. Cleared in `end_filter`
     /// (TS exists.ts:76).
@@ -84,7 +86,7 @@ impl Exists {
             not,
             parent_join_key,
             no_size_reuse,
-            schema,
+            schema: Rc::new(schema),
             output: Rc::new(RefCell::new(None)),
             cache: Rc::new(RefCell::new(HashMap::new())),
             in_push: Cell::new(false),
@@ -167,7 +169,7 @@ impl Exists {
 
 impl InputBase for Exists {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {
@@ -259,9 +261,10 @@ impl FilterOutput for Exists {
                 self.push_with_filter(change, None);
             }
             ChangeType::Child => {
-                let (node, child) = match &change {
-                    Change::Child { node, child } => (node.clone(), child.clone()),
-                    _ => unreachable!(),
+                // Borrow the change's node and child (TS reads them in place);
+                // the node is cloned only on the two branches that emit it.
+                let Change::Child { node, child } = &change else {
+                    unreachable!()
                 };
                 // Only add/remove child changes for the watched relationship
                 // can change its size; everything else pushes through the
@@ -277,29 +280,29 @@ impl FilterOutput for Exists {
                 }
                 match child.change.change_type() {
                     ChangeType::Add => {
-                        let size = self.fetch_size(&node);
+                        let size = self.fetch_size(node);
                         if size == 1 {
                             if self.not {
                                 // The add child change is not pushed to output,
                                 // so the added child must be EXCLUDED from the
                                 // remove being pushed (exists.ts:142-156).
-                                let removed_node = node.set_relationship(
+                                let removed_node = node.clone().set_relationship(
                                     self.relationship_name.as_str(),
                                     crate::ivm::stream::empty_rel(),
                                 );
                                 self.push_to_output(make_remove_change(removed_node));
                             } else {
-                                self.push_to_output(make_add_change(node));
+                                self.push_to_output(make_add_change(node.clone()));
                             }
                         } else {
                             self.push_with_filter(change, Some(size > 0));
                         }
                     }
                     ChangeType::Remove => {
-                        let size = self.fetch_size(&node);
+                        let size = self.fetch_size(node);
                         if size == 0 {
                             if self.not {
-                                self.push_to_output(make_add_change(node));
+                                self.push_to_output(make_add_change(node.clone()));
                             } else {
                                 // The remove child change is not pushed to
                                 // output, so the removed child must be ADDED to
@@ -310,8 +313,9 @@ impl FilterOutput for Exists {
                                 };
                                 let rel =
                                     crate::ivm::stream::rel_from_vec(vec![removed_child_node]);
-                                let removed_node =
-                                    node.set_relationship(self.relationship_name.as_str(), rel);
+                                let removed_node = node
+                                    .clone()
+                                    .set_relationship(self.relationship_name.as_str(), rel);
                                 self.push_to_output(make_remove_change(removed_node));
                             }
                         } else {

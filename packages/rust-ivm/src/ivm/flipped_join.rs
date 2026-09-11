@@ -64,10 +64,18 @@ pub struct FlippedJoinArgs {
 pub struct FlippedJoin {
     parent: Shared<dyn Input>,
     child: Shared<dyn Input>,
-    parent_key: CompoundKey,
-    child_key: CompoundKey,
-    relationship_name: String,
-    schema: SourceSchema,
+    // `Rc` (Rust-only, AGENTS.md rule 5): every fetch's batch state and every
+    // pushed node's relationship closure capture these. TS captures `this` by
+    // reference; owned values here deep-cloned the key vectors and the schema
+    // tree per fetch / per node.
+    parent_key: Rc<CompoundKey>,
+    child_key: Rc<CompoundKey>,
+    relationship_name: Rc<str>,
+    schema: Rc<SourceSchema>,
+    /// The child input's schema, read once at construction. TS reads
+    /// `this.#child.getSchema()` per fetch, but that returns a reference;
+    /// the Rust trait method returns an owned copy of the whole tree.
+    child_schema: Rc<SourceSchema>,
     output: Rc<RefCell<Option<OutputHandle>>>,
     inprogress_child_change: Rc<RefCell<Option<Change>>>,
     inprogress_child_change_position: Rc<RefCell<Option<Row>>>,
@@ -101,7 +109,7 @@ impl FlippedJoin {
         let child_schema = args.child.borrow().get_schema();
         let schema = parent_schema.with_relationship(
             &args.relationship_name,
-            child_schema,
+            child_schema.clone(),
             args.hidden,
             args.system,
         );
@@ -109,10 +117,11 @@ impl FlippedJoin {
         let fj = Rc::new(RefCell::new(FlippedJoin {
             parent: args.parent.clone(),
             child: args.child.clone(),
-            parent_key: args.parent_key.clone(),
-            child_key: args.child_key.clone(),
-            relationship_name: args.relationship_name.clone(),
-            schema,
+            parent_key: Rc::new(args.parent_key.clone()),
+            child_key: Rc::new(args.child_key.clone()),
+            relationship_name: Rc::from(args.relationship_name.as_str()),
+            schema: Rc::new(schema),
+            child_schema: Rc::new(child_schema),
             output: Rc::new(RefCell::new(None)),
             inprogress_child_change: Rc::new(RefCell::new(None)),
             inprogress_child_change_position: Rc::new(RefCell::new(None)),
@@ -143,7 +152,7 @@ impl FlippedJoin {
             inprogress: self.inprogress_child_change.clone(),
             inprogress_pos: self.inprogress_child_change_position.clone(),
             parent: self.parent.clone(),
-            child_schema: self.child.borrow().get_schema(),
+            child_schema: self.child_schema.clone(),
         }
     }
 
@@ -259,8 +268,10 @@ impl FlippedJoin {
 
             let mut overlaid = related;
 
-            let inp = inprogress.borrow().clone();
-            let inp_pos = inprogress_pos.borrow().clone();
+            // Read the in-progress cells under a borrow; the change is cloned
+            // only on the branch that hands it to the overlay generator.
+            let inp = inprogress.borrow();
+            let inp_pos = inprogress_pos.borrow();
             if let (Some(change), Some(pos)) = (inp.as_ref(), inp_pos.as_ref()) {
                 let matches = is_join_match(
                     &change.node().row,
@@ -294,12 +305,11 @@ impl FlippedJoin {
                         ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
                             if !has_been_pushed {
                                 let overlay_change = change.clone();
-                                let cs = child_schema.clone();
                                 overlaid = crate::ivm::stream::skip_yields(
                                     generate_with_overlay_no_yield(
                                         from_vec(overlaid),
                                         overlay_change,
-                                        &cs,
+                                        &child_schema,
                                     ),
                                 )
                                 .collect::<Vec<Node>>();
@@ -308,12 +318,14 @@ impl FlippedJoin {
                     }
                 }
             }
+            drop(inp);
+            drop(inp_pos);
 
             if overlaid.is_empty() {
                 Vec::new()
             } else {
                 let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
-                let node = pn.set_relationship(relationship_name.as_str(), rel);
+                let node = pn.set_relationship(Rc::clone(&relationship_name), rel);
                 vec![StreamItem::Data(node)]
             }
         }))
@@ -332,7 +344,7 @@ impl FlippedJoin {
         // with the CHILD schema's comparator (TS: this.#child.getSchema()
         // .compareRows) — NOT self.schema (the parent comparator), which sorts
         // by the parent key the child rows don't carry.
-        let child_compare = self.child.borrow().get_schema().compare_rows.clone();
+        let child_compare = self.child_schema.compare_rows.clone();
         let constraint = build_join_constraint(&child_row, &self.child_key, &self.parent_key);
 
         if let Some(c) = constraint {
@@ -380,14 +392,14 @@ impl FlippedJoin {
 
                 let new_node = parent_node
                     .clone()
-                    .set_relationship(relationship_name.as_str(), child_stream);
+                    .set_relationship(Rc::clone(&relationship_name), child_stream);
 
                 if exists {
                     output.borrow_mut().push(
                         make_child_change(
                             new_node,
                             ChildData {
-                                relationship_name,
+                                relationship_name: relationship_name.to_string(),
                                 change: Box::new(change_clone.clone()),
                             },
                         ),
@@ -395,7 +407,7 @@ impl FlippedJoin {
                     );
                 } else {
                     let node = parent_node.clone().set_relationship(
-                        relationship_name.as_str(),
+                        Rc::clone(&relationship_name),
                         Rc::new(move || from_vec(vec![change_clone.node().clone()])),
                     );
                     match change.change_type() {
@@ -410,7 +422,7 @@ impl FlippedJoin {
                                 make_child_change(
                                     node,
                                     ChildData {
-                                        relationship_name: relationship_name.clone(),
+                                        relationship_name: relationship_name.to_string(),
                                         change: Box::new(change.clone()),
                                     },
                                 ),
@@ -465,7 +477,7 @@ impl FlippedJoin {
                     None => empty_stream(),
                 }
             });
-            node.set_relationship(relationship_name.as_str(), rel)
+            node.set_relationship(Rc::clone(&relationship_name), rel)
         };
 
         match change {
@@ -500,7 +512,7 @@ impl FlippedJoin {
 
 impl InputBase for FlippedJoin {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {
@@ -546,7 +558,7 @@ impl Input for FlippedJoin {
             child_nodes: Vec::new(),
             parts: Some(self.batch_parts()),
             req: req.clone(),
-            child_compare: self.child.borrow().get_schema().compare_rows.clone(),
+            child_compare: self.child_schema.compare_rows.clone(),
             parent_stream: None,
         })
     }
@@ -554,14 +566,14 @@ impl Input for FlippedJoin {
 
 /// The operator state `#fetchBatched` closes over in TS.
 struct BatchParts {
-    parent_key: Vec<String>,
-    child_key: Vec<String>,
+    parent_key: Rc<CompoundKey>,
+    child_key: Rc<CompoundKey>,
     compare_rows: crate::ivm::data::Comparator,
-    relationship_name: String,
+    relationship_name: Rc<str>,
     inprogress: Rc<RefCell<Option<Change>>>,
     inprogress_pos: Rc<RefCell<Option<Row>>>,
     parent: Shared<dyn Input>,
-    child_schema: SourceSchema,
+    child_schema: Rc<SourceSchema>,
 }
 
 /// The generator body of TS `FlippedJoin.fetch` (flipped-join.ts:161-209).
@@ -607,8 +619,8 @@ impl Iterator for FlippedJoinFetch {
 impl FlippedJoinFetch {
     /// TS flipped-join.ts:186-203.
     fn splice_inprogress_remove(&self, parts: &BatchParts, child_nodes: &mut Vec<Node>) {
-        let inprogress = parts.inprogress.borrow().clone();
-        if let Some(ref change) = inprogress
+        let inprogress = parts.inprogress.borrow();
+        if let Some(change) = inprogress.as_ref()
             && change.change_type() == ChangeType::Remove
         {
             let removed = change.node().clone();

@@ -59,3 +59,11 @@ criterion = "0.5"
 [[bench]]
 name = "ivm_hot_bench"
 harness = false
+
+# Clone-density workload (tests/support/clone_density_fixture.rs): hydrate /
+# advance wall-time for a related join, a correlated EXISTS and a related +
+# limit over MemorySource and TableSource. tests/clone_density_test.rs counts
+# allocations per delivered row for the same shapes.
+[[bench]]
+name = "hydrate_bench"
+harness = false

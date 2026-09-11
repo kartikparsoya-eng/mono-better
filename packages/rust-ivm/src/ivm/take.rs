@@ -452,26 +452,24 @@ impl Take {
             ChangeType::Edit => {
                 self.push_edit_change(change, &output, pusher);
             }
+            // The arms read the node in place (TS passes `change[NODE]`).
             ChangeType::Add => {
-                let (node, _) = match change {
-                    Change::Add(n) => (n.clone(), ()),
-                    _ => unreachable!(),
+                let Change::Add(node) = change else {
+                    unreachable!()
                 };
-                self.push_add_change(&node, &output, pusher);
+                self.push_add_change(node, &output, pusher);
             }
             ChangeType::Remove => {
-                let (node, _) = match change {
-                    Change::Remove(n) => (n.clone(), ()),
-                    _ => unreachable!(),
+                let Change::Remove(node) = change else {
+                    unreachable!()
                 };
-                self.push_remove_change(&node, &output, pusher);
+                self.push_remove_change(node, &output, pusher);
             }
             ChangeType::Child => {
-                let (node, _) = match change {
-                    Change::Child { node, .. } => (node.clone(), ()),
-                    _ => unreachable!(),
+                let Change::Child { node, .. } = change else {
+                    unreachable!()
                 };
-                self.push_child_change(change, &node, &output, pusher);
+                self.push_child_change(change, node, &output, pusher);
             }
         }
     }
@@ -694,9 +692,8 @@ impl Take {
     }
 
     fn push_edit_change(&self, change: &Change, output: &OutputHandle, pusher: &dyn InputBase) {
-        let (node, old_node) = match change {
-            Change::Edit { node, old_node } => (node.clone(), old_node.clone()),
-            _ => unreachable!(),
+        let Change::Edit { node, old_node } = change else {
+            unreachable!()
         };
 
         // Assert partition key didn't change
@@ -855,7 +852,9 @@ impl Take {
                 output,
                 pusher,
             );
-            output.borrow_mut().push(make_add_change(node), pusher);
+            output
+                .borrow_mut()
+                .push(make_add_change(node.clone()), pusher);
             return;
         }
 

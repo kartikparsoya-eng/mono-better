@@ -28,7 +28,9 @@ pub struct FanOut {
     outputs: RefCell<Vec<FilterOutputHandle>>,
     fan_in: Option<Shared<FanIn>>,
     destroy_count: usize,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
 }
 
 impl FanOut {
@@ -39,7 +41,7 @@ impl FanOut {
             outputs: RefCell::new(Vec::new()),
             fan_in: None,
             destroy_count: 0,
-            schema,
+            schema: Rc::new(schema),
         }));
         // TS: `input.setFilterOutput(this)`.
         let as_output: FilterOutputHandle = fan_out.clone();
@@ -54,7 +56,7 @@ impl FanOut {
 
 impl InputBase for FanOut {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     /// TS: ref-counted — the upstream input is destroyed only when EVERY

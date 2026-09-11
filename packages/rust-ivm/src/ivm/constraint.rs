@@ -44,7 +44,10 @@ pub fn constraint_matches_primary_key(constraint: &Constraint, primary: &[String
     }
     // TS `constraintKeys.sort(stringCompare)` (constraint.ts:65).
     constraint_keys.sort_by(|a, b| string_compare(a, b));
-    let mut sorted_primary: Vec<String> = primary.to_vec();
+    // References, not copies: this runs on every fetch that carries a
+    // constraint (a take partition check, an index choice), and cloning the
+    // key names allocated once per column each time.
+    let mut sorted_primary: Vec<&String> = primary.iter().collect();
     sorted_primary.sort_by(|a, b| string_compare(a, b));
     for (ck, pk) in constraint_keys.iter().zip(sorted_primary.iter()) {
         if ck.as_str() != pk.as_str() {
@@ -82,10 +85,13 @@ pub fn key_matches_primary_key(key: impl IntoIterator<Item = String>, primary: &
     }
     // TS `constraintKeys.sort(stringCompare)` (constraint.ts:65).
     constraint_keys.sort_by(|a, b| string_compare(a, b));
-    let mut sorted_primary: Vec<String> = primary.to_vec();
+    // References, not copies: this runs on every fetch that carries a
+    // constraint (a take partition check, an index choice), and cloning the
+    // key names allocated once per column each time.
+    let mut sorted_primary: Vec<&String> = primary.iter().collect();
     sorted_primary.sort_by(|a, b| string_compare(a, b));
     for (ck, pk) in constraint_keys.iter().zip(sorted_primary.iter()) {
-        if ck != pk {
+        if ck.as_str() != pk.as_str() {
             return false;
         }
     }

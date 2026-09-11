@@ -1764,8 +1764,12 @@ fn sqlite_value_to_row(
         map.iter()
             .map(|(k, v)| {
                 let ct = col_types.and_then(|c| c.get(k));
-                let val =
-                    crate::sqlite::table_source::sqlite_value_to_ivm(Ok(v.clone()), ct, "", k);
+                let val = crate::sqlite::table_source::sqlite_value_to_ivm(
+                    Ok(rusqlite::types::ValueRef::from(v)),
+                    ct,
+                    "",
+                    k,
+                );
                 (k.clone(), val)
             })
             .collect(),

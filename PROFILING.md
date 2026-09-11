@@ -53,6 +53,15 @@ running image for initial-testing environments.
 - `GET /census` — live-object counters across all three crates (the G6
   leak-hunt instrument); poll during load to see which counter climbs.
 - `GET /heapz` — TS-compat heap snapshot surface.
+- **Clone density (allocations per delivered row):** `cd packages/rust-ivm &&
+  cargo test --test clone_density_test -- --nocapture` prints allocations and
+  bytes per row for a related join, a correlated EXISTS and a related+limit
+  over MemorySource and TableSource, and asserts each shape's ceiling (the
+  value measured after the per-row clones were removed, plus 10%). To
+  attribute a regression: `CLONE_DENSITY_SHAPE="Sqlite/related hydrate"
+  CLONE_DENSITY_OUT=/tmp/d.json cargo test --test clone_density_test --
+  --ignored clone_density_profile`, then view the JSON in dh_view or
+  aggregate it by frame.
 
 ## 4 · Leaks — "is memory freed?"
 
@@ -95,6 +104,9 @@ running image for initial-testing environments.
   `cargo bench -- --save-baseline before` / `--baseline before`.
   Exemplar: `benches/version_bench.rs` (version-string codec). Add a bench
   beside any hot unit you touch.
+- `packages/rust-ivm/benches/hydrate_bench.rs` — hydrate/advance wall time on
+  the clone-density workload (same fixture as `tests/clone_density_test.rs`,
+  which pins the allocation counts); needs the `SQLITE3_*` env the tests use.
 - Prod-level twin: the ART latency gates (G5/G25/G42) against
   `art-baseline.json`.
 

@@ -693,9 +693,8 @@ impl Input for SourceInput {
                 |row| {
                     let mut map: FxHashMap<String, Value> = FxHashMap::default();
                     for (i, col) in col_names.iter().enumerate() {
-                        let val = crate::sqlite::db::read_value_lossy(row, i);
                         let value = crate::sqlite::table_source::sqlite_value_to_ivm(
-                            val,
+                            row.get_ref(i),
                             column_types.get(col),
                             &self.table_name,
                             col,
@@ -1039,7 +1038,7 @@ pub(crate) fn apply_source_overlays(
     let count = overlay_changes.len();
     for (index, change) in overlay_changes.into_iter().enumerate() {
         let stable_edit = (index < historical.change_count).then(|| StableEdit {
-            primary_key: historical.primary_key.clone(),
+            primary_key: (*historical.primary_key).clone(),
             sort: historical.sort.clone(),
         });
         let nodes = apply_source_overlay_impl(
@@ -1069,7 +1068,9 @@ pub(crate) fn apply_source_overlays(
 
 pub(crate) struct HistoricalOverlayContext {
     pub change_count: usize,
-    pub primary_key: Vec<String>,
+    /// Shared with the source (Rust-only, AGENTS.md rule 5): built once per
+    /// fetch, and a fetch runs once per parent row under a join.
+    pub primary_key: Rc<Vec<String>>,
     pub sort: SortOrder,
 }
 
@@ -1618,7 +1619,7 @@ mod overlay_tests {
             &FetchRequest::default(),
             HistoricalOverlayContext {
                 change_count: 1,
-                primary_key: vec!["id".to_string()],
+                primary_key: Rc::new(vec!["id".to_string()]),
                 sort,
             },
             None,

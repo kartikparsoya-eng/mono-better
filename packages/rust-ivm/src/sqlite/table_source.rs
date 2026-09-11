@@ -63,9 +63,12 @@ struct LazyRows {
     _stmt: Pin<Box<rusqlite::CachedStatement<'static>>>,
     _guard: Ref<'static, Connection>,
     _conn: Rc<RefCell<Connection>>,
-    column_names: Vec<String>,
-    columns: HashMap<String, ColumnType>,
-    table_name: String,
+    /// Shared with the source (Rust-only, AGENTS.md rule 5): a fetch runs once
+    /// per parent row under a join, and owning these cloned a `Vec<String>`,
+    /// a column-type map and a `String` on every one of them.
+    column_names: Rc<Vec<String>>,
+    columns: Rc<HashMap<String, ColumnType>>,
+    table_name: Rc<str>,
     /// Optional debug delegate (port of TS `#fetch`'s `connection.debug`,
     /// zqlite/table-source.ts:284). When present, each vended row is recorded
     /// via `rowVended`. `None` in prod (trackRowsVended off), so the hot read
@@ -89,15 +92,15 @@ impl LazyRows {
         conn: Rc<RefCell<Connection>>,
         sql: String,
         params: Vec<SqlParam>,
-        column_names: Vec<String>,
-        columns: HashMap<String, ColumnType>,
-        table_name: String,
+        column_names: Rc<Vec<String>>,
+        columns: Rc<HashMap<String, ColumnType>>,
+        table_name: Rc<str>,
         debug: Option<SharedDebug>,
     ) -> Result<Pin<Box<Self>>, rusqlite::Error> {
         let _t = crate::perf_trace::scope("source.sql_prepare");
         // The SQL text is the `rowVended`/`initQuery` key (TS uses
-        // `sqlAndBindings.text`). Capture it before `sql` is moved into prepare.
-        let query_text = sql.clone();
+        // `sqlAndBindings.text`); `prepare_cached` borrows it, so the same
+        // `String` is kept as `query_text` below.
         // Hold an immutable RefCell borrow for the entire struct lifetime.
         let guard: Ref<'_, Connection> = conn.borrow();
         let guard_static: Ref<'static, Connection> = unsafe { std::mem::transmute(guard) };
@@ -126,7 +129,7 @@ impl LazyRows {
         // a query that vends nothing still appears in the VENDED report. Runs
         // after prepare, before the first step — the same point as TS.
         if let Some(d) = &debug {
-            d.borrow_mut().init_query(&table_name, &query_text);
+            d.borrow_mut().init_query(&table_name, &sql);
         }
 
         // Retain params for the Drop-time scanstatus re-read only on the analyze
@@ -142,7 +145,7 @@ impl LazyRows {
             columns,
             table_name,
             debug,
-            query_text,
+            query_text: sql,
             params,
             fetched: 0,
             _pin: PhantomPinned,
@@ -319,8 +322,8 @@ impl Iterator for LazyRowsIter {
                 let mut map: FxHashMap<String, Value> =
                     FxHashMap::with_capacity_and_hasher(column_names.len(), Default::default());
                 for (i, col) in column_names.iter().enumerate() {
-                    let val = crate::sqlite::db::read_value_lossy(raw_row, i);
-                    let value = sqlite_value_to_ivm(val, columns.get(col), table_name, col);
+                    let value =
+                        sqlite_value_to_ivm(raw_row.get_ref(i), columns.get(col), table_name, col);
                     map.insert(col.clone(), value);
                 }
                 let row: Row = Arc::new(map);
@@ -419,9 +422,9 @@ impl Iterator for GenerateWithYields {
 fn stream_query(
     db: Rc<RefCell<Connection>>,
     query: SqlQuery,
-    column_names: Vec<String>,
-    columns: HashMap<String, ColumnType>,
-    table_name: String,
+    column_names: Rc<Vec<String>>,
+    columns: Rc<HashMap<String, ColumnType>>,
+    table_name: Rc<str>,
     debug: Option<SharedDebug>,
 ) -> Box<dyn Iterator<Item = Row>> {
     let table_name_for_err = table_name.clone();
@@ -470,13 +473,19 @@ fn stream_query(
 /// and a `json` column as raw text, diverging from TS (`true/false`, parsed
 /// object). Mirrors the coercion already in `ivm/source.rs`; keeps the ±2^53
 /// integer bounds check for numeric columns.
+///
+/// Takes the borrowed `ValueRef` (Rust-only, AGENTS.md rule 5): a TEXT cell
+/// used to be copied into a `String` by `read_value_lossy` and then again into
+/// the row's `Arc<str>` — two allocations per text cell on every fetched row.
+/// The same lossy-UTF-8 contract as `read_value_lossy` applies (better-sqlite3
+/// decodes with replacement characters).
 pub(crate) fn sqlite_value_to_ivm(
-    val: rusqlite::Result<rusqlite::types::Value>,
+    val: rusqlite::Result<rusqlite::types::ValueRef<'_>>,
     col_type: Option<&ColumnType>,
     table: &str,
     col: &str,
 ) -> Value {
-    use rusqlite::types::Value as Sv;
+    use rusqlite::types::ValueRef as Sv;
     let is_bool = matches!(col_type, Some(ColumnType::Boolean { .. }));
     let is_json = matches!(col_type, Some(ColumnType::Json { .. }));
     match val {
@@ -500,9 +509,11 @@ pub(crate) fn sqlite_value_to_ivm(
         // guaranteed-valid for the wire, which re-parses it into an object on JS.
         Ok(Sv::Integer(n)) if is_json => json_sqlite_text_to_ivm(&n.to_string(), table, col),
         Ok(Sv::Real(n)) if is_json => json_sqlite_text_to_ivm(&n.to_string(), table, col),
-        Ok(Sv::Text(s)) if is_json => json_sqlite_text_to_ivm(&s, table, col),
+        Ok(Sv::Text(s)) if is_json => {
+            json_sqlite_text_to_ivm(&String::from_utf8_lossy(s), table, col)
+        }
         Ok(Sv::Blob(b)) if is_json => {
-            let s = String::from_utf8_lossy(&b);
+            let s = String::from_utf8_lossy(b);
             json_sqlite_text_to_ivm(&s, table, col)
         }
 
@@ -521,11 +532,11 @@ pub(crate) fn sqlite_value_to_ivm(
             Value::F64(n as f64)
         }
         Ok(Sv::Real(n)) => Value::F64(n),
-        Ok(Sv::Text(s)) => Value::Str(Arc::from(s.as_str())),
+        Ok(Sv::Text(s)) => Value::Str(Arc::from(String::from_utf8_lossy(s).as_ref())),
         // Blob in a non-json/non-string column: Zero has no bytes Value type
         // (TS returns the raw Buffer, which then breaks downstream). Best-effort
         // lossy-string decode; documented unsupported in both engines.
-        Ok(Sv::Blob(b)) => Value::Str(Arc::from(String::from_utf8_lossy(&b).as_ref())),
+        Ok(Sv::Blob(b)) => Value::Str(Arc::from(String::from_utf8_lossy(b).as_ref())),
     }
 }
 
@@ -558,6 +569,9 @@ fn json_sqlite_text_to_ivm(text: &str, table: &str, col: &str) -> Value {
 /// Connection: a downstream consumer of the TableSource.
 pub struct TableConnection {
     pub sort: Option<SortOrder>,
+    /// `sort` in the `(column, direction)` shape `build_select_query` takes —
+    /// built once here (Rust-only, AGENTS.md rule 5) instead of once per fetch.
+    pub order: Rc<Vec<(String, String)>>,
     pub internal_sort: SortOrder,
     pub split_edit_keys: Option<Vec<String>>,
     pub compare_rows: Comparator,
@@ -586,10 +600,12 @@ impl Drop for OverlayGuard {
 /// TableSource — the production source backed by SQLite.
 /// Port of TS `TableSource` (table-source.ts:66).
 pub struct TableSource {
-    table_name: String,
-    columns: HashMap<String, ColumnType>,
-    column_names: Vec<String>,
-    primary_key: Vec<String>,
+    // `Rc` (Rust-only, AGENTS.md rule 5): shared with every connection's input
+    // and every fetch's row cursor, which used to clone them.
+    table_name: Rc<str>,
+    columns: Rc<HashMap<String, ColumnType>>,
+    column_names: Rc<Vec<String>>,
+    primary_key: Rc<Vec<String>>,
     primary_index_sort: SortOrder,
     db: SharedSnapshotDb,
     /// Shared with every `TableSourceInput` so `destroy()` can splice its
@@ -665,10 +681,10 @@ impl TableSource {
 
         crate::live_count::inc(&crate::live_count::TABLE_SOURCE);
         TableSource {
-            table_name: table_name.to_string(),
-            columns,
-            column_names,
-            primary_key: primary_key.clone(),
+            table_name: Rc::from(table_name),
+            columns: Rc::new(columns),
+            column_names: Rc::new(column_names),
+            primary_key: Rc::new(primary_key),
             primary_index_sort,
             db: Rc::new(RefCell::new(db)),
             connections: Rc::new(RefCell::new(Vec::new())),
@@ -748,7 +764,7 @@ impl TableSource {
                         let mut row = FxHashMap::default();
                         for (index, column) in self.column_names.iter().enumerate() {
                             let value = sqlite_value_to_ivm(
-                                crate::sqlite::db::read_value_lossy(raw, index),
+                                raw.get_ref(index),
                                 self.columns.get(column),
                                 &self.table_name,
                                 column,
@@ -803,8 +819,14 @@ impl TableSource {
         let compare_rows = make_comparator(internal_sort.clone(), false);
 
         crate::live_count::inc(&crate::live_count::TABLE_CONNECTION);
+        let order: Rc<Vec<(String, String)>> = Rc::new(
+            sort.as_ref()
+                .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
+                .unwrap_or_default(),
+        );
         let conn = Rc::new(RefCell::new(TableConnection {
             sort: sort.clone(),
+            order,
             internal_sort,
             split_edit_keys,
             compare_rows: compare_rows.clone(),
@@ -818,9 +840,9 @@ impl TableSource {
         }));
 
         let schema = SourceSchema {
-            table_name: self.table_name.clone(),
-            columns: self.columns.clone(),
-            primary_key: self.primary_key.clone(),
+            table_name: self.table_name.to_string(),
+            columns: (*self.columns).clone(),
+            primary_key: (*self.primary_key).clone(),
             relationships: HashMap::new(),
             relationship_order: Vec::new(),
             is_hidden: false,
@@ -841,6 +863,7 @@ impl TableSource {
             table_name,
             column_names,
             columns,
+            primary_key: self.primary_key.clone(),
             conn: conn.clone(),
             connections: self.connections.clone(),
             schema,
@@ -1038,11 +1061,7 @@ impl TableSource {
     /// prepared statement rather than collecting into a Vec — matches TS
     /// `table-source.ts` `#fetch`.
     pub fn fetch(&self, req: &FetchRequest, conn: &TableConnection) -> NodeStream {
-        let order: Vec<(String, String)> = conn
-            .sort
-            .as_ref()
-            .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
-            .unwrap_or_default();
+        let order = &conn.order;
         let reverse = req.reverse;
 
         let query = build_select_query(
@@ -1051,7 +1070,7 @@ impl TableSource {
             &self.columns,
             req,
             None,
-            Some(&order),
+            Some(order.as_slice()),
             reverse,
         );
 
@@ -1067,7 +1086,7 @@ impl TableSource {
 
         let mut overlay_changes = {
             let _t = crate::perf_trace::scope("source.overlay");
-            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns)
+            applied_changes_for_request(&self.applied_changes.borrow(), req, order, &self.columns)
         };
         let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
@@ -1111,9 +1130,12 @@ impl TableSource {
 /// TableSourceInput — implements the Input trait for a TableSource connection.
 pub struct TableSourceInput {
     db: SharedSnapshotDb,
-    table_name: String,
-    column_names: Vec<String>,
-    columns: HashMap<String, ColumnType>,
+    table_name: Rc<str>,
+    column_names: Rc<Vec<String>>,
+    columns: Rc<HashMap<String, ColumnType>>,
+    /// The source's primary key, shared (see `TableSource`); `schema.primary_key`
+    /// is the owned copy the schema struct requires.
+    primary_key: Rc<Vec<String>>,
     conn: Shared<TableConnection>,
     /// Back-reference to the owning source's connection list so `destroy()`
     /// can splice this connection out (TS parity: zqlite table-source.ts:242).
@@ -1152,11 +1174,7 @@ impl Input for TableSourceInput {
     #[cfg_attr(feature = "profiling", inline(never))]
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         let conn = self.conn.borrow();
-        let order: Vec<(String, String)> = conn
-            .sort
-            .as_ref()
-            .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
-            .unwrap_or_default();
+        let order = &conn.order;
         let reverse = req.reverse;
 
         let query = build_select_query(
@@ -1165,7 +1183,7 @@ impl Input for TableSourceInput {
             &self.columns,
             req,
             self.filter_condition.as_ref(),
-            Some(&order),
+            Some(order.as_slice()),
             reverse,
         );
 
@@ -1181,7 +1199,7 @@ impl Input for TableSourceInput {
 
         let mut overlay_changes = {
             let _t = crate::perf_trace::scope("source.overlay");
-            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns)
+            applied_changes_for_request(&self.applied_changes.borrow(), req, order, &self.columns)
         };
         let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
@@ -1211,7 +1229,7 @@ impl Input for TableSourceInput {
             req,
             crate::ivm::memory_source::HistoricalOverlayContext {
                 change_count: historical_change_count,
-                primary_key: self.schema.primary_key.clone(),
+                primary_key: self.primary_key.clone(),
                 sort: conn.internal_sort.clone(),
             },
             Some(self.should_yield.clone()),
@@ -1344,7 +1362,7 @@ impl Source for TableSource {
                 .map(|k| [k.clone(), "asc".to_string()])
                 .collect(),
         );
-        self.primary_key = primary_key;
+        self.primary_key = Rc::new(primary_key);
     }
 
     fn has_active_connections(&self) -> bool {
@@ -1371,7 +1389,7 @@ impl Source for TableSource {
     }
 
     fn column_types(&self) -> HashMap<String, ColumnType> {
-        self.columns.clone()
+        (*self.columns).clone()
     }
 
     fn connect(
@@ -1419,7 +1437,12 @@ mod value_parity_tests {
     use rusqlite::types::Value as Sv;
 
     fn conv(v: Sv, ct: Option<ColumnType>) -> Value {
-        sqlite_value_to_ivm(Ok(v), ct.as_ref(), "t", "c")
+        sqlite_value_to_ivm(
+            Ok(rusqlite::types::ValueRef::from(&v)),
+            ct.as_ref(),
+            "t",
+            "c",
+        )
     }
 
     #[test]
@@ -1560,9 +1583,9 @@ mod advance_gate_fetch_tests {
         stream_query(
             db,
             q,
-            vec!["id".to_string()],
-            HashMap::new(),
-            "t".to_string(),
+            Rc::new(vec!["id".to_string()]),
+            Rc::new(HashMap::new()),
+            Rc::from("t"),
             None,
         )
         .count()
@@ -1610,9 +1633,13 @@ mod advance_gate_fetch_tests {
         let rows: Vec<Row> = stream_query(
             db,
             q,
-            vec!["id".to_string(), "name".to_string(), "flag".to_string()],
-            columns,
-            "u".to_string(),
+            Rc::new(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "flag".to_string(),
+            ]),
+            Rc::new(columns),
+            Rc::from("u"),
             None,
         )
         .collect();
@@ -1783,9 +1810,9 @@ mod advance_gate_fetch_tests {
         let _ = stream_query(
             db,
             q,
-            vec!["no_such_col".to_string()],
-            HashMap::new(),
-            "t".to_string(),
+            Rc::new(vec!["no_such_col".to_string()]),
+            Rc::new(HashMap::new()),
+            Rc::from("t"),
             None,
         )
         .count();
@@ -1802,9 +1829,9 @@ mod advance_gate_fetch_tests {
         let _ = stream_query(
             db,
             q,
-            vec!["id".to_string()],
-            HashMap::new(),
-            "t".to_string(),
+            Rc::new(vec!["id".to_string()]),
+            Rc::new(HashMap::new()),
+            Rc::from("t"),
             None,
         )
         .count();
@@ -1835,9 +1862,9 @@ mod advance_gate_fetch_tests {
             let _ = stream_query(
                 Rc::new(RefCell::new(reader)),
                 q,
-                vec!["id".to_string()],
-                HashMap::new(),
-                "t".to_string(),
+                Rc::new(vec!["id".to_string()]),
+                Rc::new(HashMap::new()),
+                Rc::from("t"),
                 None,
             )
             .count();

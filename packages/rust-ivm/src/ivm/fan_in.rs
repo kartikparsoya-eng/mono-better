@@ -23,7 +23,9 @@ pub struct FanIn {
     /// every branch so the cascade reaches the ref-counted FanOut and,
     /// through it, the source input.
     inputs: Vec<FilterInputHandle>,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
     output: Rc<RefCell<Option<FilterOutputHandle>>>,
     accumulated_pushes: RefCell<Vec<Change>>,
 }
@@ -34,7 +36,7 @@ impl FanIn {
     pub fn new(fan_out_schema: SourceSchema, inputs: Vec<FilterInputHandle>) -> Shared<FanIn> {
         let fan_in = Rc::new(RefCell::new(FanIn {
             inputs: inputs.clone(),
-            schema: fan_out_schema.clone(),
+            schema: Rc::new(fan_out_schema.clone()),
             output: Rc::new(RefCell::new(None)),
             accumulated_pushes: RefCell::new(Vec::new()),
         }));
@@ -80,7 +82,7 @@ impl FanIn {
 
 impl InputBase for FanIn {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {

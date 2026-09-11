@@ -53,7 +53,9 @@ pub struct Snitch {
     log_types: Vec<LogType>,
     pub log: Rc<RefCell<Vec<SnitchMessage>>>,
     output: Rc<RefCell<Option<OutputHandle>>>,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
 }
 
 impl Snitch {
@@ -71,7 +73,7 @@ impl Snitch {
             log_types,
             log: Rc::new(RefCell::new(log)),
             output: Rc::new(RefCell::new(None)),
-            schema,
+            schema: Rc::new(schema),
         }));
 
         let snitch_clone = snitch.clone();
@@ -98,7 +100,7 @@ impl Snitch {
 
 impl InputBase for Snitch {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {

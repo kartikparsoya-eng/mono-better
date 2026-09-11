@@ -148,7 +148,9 @@ impl Iterator for FilterAnd {
 pub struct FilterStart {
     input: Shared<dyn Input>,
     output: Rc<RefCell<Option<FilterOutputHandle>>>,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
 }
 
 impl FilterStart {
@@ -157,7 +159,7 @@ impl FilterStart {
         let start = Rc::new(RefCell::new(FilterStart {
             input: input.clone(),
             output: Rc::new(RefCell::new(None)),
-            schema,
+            schema: Rc::new(schema),
         }));
         // TS: `input.setOutput(this)`.
         let start_clone = start.clone();
@@ -172,7 +174,7 @@ impl FilterStart {
 
 impl InputBase for FilterStart {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {
@@ -224,11 +226,14 @@ impl FilterStart {
 /// `this`). Downstream operators only use the pusher for schema/trace
 /// identity, so a light stand-in avoids re-borrowing the operator cell.
 pub struct FilterChainPusher {
-    pub schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): one of these is built per pushed
+    /// change by every filter-chain operator, and an owned `SourceSchema`
+    /// deep-cloned the whole relationship tree each time. TS passes `this`.
+    pub schema: Rc<SourceSchema>,
 }
 impl InputBase for FilterChainPusher {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
     fn destroy(&mut self) {}
 }
@@ -310,7 +315,9 @@ pub struct FilterEnd {
     /// The last filter operator in the sub-graph (TS `#input`).
     input: FilterInputHandle,
     output: Rc<RefCell<Option<OutputHandle>>>,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
 }
 
 impl FilterEnd {
@@ -320,7 +327,7 @@ impl FilterEnd {
             start,
             input: input.clone(),
             output: Rc::new(RefCell::new(None)),
-            schema,
+            schema: Rc::new(schema),
         }));
         // TS: `input.setFilterOutput(this)`.
         let end_clone = end.clone();
@@ -335,7 +342,7 @@ impl FilterEnd {
 
 impl InputBase for FilterEnd {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {

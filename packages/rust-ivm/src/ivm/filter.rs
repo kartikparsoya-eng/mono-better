@@ -21,7 +21,9 @@ pub struct Filter {
     input: FilterInputHandle,
     predicate: Arc<dyn Fn(&Row) -> bool>,
     output: Rc<RefCell<Option<FilterOutputHandle>>>,
-    schema: SourceSchema,
+    /// Shared (Rust-only, AGENTS.md rule 5): handed to a `FilterChainPusher`
+    /// on every pushed change, where an owned schema deep-cloned the tree.
+    schema: Rc<SourceSchema>,
 }
 
 impl Filter {
@@ -31,7 +33,7 @@ impl Filter {
             input: input.clone(),
             predicate,
             output: Rc::new(RefCell::new(None)),
-            schema,
+            schema: Rc::new(schema),
         }));
         // TS: `input.setFilterOutput(this)`.
         let as_output: FilterOutputHandle = filter.clone();
@@ -42,7 +44,7 @@ impl Filter {
 
 impl InputBase for Filter {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {

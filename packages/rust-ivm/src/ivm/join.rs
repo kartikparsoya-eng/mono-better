@@ -33,10 +33,15 @@ pub struct JoinArgs {
 pub struct Join {
     parent: Shared<dyn Input>,
     child: Shared<dyn Input>,
-    parent_key: CompoundKey,
-    child_key: CompoundKey,
-    relationship_name: String,
-    schema: SourceSchema,
+    // `Rc` (Rust-only, AGENTS.md rule 5): the per-parent-row relationship
+    // closure and every push capture these. TS captures `this` by reference;
+    // owned values here deep-cloned the key vectors and the whole `schema`
+    // tree (a recursive map of every relationship's schema) once per parent
+    // row on fetch and once per change on push.
+    parent_key: Rc<CompoundKey>,
+    child_key: Rc<CompoundKey>,
+    relationship_name: Rc<str>,
+    schema: Rc<SourceSchema>,
     output: Rc<RefCell<Option<OutputHandle>>>,
     inprogress_child_change: Rc<RefCell<Option<Change>>>,
     inprogress_child_change_position: Rc<RefCell<Option<Row>>>,
@@ -78,10 +83,10 @@ impl Join {
         let join = Rc::new(RefCell::new(Join {
             parent: args.parent.clone(),
             child: args.child.clone(),
-            parent_key: args.parent_key.clone(),
-            child_key: args.child_key.clone(),
-            relationship_name: args.relationship_name.clone(),
-            schema,
+            parent_key: Rc::new(args.parent_key.clone()),
+            child_key: Rc::new(args.child_key.clone()),
+            relationship_name: Rc::from(args.relationship_name.as_str()),
+            schema: Rc::new(schema),
             output: Rc::new(RefCell::new(None)),
             inprogress_child_change: Rc::new(RefCell::new(None)),
             inprogress_child_change_position: Rc::new(RefCell::new(None)),
@@ -130,42 +135,35 @@ impl Join {
                 None => empty_stream(),
             };
 
-            let inprogress_change = inprogress.borrow().clone();
-            let inprogress_position = inprogress_pos.borrow().clone();
-
-            if let (Some(change), Some(pos)) =
-                (inprogress_change.as_ref(), inprogress_position.as_ref())
-            {
-                let change_row = change.node().row.clone();
-                let matches = is_join_match(
-                    &parent_row_for_closure,
-                    &parent_key,
-                    &change_row,
-                    &child_key,
-                );
-
-                if matches {
-                    let compare = schema.compare_rows.clone();
-                    let needs_overlay =
-                        compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
-
-                    if needs_overlay {
-                        // TS join.ts: unordered when the child schema has no sort.
-                        return if schema.sort.is_none() {
-                            crate::ivm::join_utils::generate_with_overlay_unordered(
-                                stream,
-                                change.clone(),
-                                &schema,
-                            )
-                        } else {
-                            crate::ivm::join_utils::generate_with_overlay(
-                                stream,
-                                change.clone(),
-                                &schema,
-                            )
-                        };
+            // Decide under the borrows, clone the in-progress change only when
+            // the overlay is needed, and release the borrows before the lazy
+            // overlay stream is built (it is consumed while the next push may
+            // write these cells).
+            let overlay = {
+                let inprogress_change = inprogress.borrow();
+                let inprogress_position = inprogress_pos.borrow();
+                match (inprogress_change.as_ref(), inprogress_position.as_ref()) {
+                    (Some(change), Some(pos))
+                        if is_join_match(
+                            &parent_row_for_closure,
+                            &parent_key,
+                            &change.node().row,
+                            &child_key,
+                        ) && (schema.compare_rows)(&parent_row_for_closure, pos)
+                            == CmpOrdering::Greater =>
+                    {
+                        Some(change.clone())
                     }
+                    _ => None,
                 }
+            };
+            if let Some(change) = overlay {
+                // TS join.ts: unordered when the child schema has no sort.
+                return if schema.sort.is_none() {
+                    crate::ivm::join_utils::generate_with_overlay_unordered(stream, change, &schema)
+                } else {
+                    crate::ivm::join_utils::generate_with_overlay(stream, change, &schema)
+                };
             }
 
             stream
@@ -178,7 +176,7 @@ impl Join {
                 node = node.set_relationship(Rc::clone(name), rel);
             }
         }
-        node = node.set_relationship(relationship_name.as_str(), child_stream);
+        node = node.set_relationship(Rc::clone(&relationship_name), child_stream);
         node
     }
 
@@ -186,33 +184,33 @@ impl Join {
         let output = self.output.borrow().clone();
         let output = output.expect("Join output not set");
 
-        let parent_rels = change.node().relationships.clone();
-        let parent_order = change.node().rel_order.clone();
-        let parent_row = change.node().row.clone();
-
-        match &change {
-            Change::Add(_) => {
-                let node = self.process_parent_node(parent_row, parent_rels, parent_order);
-                output.borrow_mut().push(make_add_change(node), pusher);
+        // The change is owned: move each node's parts into the processed node
+        // instead of cloning them (TS passes the same object through).
+        let process = |node: Node| {
+            let Node {
+                row,
+                relationships,
+                rel_order,
+            } = node;
+            self.process_parent_node(row, relationships, rel_order)
+        };
+        match change {
+            Change::Add(node) => {
+                output
+                    .borrow_mut()
+                    .push(make_add_change(process(node)), pusher);
             }
-            Change::Remove(_) => {
-                let node = self.process_parent_node(parent_row, parent_rels, parent_order);
-                output.borrow_mut().push(make_remove_change(node), pusher);
+            Change::Remove(node) => {
+                output
+                    .borrow_mut()
+                    .push(make_remove_change(process(node)), pusher);
             }
-            Change::Child { child, .. } => {
-                let node = self.process_parent_node(parent_row, parent_rels, parent_order);
-                output.borrow_mut().push(
-                    make_child_change(
-                        node,
-                        ChildData {
-                            relationship_name: child.relationship_name.clone(),
-                            change: child.change.clone(),
-                        },
-                    ),
-                    pusher,
-                );
+            Change::Child { node, child } => {
+                output
+                    .borrow_mut()
+                    .push(make_child_change(process(node), child), pusher);
             }
-            Change::Edit { old_node, .. } => {
+            Change::Edit { node, old_node } => {
                 // Port of TS join.ts:167 `assert(rowEqualsForCompoundKey(...),
                 // 'Parent edit must not change relationship.')`. Key-changing
                 // edits are split into add/remove at the source; one reaching
@@ -221,15 +219,11 @@ impl Join {
                 // executor's `catch_unwind` as the outer net) rather than
                 // silently dropping into drift.
                 assert!(
-                    row_equals_for_compound_key(&old_node.row, &parent_row, &self.parent_key),
+                    row_equals_for_compound_key(&old_node.row, &node.row, &self.parent_key),
                     "Parent edit must not change relationship.",
                 );
-                let old_rels = old_node.relationships.clone();
-                let old_order = old_node.rel_order.clone();
-                let old_row = old_node.row.clone();
-
-                let node = self.process_parent_node(parent_row, parent_rels, parent_order);
-                let old_node = self.process_parent_node(old_row, old_rels, old_order);
+                let node = process(node);
+                let old_node = process(old_node);
                 output
                     .borrow_mut()
                     .push(make_edit_change(node, old_node), pusher);
@@ -282,13 +276,15 @@ impl Join {
             for parent_node in parent_stream {
                 *self.inprogress_child_change_position.borrow_mut() = Some(parent_node.row.clone());
 
-                let parent_rels = parent_node.relationships.clone();
-                let parent_order = parent_node.rel_order.clone();
-                let parent_row = parent_node.row.clone();
+                let Node {
+                    row: parent_row,
+                    relationships: parent_rels,
+                    rel_order: parent_order,
+                } = parent_node;
 
                 let processed = self.process_parent_node(parent_row, parent_rels, parent_order);
                 let child_change = ChildData {
-                    relationship_name: self.relationship_name.clone(),
+                    relationship_name: self.relationship_name.to_string(),
                     change: Box::new(change.clone()),
                 };
                 output
@@ -303,7 +299,7 @@ impl Join {
 
 impl InputBase for Join {
     fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
+        (*self.schema).clone()
     }
 
     fn destroy(&mut self) {
@@ -344,9 +340,11 @@ impl Join {
                 StreamItem::Data(n) => n,
                 StreamItem::Yield => return StreamItem::Yield,
             };
-            let parent_rels = pn.relationships.clone();
-            let parent_order = pn.rel_order.clone();
-            let parent_row = pn.row.clone();
+            let Node {
+                row: parent_row,
+                relationships: parent_rels,
+                rel_order: parent_order,
+            } = pn;
 
             let parent_row_for_closure = parent_row.clone();
             let child = child.clone();
@@ -370,42 +368,37 @@ impl Join {
                     None => empty_stream(),
                 };
 
-                let inprogress_change = inprogress.borrow().clone();
-                let inprogress_position = inprogress_pos.borrow().clone();
-
-                if let (Some(change), Some(pos)) =
-                    (inprogress_change.as_ref(), inprogress_position.as_ref())
-                {
-                    let change_row = change.node().row.clone();
-                    let matches = is_join_match(
-                        &parent_row_for_closure,
-                        &parent_key,
-                        &change_row,
-                        &child_key,
-                    );
-
-                    if matches {
-                        let compare = schema.compare_rows.clone();
-                        let needs_overlay =
-                            compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
-
-                        if needs_overlay {
-                            // TS join.ts: unordered when the child schema has no sort.
-                            return if schema.sort.is_none() {
-                                crate::ivm::join_utils::generate_with_overlay_unordered(
-                                    stream,
-                                    change.clone(),
-                                    &schema,
-                                )
-                            } else {
-                                crate::ivm::join_utils::generate_with_overlay(
-                                    stream,
-                                    change.clone(),
-                                    &schema,
-                                )
-                            };
+                // Decide under the borrows, clone the in-progress change only when
+                // the overlay is needed, and release the borrows before the lazy
+                // overlay stream is built (it is consumed while the next push may
+                // write these cells).
+                let overlay = {
+                    let inprogress_change = inprogress.borrow();
+                    let inprogress_position = inprogress_pos.borrow();
+                    match (inprogress_change.as_ref(), inprogress_position.as_ref()) {
+                        (Some(change), Some(pos))
+                            if is_join_match(
+                                &parent_row_for_closure,
+                                &parent_key,
+                                &change.node().row,
+                                &child_key,
+                            ) && (schema.compare_rows)(&parent_row_for_closure, pos)
+                                == CmpOrdering::Greater =>
+                        {
+                            Some(change.clone())
                         }
+                        _ => None,
                     }
+                };
+                if let Some(change) = overlay {
+                    // TS join.ts: unordered when the child schema has no sort.
+                    return if schema.sort.is_none() {
+                        crate::ivm::join_utils::generate_with_overlay_unordered(
+                            stream, change, &schema,
+                        )
+                    } else {
+                        crate::ivm::join_utils::generate_with_overlay(stream, change, &schema)
+                    };
                 }
 
                 stream
@@ -418,7 +411,7 @@ impl Join {
                     node = node.set_relationship(Rc::clone(name), rel);
                 }
             }
-            node = node.set_relationship(relationship_name.as_str(), child_stream);
+            node = node.set_relationship(Rc::clone(&relationship_name), child_stream);
             StreamItem::Data(node)
         }))
     }
