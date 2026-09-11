@@ -468,11 +468,13 @@ fn test_or_with_exists_and_cap_limit() {
     );
 }
 
+/// Port of TS `mustGetTableSpec` (zero-cache/src/db/lite-tables.ts:326-339)
+/// with an EMPTY catalog: the joined name list renders as nothing, so the
+/// message reads `is not one of: .`. Historically the "3 missing tickets"
+/// repro — rust hydrated an unregistered table to zero rows through a
+/// rust-only empty input, where TS throws before hydrating anything.
 #[test]
-fn test_missing_table_returns_empty() {
-    // Test that querying an unregistered table returns 0 rows (EmptyInput).
-    // This reproduces the "3 missing tickets" issue.
-
+fn test_missing_table_throws_must_get_table_spec_error() {
     let mut engine = Engine::new(HashMap::new());
     // Don't register the "tickets" table
 
@@ -487,15 +489,21 @@ fn test_missing_table_returns_empty() {
         start: None,
     };
 
-    let results = engine.add_queries(&[QuerySpec {
-        query_id: "q1".to_string(),
-        ast,
-    }]);
-
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.add_queries(&[QuerySpec {
+            query_id: "q1".to_string(),
+            ast,
+        }]);
+    }))
+    .expect_err("an unregistered table must throw, not return 0 rows");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload is the Error message");
     assert_eq!(
-        results[0].changes.len(),
-        0,
-        "Unregistered table should return 0 rows"
+        message,
+        "table 'tickets' is not one of: . Check the spelling and ensure that the table has a primary key."
     );
 }
 

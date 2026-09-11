@@ -1107,9 +1107,52 @@ mod bound_none_edit_tests {
 
     use super::*;
     use crate::ivm::change::Change;
-    use crate::ivm::data::Node;
-    use crate::ivm::memory_source::EmptyInput;
+    use crate::ivm::data::{Node, make_comparator};
+    use crate::ivm::schema::System;
+    use crate::ivm::stream::empty_stream;
     use rustc_hash::FxHashMap;
+    use std::collections::HashMap;
+
+    /// Test-only upstream that yields no rows: the partition under test must
+    /// look EMPTY on hydrate. Rust-only stub with no TS twin; the same struct
+    /// used to be the engine's fallback for an unregistered table until that
+    /// was ported to `mustGetTableSpec`'s throw (builder.ts:264-267).
+    struct EmptyInput {
+        schema: SourceSchema,
+    }
+
+    impl EmptyInput {
+        fn new() -> Self {
+            EmptyInput {
+                schema: SourceSchema {
+                    table_name: Arc::from(""),
+                    columns: HashMap::new(),
+                    primary_key: vec![],
+                    relationships: HashMap::new(),
+                    relationship_order: Vec::new(),
+                    is_hidden: false,
+                    system: System::Client,
+                    compare_rows: make_comparator(Arc::new(vec![]), false),
+                    sort: None,
+                },
+            }
+        }
+    }
+
+    impl InputBase for EmptyInput {
+        fn get_schema(&self) -> SourceSchema {
+            self.schema.clone()
+        }
+        fn destroy(&mut self) {}
+    }
+
+    impl Input for EmptyInput {
+        fn set_output(&self, _output: OutputHandle) {}
+
+        fn fetch(&self, _req: &FetchRequest) -> NodeStream {
+            empty_stream()
+        }
+    }
 
     struct NoopOutput;
     impl Output for NoopOutput {

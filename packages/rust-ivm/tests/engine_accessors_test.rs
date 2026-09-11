@@ -195,3 +195,34 @@ fn hydration_row_count_tracks_rows_produced() {
         "unknown query id returns None"
     );
 }
+
+/// Port of TS `PipelineDriver#getSource` → `mustGetTableSpec`
+/// (pipeline-driver.ts:1054-1060, lite-tables.ts:326-339): building a query
+/// for a table outside the registry THROWS, listing the registered tables
+/// sorted, comma-joined, with the spelling hint. Before the port rust
+/// substituted an empty input and the query hydrated to nothing.
+#[test]
+fn add_queries_unknown_table_throws_must_get_table_spec_error() {
+    let mut engine = Engine::new(HashMap::new());
+    engine.register_source(make_source("users", &["id"]));
+    engine.register_source(make_source("issue", &["id"]));
+    engine.register_source(make_source("_litestream_seq", &["id"]));
+    engine.register_source(make_source("other.dotted", &["id"]));
+    let spec = QuerySpec {
+        query_id: "q1".to_string(),
+        ast: basic_ast("nope"),
+    };
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.add_queries(&[spec]);
+    }))
+    .expect_err("an unknown table must throw, not hydrate to nothing");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload is the Error message");
+    assert_eq!(
+        message,
+        "table 'nope' is not one of: issue,users. Check the spelling and ensure that the table has a primary key."
+    );
+}

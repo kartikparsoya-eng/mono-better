@@ -1311,51 +1311,6 @@ impl InputBase for SourcePusher {
     fn destroy(&mut self) {}
 }
 
-/// Empty input — returns no rows. Used when a source is not found
-/// (e.g. querying a table that wasn't registered). Prevents panics.
-pub struct EmptyInput {
-    schema: SourceSchema,
-}
-
-impl EmptyInput {
-    pub fn new() -> Self {
-        EmptyInput {
-            schema: SourceSchema {
-                table_name: Arc::from(""),
-                columns: HashMap::new(),
-                primary_key: vec![],
-                relationships: HashMap::new(),
-                relationship_order: Vec::new(),
-                is_hidden: false,
-                system: System::Client,
-                compare_rows: make_comparator(Arc::new(vec![]), false),
-                sort: None,
-            },
-        }
-    }
-}
-
-impl Default for EmptyInput {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InputBase for EmptyInput {
-    fn get_schema(&self) -> SourceSchema {
-        self.schema.clone()
-    }
-    fn destroy(&mut self) {}
-}
-
-impl Input for EmptyInput {
-    fn set_output(&self, _output: OutputHandle) {}
-
-    fn fetch(&self, _req: &FetchRequest) -> NodeStream {
-        empty_stream()
-    }
-}
-
 /// Collecting output — terminal sink for pushed changes.
 pub struct CollectOutput {
     pub changes: Vec<Change>,

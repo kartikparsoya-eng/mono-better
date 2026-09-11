@@ -2246,6 +2246,28 @@ mod tests {
         assert!(!p.initialized());
     }
 
+    /// Port of TS `PipelineDriver#getSource` → `mustGetTableSpec`
+    /// (pipeline-driver.ts:1054-1060, lite-tables.ts:326-339): hydrating a
+    /// query for a table outside the registry fails with the TS error — the
+    /// message the client group is failed with — instead of streaming
+    /// nothing. Golden string from lite-tables.ts:332-336.
+    #[test]
+    fn hydrate_unknown_table_fails_with_must_get_table_spec_error() {
+        let mut p = IvmPipelines::new();
+        p.init(vec![users_spec()], None, "zero").unwrap();
+        let err = p
+            .hydrate(
+                &[("q1".to_string(), r#"{"table":"nope"}"#.to_string())],
+                Rc::new(WallTimer::default()),
+            )
+            .err()
+            .expect("an unknown table must fail hydration, not hydrate to nothing");
+        assert_eq!(
+            err.to_string(),
+            "table 'nope' is not one of: users. Check the spelling and ensure that the table has a primary key."
+        );
+    }
+
     #[test]
     fn hydrate_before_init_errors() {
         let mut p = IvmPipelines::new();

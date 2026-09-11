@@ -77,11 +77,11 @@ fn build_pipeline_internal(
     partition_key: Option<Vec<String>>,
     is_non_flipped_exists_child: bool,
 ) -> Shared<dyn Input> {
+    // Port of builder.ts:264-267: `if (!source) throw new Error(...)`. The
+    // former rust-only fallback to an empty input hid the missing table.
     let source = match delegate.get_source(&ast.table) {
         Some(s) => s,
-        None => {
-            return Rc::new(RefCell::new(crate::ivm::memory_source::EmptyInput::new()));
-        }
+        None => panic!("Source not found: {}", ast.table),
     };
 
     // Validate NOT EXISTS if not enabled

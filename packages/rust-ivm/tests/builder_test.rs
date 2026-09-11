@@ -672,3 +672,35 @@ fn test_pipeline_with_and_or() {
     }]);
     assert_eq!(results[0].changes.len(), 2);
 }
+
+/// Port of builder.ts:264-267: a delegate that has no source for the table
+/// makes `buildPipeline` THROW `Source not found: <table>`. The rust builder
+/// used to substitute an empty input here, so a query on an unregistered
+/// table silently produced no rows.
+#[test]
+fn build_pipeline_throws_source_not_found_for_unknown_table() {
+    struct NoSources;
+    impl rust_ivm::builder::builder::BuilderDelegate for NoSources {
+        fn get_source(
+            &self,
+            _table_name: &str,
+        ) -> Option<rust_ivm::ivm::operator::Shared<dyn rust_ivm::ivm::source::Source>> {
+            None
+        }
+    }
+    let ast = rust_ivm::builder::ast::Ast {
+        table: "nope".to_string(),
+        ..Default::default()
+    };
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut delegate = NoSources;
+        let _ = rust_ivm::builder::builder::build_pipeline(&ast, &mut delegate);
+    }))
+    .expect_err("an unknown table must throw, not build an empty input");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload is the Error message");
+    assert_eq!(message, "Source not found: nope");
+}

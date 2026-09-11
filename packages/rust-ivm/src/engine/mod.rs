@@ -1726,9 +1726,39 @@ struct EngineDelegate<'a> {
     debug: Option<SharedDebug>,
 }
 
+/// Port of TS `mustGetTableSpec` (zero-cache/src/db/lite-tables.ts:326-339),
+/// reached through `PipelineDriver#getSource` (pipeline-driver.ts:1054-1060).
+/// It lives here rather than in rust-syncer's `db/lite_tables.rs` because the
+/// registry it checks is the engine's `sources` map — the rust twin of TS's
+/// `#tableSpecs` at the `#getSource` site — and rust-ivm cannot call up into
+/// the syncer (AGENTS.md rule 3, fold-into-consumer exception). TS throws an
+/// `Error`; the rust build runs inside the pipeline driver's `catch_unwind`,
+/// so the panic payload becomes the same client-visible `Error`
+/// (`hydrate_js_error`). JS `Array.prototype.sort()` with no comparator
+/// orders by UTF-16 code units, hence the shared `string_compare`.
+fn must_get_table_spec<'k>(table_name: &str, table_specs: impl Iterator<Item = &'k String>) -> ! {
+    let mut names: Vec<&str> = table_specs
+        .map(String::as_str)
+        .filter(|t| !t.contains('.') && !t.starts_with("_litestream_"))
+        .collect();
+    names.sort_by(|a, b| rust_cvr::shared::string_compare::string_compare(a, b));
+    panic!(
+        "table '{table_name}' is not one of: {}. Check the spelling and ensure that the table has a primary key.",
+        names.join(",")
+    );
+}
+
 impl<'a> BuilderDelegate for EngineDelegate<'a> {
+    /// Port of TS `PipelineDriver#getSource` (pipeline-driver.ts:1054-1060):
+    /// a table outside the registry THROWS `mustGetTableSpec`'s error; there
+    /// is no `undefined` return in production. Before this, rust answered
+    /// `None` and the builder substituted an empty input, so a query for an
+    /// unknown table hydrated to nothing instead of failing the client group.
     fn get_source(&self, table_name: &str) -> Option<Shared<dyn Source>> {
-        self.sources.get(table_name).cloned()
+        match self.sources.get(table_name) {
+            Some(source) => Some(source.clone()),
+            None => must_get_table_spec(table_name, self.sources.keys()),
+        }
     }
 
     fn enable_not_exists(&self) -> bool {
