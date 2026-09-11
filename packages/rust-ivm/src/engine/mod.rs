@@ -77,10 +77,10 @@ pub(crate) struct Built {
     pub schema: SourceSchema,
     /// `query_id` / `schema` shared with the per-node streamer accumulation
     /// (no per-node deep clone of the nested relationship schemas).
-    pub query_id_rc: Rc<str>,
+    pub query_id_rc: Arc<str>,
     pub schema_rc: Rc<SourceSchema>,
     pub timer: Instant,
-    pub companion_rows: Vec<(String, Vec<String>, Row)>,
+    pub companion_rows: Vec<(Arc<str>, Vec<String>, Row)>,
     pub companions: Vec<CompanionBuilt>,
     /// Process-time spent building this query's pipeline (phase 1), on the
     /// caller's clock (see `HydrateClock`). Added to its fetch time so the
@@ -296,7 +296,7 @@ struct ScalarResolveOut {
     /// `primary_keys` map happens to contain — mirroring TS, where the EXISTS
     /// companion row is keyed by the subquery table's own primary key, and
     /// mirroring the Streamer's `schema.primary_key` fallback (streamer/mod.rs).
-    companion_rows: Vec<(String, Vec<String>, Row)>,
+    companion_rows: Vec<(Arc<str>, Vec<String>, Row)>,
     companions: Vec<CompanionBuilt>,
 }
 
@@ -969,7 +969,7 @@ impl Engine {
                 transformed_ast: resolved.ast,
                 pipeline,
                 collector,
-                query_id_rc: Rc::from(q.query_id.as_str()),
+                query_id_rc: Arc::from(q.query_id.as_str()),
                 schema_rc: Rc::new(schema.clone()),
                 schema,
                 timer,
@@ -1223,19 +1223,19 @@ impl Engine {
         let results = self.add_queries_streaming(queries, |rc| {
             if rc.change_type != crate::ivm::change::ChangeType::Edit {
                 let unit = row_signature_unit(&rc.table, &rc.row_key);
-                match sig_acc.get_mut(&rc.query_id) {
+                match sig_acc.get_mut(&*rc.query_id) {
                     Some(sig) => *sig ^= unit,
                     None => {
-                        sig_acc.insert(rc.query_id.clone(), unit);
+                        sig_acc.insert(rc.query_id.to_string(), unit);
                     }
                 }
             }
             // `entry(k.clone())` took its key eagerly, cloning `query_id` for
             // every row; look up first so the clone happens once per query.
-            match by_qid.get_mut(&rc.query_id) {
+            match by_qid.get_mut(&*rc.query_id) {
                 Some(changes) => changes.push(rc.clone()),
                 None => {
-                    by_qid.insert(rc.query_id.clone(), vec![rc.clone()]);
+                    by_qid.insert(rc.query_id.to_string(), vec![rc.clone()]);
                 }
             }
         });
@@ -1532,7 +1532,7 @@ impl Engine {
         // Collected during resolution by the executor closure (Fn → interior
         // mutability). `companion_rows`: matched (table, primary_key, row) for
         // hydrate. `companions`: the built live pipelines + resolved values.
-        let companion_rows: RefCell<Vec<(String, Vec<String>, Row)>> = RefCell::new(Vec::new());
+        let companion_rows: RefCell<Vec<(Arc<str>, Vec<String>, Row)>> = RefCell::new(Vec::new());
         let companions: RefCell<Vec<CompanionBuilt>> = RefCell::new(Vec::new());
 
         let executor: ScalarExecutor = Box::new(|subquery_ast: &Ast, child_field: &str| {
@@ -1593,7 +1593,7 @@ impl Engine {
                     // always well-formed, never `{}`.
                     let companion_pk = input.borrow().get_schema().primary_key.clone();
                     companion_rows.borrow_mut().push((
-                        subquery_ast.table.clone(),
+                        Arc::from(subquery_ast.table.as_str()),
                         companion_pk,
                         node.row.clone(),
                     ));
@@ -2410,7 +2410,7 @@ impl Iterator for HydrateStream {
                         // registered source. It stays as a loud guard so a future
                         // wiring regression that emits an empty-PK companion row fails
                         // fast here instead of crashing the client.
-                        let pk: &Vec<String> = match self.primary_keys.get(table) {
+                        let pk: &Vec<String> = match self.primary_keys.get(&**table) {
                             Some(pk) if !pk.is_empty() => pk,
                             _ if !schema_pk.is_empty() => schema_pk,
                             _ => panic!(
@@ -2426,7 +2426,7 @@ impl Iterator for HydrateStream {
                         self.b_row_count += 1;
                         return Some(StreamItem::Data(RowChange {
                             change_type: crate::ivm::change::ChangeType::Add,
-                            query_id: b.query_id.clone(),
+                            query_id: b.query_id_rc.clone(),
                             table: table.clone(),
                             row_key,
                             row: Some(row.clone()),

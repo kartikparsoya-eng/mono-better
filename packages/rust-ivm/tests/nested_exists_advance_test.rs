@@ -108,7 +108,7 @@ fn related_subquery(
 fn convo_ids(changes: &[RowChange]) -> Vec<String> {
     let mut ids: Vec<String> = changes
         .iter()
-        .filter(|c| c.table == "conversations" && c.change_type == ChangeType::Add)
+        .filter(|c| &*c.table == "conversations" && c.change_type == ChangeType::Add)
         .filter_map(|c| match c.row.as_ref()?.get("id")? {
             Value::Str(s) => Some(s.to_string()),
             _ => None,

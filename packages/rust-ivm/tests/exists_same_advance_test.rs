@@ -145,7 +145,7 @@ fn exists_with_related_ast() -> Ast {
 fn msg_ids(changes: &[RowChange]) -> Vec<String> {
     let mut ids: Vec<String> = changes
         .iter()
-        .filter(|c| c.table == "messages" && c.change_type == ChangeType::Add)
+        .filter(|c| &*c.table == "messages" && c.change_type == ChangeType::Add)
         .filter_map(|c| match c.row.as_ref()?.get("id")? {
             Value::Str(s) => Some(s.to_string()),
             _ => None,
@@ -159,7 +159,7 @@ fn msg_ids(changes: &[RowChange]) -> Vec<String> {
 fn convo_ids(changes: &[RowChange]) -> Vec<String> {
     let mut ids: Vec<String> = changes
         .iter()
-        .filter(|c| c.table == "convos" && c.change_type == ChangeType::Add)
+        .filter(|c| &*c.table == "convos" && c.change_type == ChangeType::Add)
         .filter_map(|c| match c.row.as_ref()?.get("id")? {
             Value::Str(s) => Some(s.to_string()),
             _ => None,

@@ -136,7 +136,7 @@ fn user_all_channels_tablesource_excludes_cross_workspace_dm() {
             ast: user_all_channels_ast(),
         }],
         move |rc: &RowChange| {
-            if rc.table == "channels"
+            if &*rc.table == "channels"
                 && !rc.is_hidden
                 && rc.change_type == rust_ivm::ivm::change::ChangeType::Add
                 && let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id")

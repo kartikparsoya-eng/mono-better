@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -40,8 +41,12 @@ fn is_exists_condition_rel(rel_name: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct RowChange {
     pub change_type: ChangeType,
-    pub query_id: String,
-    pub table: String,
+    /// `Arc<str>`, not `String`: TS yields the query's `queryID` and the
+    /// schema's `tableName` by reference (pipeline-driver.ts:1361-1371); the
+    /// rust twin shares the per-query / per-schema handle instead of
+    /// allocating two strings per delivered row (rule 5).
+    pub query_id: Arc<str>,
+    pub table: Arc<str>,
     pub row_key: Row,
     pub row: Option<Row>,
     /// True when this row was reached through an EXISTS/NOT-EXISTS WHERE-condition
@@ -77,7 +82,7 @@ pub struct Streamer {
     primary_keys: Rc<HashMap<String, Vec<String>>>,
     table_specs: Rc<HashMap<String, TableSpecInfo>>,
     /// TS `#changes: [queryID, schema, changes][]`.
-    changes: Vec<(Rc<str>, Rc<SourceSchema>, Vec<Change>)>,
+    changes: Vec<(Arc<str>, Rc<SourceSchema>, Vec<Change>)>,
 }
 
 impl Streamer {
@@ -107,7 +112,7 @@ impl Streamer {
     /// Port of TS `Streamer.accumulate()` (:1276-1283).
     pub fn accumulate(&mut self, query_id: &str, schema: &SourceSchema, changes: &[Change]) {
         self.accumulate_shared(
-            Rc::from(query_id),
+            Arc::from(query_id),
             Rc::new(schema.clone()),
             changes.to_vec(),
         );
@@ -117,7 +122,7 @@ impl Streamer {
     /// with the query's shared id / schema and the node's own change.
     pub fn accumulate_shared(
         &mut self,
-        query_id: Rc<str>,
+        query_id: Arc<str>,
         schema: Rc<SourceSchema>,
         changes: Vec<Change>,
     ) {
@@ -208,7 +213,7 @@ fn extend_path(path: &Rc<[Rc<str>]>, rel: &str) -> Rc<[Rc<str>]> {
 enum Frame {
     /// `#streamChanges(queryID, schema, changes)` (:1297-1337).
     Changes {
-        query_id: Rc<str>,
+        query_id: Arc<str>,
         root: Rc<SourceSchema>,
         path: Rc<[Rc<str>]>,
         changes: std::vec::IntoIter<Change>,
@@ -217,7 +222,7 @@ enum Frame {
     /// `#streamNodes(queryID, schema, op, nodes)` (:1341-1385): the node
     /// stream being walked.
     Nodes {
-        query_id: Rc<str>,
+        query_id: Arc<str>,
         root: Rc<SourceSchema>,
         path: Rc<[Rc<str>]>,
         op: ChangeType,
@@ -227,7 +232,7 @@ enum Frame {
     /// The `for (const [relationship, children] of Object.entries(relationships))`
     /// loop (:1380-1383) of an emitted node.
     Relationships {
-        query_id: Rc<str>,
+        query_id: Arc<str>,
         root: Rc<SourceSchema>,
         path: Rc<[Rc<str>]>,
         op: ChangeType,
@@ -346,7 +351,7 @@ impl Iterator for StreamerStream {
                         Some(StreamItem::Data(node)) => {
                             let op = *op;
                             let hidden = *hidden;
-                            let table = &schema.table_name;
+                            let table: &str = &schema.table_name;
                             let row_key = match self.primary_keys.get(table) {
                                 Some(pk) => get_row_key(pk, &node.row),
                                 None => get_row_key(&schema.primary_key, &node.row),
@@ -362,8 +367,8 @@ impl Iterator for StreamerStream {
                             };
                             let rc = RowChange {
                                 change_type: op,
-                                query_id: query_id.to_string(),
-                                table: table.clone(),
+                                query_id: query_id.clone(),
+                                table: schema.table_name.clone(),
                                 row_key,
                                 row: row_opt,
                                 is_hidden: hidden,
@@ -484,8 +489,6 @@ fn bump_row_version(row: &Row, spec: Option<&TableSpecInfo>) -> Row {
         row.clone()
     }
 }
-
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // StreamSink — transport-agnostic streaming output (Phase 1).
@@ -722,12 +725,11 @@ mod tests {
     use super::*;
     use crate::ivm::data::SortOrder;
     use crate::ivm::schema::ColumnType;
-    use std::sync::Arc;
 
     fn schema(table: &str) -> SourceSchema {
         let sort: SortOrder = Arc::new(vec![["id".to_string(), "asc".to_string()]]);
         SourceSchema {
-            table_name: table.to_string(),
+            table_name: table.into(),
             columns: HashMap::from([("id".to_string(), ColumnType::Number { optional: false })]),
             primary_key: vec!["id".to_string()],
             relationships: HashMap::new(),
@@ -762,7 +764,7 @@ mod tests {
 
         let empty: Rc<[Rc<str>]> = Rc::from(Vec::<Rc<str>>::new());
         assert_eq!(
-            schema_at(&root, &empty).table_name,
+            &*schema_at(&root, &empty).table_name,
             "issue",
             "an empty path is the root — TS's first `#streamChanges` call gets \
              the query's own schema"
@@ -786,7 +788,7 @@ mod tests {
             schema_at(&root, &p2).table_name,
             root.relationships["comments"].relationships["labels"].table_name
         );
-        assert_eq!(schema_at(&root, &p2).table_name, "label");
+        assert_eq!(&*schema_at(&root, &p2).table_name, "label");
 
         // The prefix is SHARED: descending is a refcount bump per existing
         // element, not a fresh allocation per element.

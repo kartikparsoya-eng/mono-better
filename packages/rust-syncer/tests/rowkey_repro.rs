@@ -88,7 +88,7 @@ fn emitted_rowkey_cols(client_pks: Option<HashMap<String, Vec<String>>>) -> Vec<
             .unwrap();
         for item in changes.by_ref() {
             if let rust_ivm::ivm::stream::StreamItem::Data(rc) = item
-                && rc.table == "channel_user_status"
+                && &*rc.table == "channel_user_status"
                 && !rc.is_hidden
             {
                 let mut c: Vec<String> = rc.row_key.keys().cloned().collect();

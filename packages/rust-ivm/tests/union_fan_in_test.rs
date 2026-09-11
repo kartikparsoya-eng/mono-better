@@ -60,7 +60,7 @@ fn make_schema(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Sourc
     let sort = pk_sort(pk);
     let comparator = rust_ivm::ivm::data::make_comparator(sort.clone(), false);
     SourceSchema {
-        table_name: name.to_string(),
+        table_name: name.into(),
         columns: cols,
         primary_key: pk_cols,
         relationships: HashMap::new(),
@@ -152,7 +152,7 @@ fn test_schema_preserved() {
     );
     let ufi = UnionFanIn::new(schema);
     let result = ufi.borrow().get_schema();
-    assert_eq!(result.table_name, "custom");
+    assert_eq!(&*result.table_name, "custom");
     assert_eq!(result.primary_key, vec!["id", "name"]);
 }
 
@@ -161,7 +161,7 @@ fn test_schema_preserves_all_properties() {
     let sort = pk_sort(&["name"]);
     let comparator = rust_ivm::ivm::data::make_comparator(sort.clone(), false);
     let schema = SourceSchema {
-        table_name: "custom".to_string(),
+        table_name: "custom".into(),
         columns: HashMap::from([("col1".to_string(), ColumnType::String { optional: false })]),
         primary_key: vec!["id".to_string(), "name".to_string()],
         relationships: HashMap::new(),
@@ -173,7 +173,7 @@ fn test_schema_preserves_all_properties() {
     };
     let ufi = UnionFanIn::new(schema);
     let result = ufi.borrow().get_schema();
-    assert_eq!(result.table_name, "custom");
+    assert_eq!(&*result.table_name, "custom");
     assert_eq!(result.columns.len(), 1);
     assert_eq!(result.primary_key, vec!["id", "name"]);
     assert!(result.is_hidden);

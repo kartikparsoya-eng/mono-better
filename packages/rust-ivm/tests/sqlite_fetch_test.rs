@@ -216,7 +216,7 @@ fn test_sqlite_engine_add_queries() {
     // Verify all changes are "add" type
     for rc in &results[0].changes {
         assert_eq!(rc.change_type, rust_ivm::ivm::change::ChangeType::Add);
-        assert_eq!(rc.table, "users");
+        assert_eq!(&*rc.table, "users");
     }
 }
 

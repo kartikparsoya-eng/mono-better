@@ -1228,7 +1228,7 @@ impl IvmPipelines {
                 if rc.change_type == ChangeType::Add
                     && let Some(row) = &rc.row
                 {
-                    sink.borrow_mut().push((rc.table.clone(), row.clone()));
+                    sink.borrow_mut().push((rc.table.to_string(), row.clone()));
                 }
             },
         );

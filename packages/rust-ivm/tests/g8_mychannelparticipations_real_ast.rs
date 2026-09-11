@@ -152,12 +152,12 @@ fn mychannelparticipations_redundant_or_exists_emits_no_channels() {
             if rc.change_type != rust_ivm::ivm::change::ChangeType::Add {
                 return;
             }
-            if rc.table == "channel_participants"
+            if &*rc.table == "channel_participants"
                 && let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id")
             {
                 p_sink.borrow_mut().push(s.to_string());
             }
-            if rc.table == "channels"
+            if &*rc.table == "channels"
                 && let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id")
             {
                 c_all.borrow_mut().push(s.to_string());

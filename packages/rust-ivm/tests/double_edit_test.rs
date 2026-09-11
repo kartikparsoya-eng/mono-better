@@ -62,7 +62,7 @@ fn channels_ast() -> Ast {
 fn change_summary(changes: &[RowChange]) -> Vec<(String, ChangeType, bool)> {
     changes
         .iter()
-        .filter(|c| c.table == "channels")
+        .filter(|c| &*c.table == "channels")
         .map(|c| {
             let id = match c.row.as_ref().and_then(|r| r.get("id")) {
                 Some(Value::Str(s)) => s.to_string(),
@@ -137,7 +137,7 @@ fn double_edit_same_advance_final_state_correct() {
     // Check the last edit's value
     let edits: Vec<_> = changes2
         .iter()
-        .filter(|c| c.table == "channels" && c.change_type == ChangeType::Edit)
+        .filter(|c| &*c.table == "channels" && c.change_type == ChangeType::Edit)
         .collect();
     println!("Edits: {}", edits.len());
     for e in &edits {

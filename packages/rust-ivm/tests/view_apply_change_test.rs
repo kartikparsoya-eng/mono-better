@@ -42,7 +42,7 @@ fn make_string_schema(table: &str, pk: &[&str], cols: &[(&str, &str)]) -> Source
         })
         .collect();
     SourceSchema {
-        table_name: table.to_string(),
+        table_name: table.into(),
         columns,
         primary_key: pk.iter().map(|s| s.to_string()).collect(),
         relationships: HashMap::new(),

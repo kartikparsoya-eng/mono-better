@@ -1,6 +1,7 @@
 //! Source schema — port of `zql/src/ivm/schema.ts`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::ivm::data::{Comparator, SortOrder};
 
@@ -22,7 +23,10 @@ pub enum ColumnType {
 
 #[derive(Clone)]
 pub struct SourceSchema {
-    pub table_name: String,
+    /// Shared, not owned: the Streamer hands every `RowChange` this table
+    /// name (TS `table: schema.tableName` is a reference), so one `Arc`
+    /// per schema replaces a `String` clone per delivered row (rule 5).
+    pub table_name: Arc<str>,
     pub columns: HashMap<String, ColumnType>,
     pub primary_key: Vec<String>,
     pub relationships: HashMap<String, SourceSchema>,

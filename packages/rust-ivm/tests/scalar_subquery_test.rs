@@ -119,7 +119,7 @@ fn setup() -> (Engine, Rc<RefCell<MemorySource>>) {
 fn by_table(changes: &[RowChange]) -> HashMap<String, Vec<&RowChange>> {
     let mut m: HashMap<String, Vec<&RowChange>> = HashMap::new();
     for c in changes {
-        m.entry(c.table.clone()).or_default().push(c);
+        m.entry(c.table.to_string()).or_default().push(c);
     }
     m
 }
@@ -156,7 +156,7 @@ fn scalar_resolves_to_literal_and_emits_companion() {
     );
     assert_eq!(str_field(&users[0].row, "id").as_deref(), Some("u1"));
     for c in changes {
-        assert_eq!(c.query_id, "q", "row tagged with wrong query id");
+        assert_eq!(&*c.query_id, "q", "row tagged with wrong query id");
     }
 }
 

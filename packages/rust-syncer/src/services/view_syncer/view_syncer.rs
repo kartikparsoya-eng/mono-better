@@ -7956,7 +7956,7 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMap
         }
         m
     });
-    Some((change_type, &rc.query_id, &rc.table, row_key, row))
+    Some((change_type, &*rc.query_id, &*rc.table, row_key, row))
 }
 
 /// XOR-fold a streamed `RowChange` into a per-query row-set-signature
@@ -7976,10 +7976,10 @@ fn accumulate_signature(acc: &mut HashMap<String, u64>, rc: &rust_ivm::streamer:
         // constant on a per-row path. Looking up first keeps the clone for the
         // first row of each query only. `0 ^ unit == unit`, so seeding the
         // absent entry with `unit` is TS's `?? 0n` followed by the XOR.
-        match acc.get_mut(&rc.query_id) {
+        match acc.get_mut(&*rc.query_id) {
             Some(sig) => *sig ^= unit,
             None => {
-                acc.insert(rc.query_id.clone(), unit);
+                acc.insert(rc.query_id.to_string(), unit);
             }
         }
     }

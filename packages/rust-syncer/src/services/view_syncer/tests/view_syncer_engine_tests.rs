@@ -41,8 +41,8 @@ fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
     };
     let change = |ct: ChangeType, qid: &str, id: &str| rust_ivm::streamer::RowChange {
         change_type: ct,
-        query_id: qid.to_string(),
-        table: "issues".to_string(),
+        query_id: qid.into(),
+        table: "issues".into(),
         row_key: row_key(id),
         row: None,
         is_hidden: false,

@@ -64,7 +64,7 @@ fn hydrate_counts(pipelines: &mut IvmPipelines) -> (usize, usize) {
     for item in changes.by_ref() {
         match item {
             StreamItem::Data(rc) => {
-                assert_eq!(rc.table, "item");
+                assert_eq!(&*rc.table, "item");
                 data += 1;
             }
             StreamItem::Yield => yields += 1,
@@ -280,7 +280,7 @@ fn advance_counts(
     for item in changes.by_ref() {
         match item {
             StreamItem::Data(rc) => {
-                assert_eq!(rc.table, "item");
+                assert_eq!(&*rc.table, "item");
                 match rc.row_key.get("id") {
                     Some(rust_ivm::ivm::data::Value::Str(s)) => ids.push(s.to_string()),
                     other => panic!("row key id: {other:?}"),

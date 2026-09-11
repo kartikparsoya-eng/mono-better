@@ -272,7 +272,7 @@ impl MemorySource {
         }));
 
         let schema = SourceSchema {
-            table_name: self.table_name.clone(),
+            table_name: Arc::from(self.table_name.as_str()),
             columns: self.columns.clone(),
             primary_key: self.primary_key.clone(),
             relationships: HashMap::new(),
@@ -399,7 +399,7 @@ impl MemorySource {
         // does, but this removes the latent NullInputBase panic.
         let pusher = SourcePusher {
             schema: SourceSchema {
-                table_name: self.table_name.clone(),
+                table_name: Arc::from(self.table_name.as_str()),
                 columns: self.columns.clone(),
                 primary_key: self.primary_key.clone(),
                 relationships: HashMap::new(),
@@ -1319,7 +1319,7 @@ impl EmptyInput {
     pub fn new() -> Self {
         EmptyInput {
             schema: SourceSchema {
-                table_name: String::new(),
+                table_name: Arc::from(""),
                 columns: HashMap::new(),
                 primary_key: vec![],
                 relationships: HashMap::new(),
@@ -1363,7 +1363,7 @@ pub struct CollectOutput {
 
 #[derive(Clone)]
 struct CollectStreamConfig {
-    query_id: Rc<str>,
+    query_id: Arc<str>,
     schema: Rc<SourceSchema>,
     primary_keys: Rc<HashMap<String, Vec<String>>>,
     table_specs: Rc<HashMap<String, crate::streamer::TableSpecInfo>>,
@@ -1395,7 +1395,7 @@ impl CollectOutput {
         table_specs: Rc<HashMap<String, crate::streamer::TableSpecInfo>>,
     ) {
         self.stream_config = Some(CollectStreamConfig {
-            query_id: Rc::from(query_id.as_str()),
+            query_id: Arc::from(query_id.as_str()),
             schema: Rc::new(schema),
             primary_keys,
             table_specs,

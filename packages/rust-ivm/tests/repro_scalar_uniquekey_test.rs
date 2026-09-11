@@ -186,7 +186,7 @@ fn hydrate(path: &str, unique_keys_for_cp: Vec<Vec<String>>) -> (Vec<String>, us
             ast: nested_scalar_exists_ast(),
         }],
         |rc: &RowChange| {
-            if rc.table == "channel_participants" {
+            if &*rc.table == "channel_participants" {
                 if rc.is_hidden {
                     hidden += 1;
                 } else if let Some(row) = rc.row.as_ref()

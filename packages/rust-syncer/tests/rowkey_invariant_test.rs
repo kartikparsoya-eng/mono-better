@@ -82,7 +82,7 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
             .unwrap();
         for item in changes.by_ref() {
             if let rust_ivm::ivm::stream::StreamItem::Data(rc) = item
-                && rc.table == shape.table
+                && &*rc.table == shape.table
                 && !rc.is_hidden
             {
                 let mut c: Vec<String> = rc.row_key.keys().cloned().collect();

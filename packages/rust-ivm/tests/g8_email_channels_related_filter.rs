@@ -126,7 +126,7 @@ fn email_channels_related_type_in_filter_excludes_default_dm() {
             ast,
         }],
         move |rc: &RowChange| {
-            if rc.table == "channels"
+            if &*rc.table == "channels"
                 && !rc.is_hidden
                 && rc.change_type == rust_ivm::ivm::change::ChangeType::Add
                 && let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id")

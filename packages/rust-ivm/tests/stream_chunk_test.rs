@@ -16,8 +16,8 @@ fn make_row_change(qid: &str, table: &str, val: f64) -> RowChange {
     row.insert("name".to_string(), Value::Str(Arc::from("test")));
     RowChange {
         change_type: ChangeType::Add,
-        query_id: qid.to_string(),
-        table: table.to_string(),
+        query_id: qid.into(),
+        table: table.into(),
         row_key: Arc::new(key),
         row: Some(Arc::new(row)),
         is_hidden: false,

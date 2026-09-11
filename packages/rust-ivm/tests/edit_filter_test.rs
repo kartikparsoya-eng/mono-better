@@ -95,7 +95,7 @@ fn org_members_ast() -> Ast {
 fn member_ids(changes: &[RowChange]) -> Vec<String> {
     let mut ids: Vec<String> = changes
         .iter()
-        .filter(|c| c.table == "org_members")
+        .filter(|c| &*c.table == "org_members")
         .filter_map(|c| match c.row.as_ref()?.get("memberId")? {
             Value::Str(s) => Some(s.to_string()),
             _ => None,
@@ -109,7 +109,7 @@ fn member_ids(changes: &[RowChange]) -> Vec<String> {
 fn change_types(changes: &[RowChange]) -> Vec<(String, ChangeType)> {
     changes
         .iter()
-        .filter(|c| c.table == "org_members")
+        .filter(|c| &*c.table == "org_members")
         .map(|c| {
             let id = match c.row.as_ref().and_then(|r| r.get("memberId")) {
                 Some(Value::Str(s)) => s.to_string(),
@@ -182,7 +182,7 @@ fn edit_removes_row_from_filter_view() {
     // The Edit should produce a Remove (old passes filter, new doesn't)
     let has_remove = changes2
         .iter()
-        .any(|c| c.table == "org_members" && c.change_type == ChangeType::Remove);
+        .any(|c| &*c.table == "org_members" && c.change_type == ChangeType::Remove);
     assert!(
         has_remove,
         "Edit should emit Remove when old passes filter (leftAt IS NULL) and new doesn't. Got: {:?}",
@@ -244,7 +244,7 @@ fn edit_that_doesnt_change_filter_keeps_row() {
     // Should be an Edit (both old and new pass filter)
     let has_edit = changes2
         .iter()
-        .any(|c| c.table == "org_members" && c.change_type == ChangeType::Edit);
+        .any(|c| &*c.table == "org_members" && c.change_type == ChangeType::Edit);
     assert!(
         has_edit,
         "Edit that doesn't change filter fields should pass through as Edit"

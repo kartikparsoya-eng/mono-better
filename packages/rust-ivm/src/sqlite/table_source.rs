@@ -68,7 +68,7 @@ struct LazyRows {
     /// a column-type map and a `String` on every one of them.
     column_names: Rc<Vec<String>>,
     columns: Rc<HashMap<String, ColumnType>>,
-    table_name: Rc<str>,
+    table_name: Arc<str>,
     /// Optional debug delegate (port of TS `#fetch`'s `connection.debug`,
     /// zqlite/table-source.ts:284). When present, each vended row is recorded
     /// via `rowVended`. `None` in prod (trackRowsVended off), so the hot read
@@ -94,7 +94,7 @@ impl LazyRows {
         params: Vec<SqlParam>,
         column_names: Rc<Vec<String>>,
         columns: Rc<HashMap<String, ColumnType>>,
-        table_name: Rc<str>,
+        table_name: Arc<str>,
         debug: Option<SharedDebug>,
     ) -> Result<Pin<Box<Self>>, rusqlite::Error> {
         let _t = crate::perf_trace::scope("source.sql_prepare");
@@ -424,7 +424,7 @@ fn stream_query(
     query: SqlQuery,
     column_names: Rc<Vec<String>>,
     columns: Rc<HashMap<String, ColumnType>>,
-    table_name: Rc<str>,
+    table_name: Arc<str>,
     debug: Option<SharedDebug>,
 ) -> Box<dyn Iterator<Item = Row>> {
     let table_name_for_err = table_name.clone();
@@ -602,7 +602,7 @@ impl Drop for OverlayGuard {
 pub struct TableSource {
     // `Rc` (Rust-only, AGENTS.md rule 5): shared with every connection's input
     // and every fetch's row cursor, which used to clone them.
-    table_name: Rc<str>,
+    table_name: Arc<str>,
     columns: Rc<HashMap<String, ColumnType>>,
     column_names: Rc<Vec<String>>,
     primary_key: Rc<Vec<String>>,
@@ -681,7 +681,7 @@ impl TableSource {
 
         crate::live_count::inc(&crate::live_count::TABLE_SOURCE);
         TableSource {
-            table_name: Rc::from(table_name),
+            table_name: Arc::from(table_name),
             columns: Rc::new(columns),
             column_names: Rc::new(column_names),
             primary_key: Rc::new(primary_key),
@@ -840,7 +840,7 @@ impl TableSource {
         }));
 
         let schema = SourceSchema {
-            table_name: self.table_name.to_string(),
+            table_name: self.table_name.clone(),
             columns: (*self.columns).clone(),
             primary_key: (*self.primary_key).clone(),
             relationships: HashMap::new(),
@@ -1130,7 +1130,7 @@ impl TableSource {
 /// TableSourceInput — implements the Input trait for a TableSource connection.
 pub struct TableSourceInput {
     db: SharedSnapshotDb,
-    table_name: Rc<str>,
+    table_name: Arc<str>,
     column_names: Rc<Vec<String>>,
     columns: Rc<HashMap<String, ColumnType>>,
     /// The source's primary key, shared (see `TableSource`); `schema.primary_key`
@@ -1585,7 +1585,7 @@ mod advance_gate_fetch_tests {
             q,
             Rc::new(vec!["id".to_string()]),
             Rc::new(HashMap::new()),
-            Rc::from("t"),
+            Arc::from("t"),
             None,
         )
         .count()
@@ -1639,7 +1639,7 @@ mod advance_gate_fetch_tests {
                 "flag".to_string(),
             ]),
             Rc::new(columns),
-            Rc::from("u"),
+            Arc::from("u"),
             None,
         )
         .collect();
@@ -1812,7 +1812,7 @@ mod advance_gate_fetch_tests {
             q,
             Rc::new(vec!["no_such_col".to_string()]),
             Rc::new(HashMap::new()),
-            Rc::from("t"),
+            Arc::from("t"),
             None,
         )
         .count();
@@ -1831,7 +1831,7 @@ mod advance_gate_fetch_tests {
             q,
             Rc::new(vec!["id".to_string()]),
             Rc::new(HashMap::new()),
-            Rc::from("t"),
+            Arc::from("t"),
             None,
         )
         .count();
@@ -1864,7 +1864,7 @@ mod advance_gate_fetch_tests {
                 q,
                 Rc::new(vec!["id".to_string()]),
                 Rc::new(HashMap::new()),
-                Rc::from("t"),
+                Arc::from("t"),
                 None,
             )
             .count();

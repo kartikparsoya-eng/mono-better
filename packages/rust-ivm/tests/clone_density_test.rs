@@ -154,20 +154,20 @@ fn clone_density_profile() {
 /// value. Lower a ceiling when a change removes more; never raise one to make
 /// a regression pass.
 const CEILINGS: &[(&str, f64)] = &[
-    ("Memory/related hydrate", 17.2),
-    ("Memory/related advance+issues", 89.0),
-    ("Memory/related advance edit", 148.0),
-    ("Memory/exists hydrate", 47.5),
-    ("Memory/exists advance+issues", 139.0),
-    ("Memory/take hydrate", 18.1),
-    ("Memory/take advance edit", 155.0),
-    ("Sqlite/related hydrate", 22.7),
-    ("Sqlite/related advance+issues", 83.0),
-    ("Sqlite/related advance edit", 142.0),
-    ("Sqlite/exists hydrate", 52.4),
-    ("Sqlite/exists advance+issues", 135.5),
-    ("Sqlite/take hydrate", 26.0),
-    ("Sqlite/take advance edit", 150.0),
+    ("Memory/related hydrate", 15.0),
+    ("Memory/related advance+issues", 86.7),
+    ("Memory/related advance edit", 145.2),
+    ("Memory/exists hydrate", 45.2),
+    ("Memory/exists advance+issues", 136.4),
+    ("Memory/take hydrate", 15.8),
+    ("Memory/take advance edit", 152.9),
+    ("Sqlite/related hydrate", 20.5),
+    ("Sqlite/related advance+issues", 80.6),
+    ("Sqlite/related advance edit", 139.7),
+    ("Sqlite/exists hydrate", 50.2),
+    ("Sqlite/exists advance+issues", 133.1),
+    ("Sqlite/take hydrate", 23.8),
+    ("Sqlite/take advance edit", 147.4),
 ];
 
 #[test]

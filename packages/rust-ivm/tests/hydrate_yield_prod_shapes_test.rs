@@ -139,7 +139,7 @@ fn hydrate(ast: Ast, always: bool) -> (usize, Vec<String>) {
         match item {
             StreamItem::Yield => yields += 1,
             StreamItem::Data(rc) => {
-                if rc.table == "issues" && !rc.is_hidden {
+                if &*rc.table == "issues" && !rc.is_hidden {
                     match rc.row_key.get("id") {
                         Some(Value::Str(s)) => ids.push(s.to_string()),
                         other => panic!("id: {other:?}"),

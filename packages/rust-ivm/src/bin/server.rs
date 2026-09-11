@@ -311,8 +311,11 @@ fn row_change_to_json(rc: &rust_ivm::streamer::RowChange) -> JsonValue {
         "type".into(),
         JsonValue::String(change_type_str(rc.change_type).into()),
     );
-    obj.insert("query_id".into(), JsonValue::String(rc.query_id.clone()));
-    obj.insert("table".into(), JsonValue::String(rc.table.clone()));
+    obj.insert(
+        "query_id".into(),
+        JsonValue::String(rc.query_id.to_string()),
+    );
+    obj.insert("table".into(), JsonValue::String(rc.table.to_string()));
     obj.insert("row_key".into(), row_to_json(&rc.row_key));
     obj.insert(
         "row".into(),

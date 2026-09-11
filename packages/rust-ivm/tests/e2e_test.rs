@@ -705,7 +705,7 @@ fn e2e_hydrate_join() {
     let user_names: Vec<String> = results[0]
         .changes
         .iter()
-        .filter(|c| c.table == "users")
+        .filter(|c| &*c.table == "users")
         .filter_map(|c| match row_val(&c.row, "name") {
             Value::Str(s) => Some(s.to_string()),
             _ => None,
@@ -717,7 +717,7 @@ fn e2e_hydrate_join() {
     let post_titles: Vec<String> = results[0]
         .changes
         .iter()
-        .filter(|c| c.table == "posts")
+        .filter(|c| &*c.table == "posts")
         .filter_map(|c| match row_val(&c.row, "title") {
             Value::Str(s) => Some(s.to_string()),
             _ => None,

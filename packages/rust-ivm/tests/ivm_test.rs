@@ -89,7 +89,7 @@ fn test_hydrate_single_table() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].changes.len(), 3);
-    assert_eq!(results[0].changes[0].table, "users");
+    assert_eq!(&*results[0].changes[0].table, "users");
 }
 
 #[test]
@@ -224,17 +224,17 @@ fn test_hydrate_with_join() {
     let user_count = results[0]
         .changes
         .iter()
-        .filter(|c| c.table == "users")
+        .filter(|c| &*c.table == "users")
         .count();
     let post_count = results[0]
         .changes
         .iter()
-        .filter(|c| c.table == "posts")
+        .filter(|c| &*c.table == "posts")
         .count();
     assert_eq!(user_count, 2, "expected 2 users");
     assert_eq!(post_count, 2, "expected 2 posts");
     for change in &results[0].changes {
-        assert!(change.table == "users" || change.table == "posts");
+        assert!(&*change.table == "users" || &*change.table == "posts");
     }
 }
 

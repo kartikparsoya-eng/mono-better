@@ -378,7 +378,7 @@ fn run_seed_verbose(
                 ast: query_ast(limit, desc, cursor),
             }],
             move |rc| {
-                if rc.table != "items" {
+                if &*rc.table != "items" {
                     return;
                 }
                 if let Some(Value::Str(id)) = rc.row_key.get("id") {
@@ -472,7 +472,7 @@ fn run_seed_verbose(
                 &all_tables,
                 |_, _| {},
                 |rc| {
-                    if rc.table != "items" {
+                    if &*rc.table != "items" {
                         return;
                     }
                     let id = match rc.row_key.get("id") {

@@ -196,7 +196,7 @@ fn hydrate_companion_ids(eng: &mut Engine) -> Vec<String> {
             ast: nested_scalar_exists_ast(),
         }],
         |rc: &RowChange| {
-            if rc.table == "channel_participants" {
+            if &*rc.table == "channel_participants" {
                 match rc.row_key.get("id") {
                     Some(rust_ivm::ivm::data::Value::Str(v)) => ids.push(v.to_string()),
                     // Empty/absent PK in the row key is exactly the bug: an
