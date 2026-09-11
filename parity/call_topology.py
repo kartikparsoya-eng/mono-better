@@ -159,6 +159,8 @@ def check_tier2():
         call_re = re.compile(r"\b" + re.escape(sym) + r"\s*\(")
         def_re = re.compile(r"\bfn\s+" + re.escape(sym) + r"\b")
         for path in files:
+            if "tests" in path.parts or path.name.endswith(("_tests.rs", "_test.rs")):
+                continue               # out-of-line `mod tests;` body: all test code
             lines = path.read_text().splitlines()
             test_start = _test_module_start(lines)
             owner = _enclosing_fns(lines)

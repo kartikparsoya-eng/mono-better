@@ -856,6 +856,22 @@ RUST_TYPE_ALIAS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)")
 
 RUST_TEST_MOD = re.compile(r"^\s*(?:pub\s+)?mod\s+tests?\b|^\s*mod\s+test_\w+\b")
 
+
+def is_src_test_file(path):
+    """True for an out-of-line unit-test file under `src/`: the body of a
+    `#[cfg(test)] #[path = "tests/<parent>_tests.rs"] mod tests;` declaration.
+    Such a file carries no `#[cfg(test)]` of its own (the attribute sits on the
+    declaration in the parent), so every tool that masks test code by attribute
+    or by `mod tests {` must treat the WHOLE file as test text instead. The
+    contract is the path: a `tests/` directory component under `src/`, or a
+    `_tests.rs` / `_test.rs` basename."""
+    p = path.replace("\\", "/")
+    base = p.rsplit("/", 1)[-1]
+    parts = p.split("/")
+    under_src = "src" in parts and parts.index("src") < len(parts) - 1
+    in_tests_dir = "tests" in parts[parts.index("src") + 1:-1] if under_src else False
+    return in_tests_dir or base.endswith(("_tests.rs", "_test.rs"))
+
 def extract_rust(path):
     """Return list of (canon, name, kind, lineno, signature).
 
@@ -864,6 +880,8 @@ def extract_rust(path):
     code, while unit-test fns inside the module are still excluded.
     """
     out = []
+    if is_src_test_file(path):
+        return out
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
     skip_close = None       # closing-brace line ending the current test module

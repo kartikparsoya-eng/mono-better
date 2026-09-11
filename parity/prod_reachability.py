@@ -54,7 +54,7 @@ from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "parity"))
-from parity_ledger import CRATES, canon, expand_ts_files, extract_ts  # noqa: E402
+from parity_ledger import CRATES, canon, expand_ts_files, extract_ts, is_src_test_file  # noqa: E402
 
 # Ratchet: may only go DOWN. Seeded 2026-09-04 at the census the guard found on
 # the day it was written — NOT at 0. These 72 are a real backlog, not a clean
@@ -241,6 +241,9 @@ class Item:
 def parse_file(crate, relpath, src):
     """(items, masked). Test modules and #[cfg(test)] items are masked out."""
     m = mask(src)
+    if is_src_test_file(relpath):
+        # An out-of-line `mod tests;` body: all test text, no attribute inside.
+        return [], re.sub(r"[^\n]", " ", m)
     # Blank test-module bodies: a whole balanced block, so brace depth
     # stays consistent for every span computed afterwards. `#[cfg(test)]` on a
     # non-mod item is NOT blanked — brace-matching from an attribute swallows

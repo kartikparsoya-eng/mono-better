@@ -2,24 +2,37 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **561** · ✅ COVERED **509** · 🟥 GAP (pure, untested) **18** · ⚙️ IO (integration diff) **23** · ◻️ infra/metrics **8** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **509/527 = 97%**
+- Rust fns total **650** · ✅ COVERED **585** · 🟥 GAP (pure, untested) **31** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **7** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **585/616 = 95%**
 
-> ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
+> ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `client_primary_keys_from_schema` (services/view_syncer/view_syncer.rs), `merge` (tdigest.rs), `optional_client_schema` (protocol/client_schema.rs)
 
-## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 18
+## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 31
 
 | fn | file | signature |
 |---|---|---|
 | `deserialize` | protocol.rs | `fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {` |
 | `optional_no_null` | protocol.rs | `pub fn optional_no_null<'de, D, T>(d: D) -> Result<Option<T>, D::Error>` |
 | `serialize` | protocol.rs | `fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {` |
+| `optional_client_schema` | protocol/client_schema.rs | `pub fn optional_client_schema<'de, D>(d: D) -> Result<Option<Value>, D::Error>` |
 | `expecting` | protocol/version.rs | `fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {` |
 | `visit_none` | protocol/version.rs | `fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {` |
 | `visit_str` | protocol/version.rs | `fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {` |
 | `visit_unit` | protocol/version.rs | `fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {` |
+| `create_log_context` | server/logging.rs | `pub fn create_log_context(worker: &str, worker_index: u32) {` |
+| `format_event` | server/logging.rs | `fn format_event(` |
+| `record_bool` | server/logging.rs | `fn record_bool(&mut self, field: &Field, value: bool) {` |
+| `record_debug` | server/logging.rs | `fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {` |
+| `record_error` | server/logging.rs | `fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {` |
+| `record_f64` | server/logging.rs | `fn record_f64(&mut self, field: &Field, value: f64) {` |
+| `record_i64` | server/logging.rs | `fn record_i64(&mut self, field: &Field, value: i64) {` |
+| `record_str` | server/logging.rs | `fn record_str(&mut self, field: &Field, value: &str) {` |
+| `record_u64` | server/logging.rs | `fn record_u64(&mut self, field: &Field, value: u64) {` |
 | `init_metrics` | server/otel_start.rs | `pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {` |
 | `metrics_enabled` | server/otel_start.rs | `fn metrics_enabled() -> bool {` |
+| `client_primary_keys_from_schema` | services/view_syncer/view_syncer.rs | `fn client_primary_keys_from_schema(` |
+| `fail_client` | services/view_syncer/view_syncer.rs | `pub fn fail_client(&self, ws_id: &str, msg: &str) -> bool {` |
+| `set_enable_query_covering` | services/view_syncer/view_syncer.rs | `pub fn set_enable_query_covering(&mut self, enabled: bool) {` |
 | `add_centroid_list` | tdigest.rs | `pub fn add_centroid_list(&mut self, centroid_list: Vec<Centroid>) {` |
 | `byte_size_for_compression` | tdigest.rs | `pub fn byte_size_for_compression(comp: f64) -> f64 {` |
 | `centroids` | tdigest.rs | `pub fn centroids(&mut self) -> Vec<Centroid> {` |
@@ -38,11 +51,12 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 509
+## ✅ COVERED — body pinned to TS fixture — 585
 
 | fn | file | signature |
 |---|---|---|
 | `route_sqlite_malloc_through_mimalloc` | alloc.rs | `pub fn route_sqlite_malloc_through_mimalloc() -> Result<(), c_int> {` |
+| `saturating_c_int` | alloc.rs | `fn saturating_c_int(n: usize) -> c_int {` |
 | `as_str` | ast_to_zql.rs | `fn as_str(v: Option<&Value>) -> &str {` |
 | `ast_to_zql` | ast_to_zql.rs | `pub fn ast_to_zql(ast: &Value) -> String {` |
 | `extract_relationship_name` | ast_to_zql.rs | `fn extract_relationship_name(related: &Value) -> String {` |
@@ -119,12 +133,19 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `get_backoff_delay_ms` | custom/fetch.rs | `pub(crate) fn get_backoff_delay_ms(attempt: u32) -> u64 {` |
 | `read_body_preview` | custom/fetch.rs | `pub(crate) async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Option<St…` |
 | `url_match` | custom/fetch.rs | `pub fn url_match(pattern: &str, url: &str) -> bool {` |
+| `api_attempt_attrs` | custom/metrics.rs | `pub fn api_attempt_attrs(` |
 | `api_otel` | custom/metrics.rs | `fn api_otel() -> &'static ApiOtel {` |
-| `api_request_metric_attrs` | custom/metrics.rs | `fn api_request_metric_attrs(result: &'static str) -> [opentelemetry::KeyValue; 2] {` |
+| `api_request_attrs` | custom/metrics.rs | `pub fn api_request_attrs(` |
+| `from_body` | custom/metrics.rs | `pub fn from_body(body: &str) -> Option<ApiErrorAttrs> {` |
+| `push_response_error_attrs` | custom/metrics.rs | `fn push_response_error_attrs(` |
 | `record_api_attempt` | custom/metrics.rs | `pub fn record_api_attempt(` |
 | `record_api_in_flight` | custom/metrics.rs | `pub fn record_api_in_flight(delta: i64) {` |
-| `record_api_request` | custom/metrics.rs | `pub fn record_api_request(result: &'static str) {` |
-| `record_api_request_duration` | custom/metrics.rs | `pub fn record_api_request_duration(elapsed_ms: f64) {` |
+| `record_api_request` | custom/metrics.rs | `pub fn record_api_request(` |
+| `__test_backdate_transform_cache_sweep_clock` | custom_queries/transform_query.rs | `pub fn __test_backdate_transform_cache_sweep_clock(by: Duration) {` |
+| `__test_cache_timings` | custom_queries/transform_query.rs | `pub fn __test_cache_timings() -> (Duration, Duration) {` |
+| `__test_insert_aged` | custom_queries/transform_query.rs | `pub fn __test_insert_aged(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery, age…` |
+| `__test_reset_transform_cache` | custom_queries/transform_query.rs | `pub fn __test_reset_transform_cache() {` |
+| `__test_transform_cache_state` | custom_queries/transform_query.rs | `pub fn __test_transform_cache_state() -> (usize, std::time::Duration) {` |
 | `cache_get` | custom_queries/transform_query.rs | `fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {` |
 | `cache_set` | custom_queries/transform_query.rs | `fn cache_set(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {` |
 | `composed_headers` | custom_queries/transform_query.rs | `pub fn composed_headers(&self) -> Vec<(String, String)> {` |
@@ -167,18 +188,20 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `cvr_flush_failures` | observability/metrics.rs | `fn cvr_flush_failures() -> &'static Counter<u64> {` |
 | `failed_client_groups` | observability/metrics.rs | `fn failed_client_groups() -> &'static Counter<u64> {` |
 | `fmt` | observability/metrics.rs | `fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {` |
+| `lock_wait_time_otel` | observability/metrics.rs | `fn lock_wait_time_otel() -> &'static OtelHistogram<f64> {` |
 | `mutation_otel` | observability/metrics.rs | `fn mutation_otel() -> &'static MutationOtel {` |
 | `now_ms` | observability/metrics.rs | `fn now_ms() -> i64 {` |
 | `proto_attr` | observability/metrics.rs | `fn proto_attr(protocol_version: u32) -> KeyValue {` |
 | `query_transform_otel` | observability/metrics.rs | `fn query_transform_otel() -> &'static QueryTransformOtel {` |
 | `record_active_client_delta` | observability/metrics.rs | `pub fn record_active_client_delta(delta: i64, protocol_version: u32) {` |
-| `record_advance` | observability/metrics.rs | `pub fn record_advance(&self, elapsed_ms: f64) {` |
+| `record_advance` | observability/metrics.rs | `pub fn record_advance(&self, process_time_ms: f64) {` |
 | `record_client_protocol_version` | observability/metrics.rs | `pub fn record_client_protocol_version(protocol_version: u32) {` |
 | `record_cvr_flush_failure` | observability/metrics.rs | `pub fn record_cvr_flush_failure() {` |
 | `record_e2e_serving_lag` | observability/metrics.rs | `pub fn record_e2e_serving_lag(lag_ms: f64) {` |
 | `record_e2e_serving_lag_clamp` | observability/metrics.rs | `pub fn record_e2e_serving_lag_clamp() {` |
 | `record_fail_group` | observability/metrics.rs | `pub fn record_fail_group(reason: &'static str) {` |
 | `record_hydration` | observability/metrics.rs | `pub fn record_hydration(&self, elapsed_ms: f64) {` |
+| `record_lock_wait_ms` | observability/metrics.rs | `pub fn record_lock_wait_ms(elapsed_ms: f64) {` |
 | `record_push` | observability/metrics.rs | `pub fn record_push(client_group_id: &str, mutation_count: u64) {` |
 | `record_query_transformation` | observability/metrics.rs | `pub fn record_query_transformation(success: bool) {` |
 | `record_query_transformation_hash_change` | observability/metrics.rs | `pub fn record_query_transformation_hash_change() {` |
@@ -186,9 +209,8 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `record_query_transformation_time` | observability/metrics.rs | `pub fn record_query_transformation_time(elapsed_ms: f64) {` |
 | `record_reset` | observability/metrics.rs | `pub fn record_reset(&self, reason: &str) {` |
 | `record_same_hash_rehydration_version_bump` | observability/metrics.rs | `pub fn record_same_hash_rehydration_version_bump(reason: &'static str) {` |
-| `record_view_syncer_hydration` | observability/metrics.rs | `pub fn record_view_syncer_hydration(elapsed_ms: f64) {` |
 | `record_websocket_error` | observability/metrics.rs | `pub fn record_websocket_error(event_type: &'static str, protocol_version: u32) {` |
-| `record_ws_connection_failure` | observability/metrics.rs | `pub fn record_ws_connection_failure(protocol_version: u32, reason: &str) {` |
+| `record_ws_connection_failure` | observability/metrics.rs | `pub fn record_ws_connection_failure(protocol_version: u32, reason: ConnectionFailureRea…` |
 | `record_ws_connection_success` | observability/metrics.rs | `pub fn record_ws_connection_success(protocol_version: u32) {` |
 | `record_ws_open_delta` | observability/metrics.rs | `pub fn record_ws_open_delta(delta: i64, protocol_version: u32) {` |
 | `record_ws_queued_bytes_delta` | observability/metrics.rs | `pub fn record_ws_queued_bytes_delta(delta: i64) {` |
@@ -217,6 +239,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `kind` | protocol/error.rs | `pub fn kind(&self) -> &ErrorKind {` |
 | `message` | protocol/error.rs | `pub fn message(&self) -> &str {` |
 | `rehome` | protocol/error.rs | `pub fn rehome(message: impl Into<String>) -> Self {` |
+| `rehome_with_max_backoff_ms` | protocol/error.rs | `pub fn rehome_with_max_backoff_ms(message: impl Into<String>, max_backoff_ms: i64) -> S…` |
 | `unauthorized` | protocol/error.rs | `pub fn unauthorized(message: impl Into<String>) -> Self {` |
 | `version_not_supported` | protocol/error.rs | `pub fn version_not_supported(message: impl Into<String>) -> Self {` |
 | `pong_message` | protocol/pong.rs | `pub fn pong_message() -> Value {` |
@@ -232,6 +255,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `get_metrics_json_for_query` | server/inspector_delegate.rs | `pub fn get_metrics_json_for_query(&mut self, query_id: &str) -> Option<Value> {` |
 | `number_to_value` | server/inspector_delegate.rs | `fn number_to_value(n: f64) -> Value {` |
 | `remove_query` | server/inspector_delegate.rs | `pub fn remove_query(&mut self, query_id: &str) {` |
+| `put` | server/logging.rs | `fn put(&mut self, field: &Field, value: Value) {` |
 | `is_priority_op_running` | server/priority_op.rs | `pub fn is_priority_op_running() -> bool {` |
 | `run_priority_op` | server/priority_op.rs | `pub async fn run_priority_op<T, F: Future<Output = T>>(description: &str, op: F) -> T {` |
 | `create_mutagen` | server/syncer.rs | `fn create_mutagen(&self, _cg_id: &str) -> Option<Arc<dyn crate::MutagenDispatch>> {` |
@@ -325,20 +349,23 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `destroy` | services/view_syncer/pipeline_driver.rs | `pub fn destroy(&mut self) {` |
 | `destroy_pipeline` | services/view_syncer/pipeline_driver.rs | `fn destroy_pipeline(&mut self, query_id: &str, stop_reason: &'static str) {` |
 | `elapsed_lap` | services/view_syncer/pipeline_driver.rs | `fn elapsed_lap(&self) -> f64;` |
-| `finish` | services/view_syncer/pipeline_driver.rs | `pub fn finish(mut self) -> Result<(), String> {` |
+| `finish` | services/view_syncer/pipeline_driver.rs | `pub fn finish(mut self) -> Result<(), JsError> {` |
 | `finish_advance` | services/view_syncer/pipeline_driver.rs | `fn finish_advance(&mut self, stream: AdvanceStream) -> Result<AdvanceOutcome, String> {` |
-| `finish_hydrate` | services/view_syncer/pipeline_driver.rs | `fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[(String, String)]) {` |
+| `finish_hydrate` | services/view_syncer/pipeline_driver.rs | `fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[HydrateQuery]) {` |
+| `for_pipeline` | services/view_syncer/pipeline_driver.rs | `fn for_pipeline(` |
 | `get_row` | services/view_syncer/pipeline_driver.rs | `pub fn get_row(&self, table: &str, pk: &[(String, Value)]) -> Option<Row> {` |
 | `has_query` | services/view_syncer/pipeline_driver.rs | `pub fn has_query(&self, query_id: &str) -> bool {` |
 | `header` | services/view_syncer/pipeline_driver.rs | `pub fn header(&self) -> (&str, usize) {` |
-| `hydrate` | services/view_syncer/pipeline_driver.rs | `pub fn hydrate(` |
+| `hydrate` | services/view_syncer/pipeline_driver.rs | `pub fn hydrate<Q: Clone + Into<HydrateQuery>>(` |
 | `hydrate_analyze` | services/view_syncer/pipeline_driver.rs | `pub fn hydrate_analyze(` |
+| `hydrate_js_error` | services/view_syncer/pipeline_driver.rs | `fn hydrate_js_error(payload: &Box<dyn std::any::Any + Send>) -> JsError {` |
 | `hydration_time_ms` | services/view_syncer/pipeline_driver.rs | `pub fn hydration_time_ms(&self, query_id: &str) -> Option<f64> {` |
 | `init` | services/view_syncer/pipeline_driver.rs | `pub fn init(` |
 | `init_and_reset_common` | services/view_syncer/pipeline_driver.rs | `pub fn init_and_reset_common(` |
 | `init_from_connection` | services/view_syncer/pipeline_driver.rs | `pub fn init_from_connection(` |
 | `initialized` | services/view_syncer/pipeline_driver.rs | `pub fn initialized(&self) -> bool {` |
 | `json_to_value` | services/view_syncer/pipeline_driver.rs | `pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value {` |
+| `log_query_failure` | services/view_syncer/pipeline_driver.rs | `fn log_query_failure(` |
 | `log_query_pipeline_lifecycle` | services/view_syncer/pipeline_driver.rs | `fn log_query_pipeline_lifecycle(log: QueryPipelineLifecycleLog) {` |
 | `log_vended_row_counts` | services/view_syncer/pipeline_driver.rs | `fn log_vended_row_counts(` |
 | `next` | services/view_syncer/pipeline_driver.rs | `fn next(&mut self) -> Option<Self::Item> {` |
@@ -346,6 +373,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `panic_message` | services/view_syncer/pipeline_driver.rs | `fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {` |
 | `parse_ts_ast` | services/view_syncer/pipeline_driver.rs | `pub fn parse_ts_ast(json: &str) -> Result<rust_ivm::builder::ast::Ast, String> {` |
 | `query_transformation_hash` | services/view_syncer/pipeline_driver.rs | `pub fn query_transformation_hash(&self, query_id: &str) -> Option<&str> {` |
+| `random_id` | services/view_syncer/pipeline_driver.rs | `fn random_id() -> String {` |
 | `running_queries` | services/view_syncer/pipeline_driver.rs | `pub fn running_queries(&self) -> Vec<(String, std::sync::Arc<str>, String)> {` |
 | `scalar_reset_message` | services/view_syncer/pipeline_driver.rs | `fn scalar_reset_message(payload: &Box<dyn std::any::Any + Send>) -> Option<String> {` |
 | `set_client_primary_keys` | services/view_syncer/pipeline_driver.rs | `pub fn set_client_primary_keys(&mut self, client_primary_keys: HashMap<String, Vec<Stri…` |
@@ -354,7 +382,9 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `should_yield` | services/view_syncer/pipeline_driver.rs | `pub fn should_yield(&self) -> bool {` |
 | `should_yield_hook` | services/view_syncer/pipeline_driver.rs | `fn should_yield_hook(&self) -> Rc<dyn Fn() -> bool> {` |
 | `should_yield_with` | services/view_syncer/pipeline_driver.rs | `fn should_yield_with(` |
+| `to_string_radix_36` | services/view_syncer/pipeline_driver.rs | `fn to_string_radix_36(mut n: u64) -> String {` |
 | `total_elapsed` | services/view_syncer/pipeline_driver.rs | `fn total_elapsed(&self) -> f64;` |
+| `vended_table_names` | services/view_syncer/pipeline_driver.rs | `fn vended_table_names(&self) -> Vec<String> {` |
 | `zql_column_type` | services/view_syncer/pipeline_driver.rs | `fn zql_column_type(cs: &ColumnSchema) -> ColumnType {` |
 | `ast_covered_by` | services/view_syncer/query_covering.rs | `fn ast_covered_by(covered: &Value, covering: &Value) -> bool {` |
 | `bounds_covered_by` | services/view_syncer/query_covering.rs | `fn bounds_covered_by(covered: &Value, covering: &Value) -> bool {` |
@@ -385,68 +415,115 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `same_related_edge` | services/view_syncer/query_covering.rs | `fn same_related_edge(a: &Value, b: &Value) -> bool {` |
 | `simple_condition_implies` | services/view_syncer/query_covering.rs | `fn simple_condition_implies(covered: &Value, covering: &Value) -> bool {` |
 | `subquery` | services/view_syncer/query_covering.rs | `fn subquery(related: &Value) -> &Value {` |
+| `accumulate_signature` | services/view_syncer/view_syncer.rs | `fn accumulate_signature(acc: &mut HashMap<String, u64>, rc: &rust_ivm::streamer::RowCha…` |
+| `advance_and_sync` | services/view_syncer/view_syncer.rs | `pub async fn advance_and_sync(` |
+| `advance_poke_targets` | services/view_syncer/view_syncer.rs | `fn advance_poke_targets(` |
 | `app_id` | services/view_syncer/view_syncer.rs | `pub fn app_id(&self) -> &str {` |
 | `apply_client_deletions` | services/view_syncer/view_syncer.rs | `async fn apply_client_deletions(` |
 | `arm_serving_lag` | services/view_syncer/view_syncer.rs | `fn arm_serving_lag(&mut self, notification: &serde_json::Value) {` |
 | `attempt_background_retransform` | services/view_syncer/view_syncer.rs | `async fn attempt_background_retransform(` |
+| `catchup_clients` | services/view_syncer/view_syncer.rs | `pub async fn catchup_clients(` |
+| `catchup_floor` | services/view_syncer/view_syncer.rs | `fn catchup_floor(` |
 | `cg_event_loop` | services/view_syncer/view_syncer.rs | `pub(crate) async fn cg_event_loop(` |
 | `change_desired_queries` | services/view_syncer/view_syncer.rs | `async fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str) {` |
 | `check_client_and_cvr_versions` | services/view_syncer/view_syncer.rs | `fn check_client_and_cvr_versions(` |
 | `check_for_thrashing` | services/view_syncer/view_syncer.rs | `fn check_for_thrashing(&mut self, query_id: &str) {` |
 | `classify_retransform_failure` | services/view_syncer/view_syncer.rs | `fn classify_retransform_failure(failure: Option<serde_json::Value>) -> RetransformOutco…` |
+| `client_handler_for` | services/view_syncer/view_syncer.rs | `fn client_handler_for(&self, client_id: &str) -> Option<Arc<ClientHandler>> {` |
 | `clients_to_delete` | services/view_syncer/view_syncer.rs | `fn clients_to_delete(` |
+| `cmd` | services/view_syncer/view_syncer.rs | `fn cmd(self) -> &'static str {` |
+| `config_and_hydrate` | services/view_syncer/view_syncer.rs | `pub async fn config_and_hydrate(` |
+| `config_and_hydrate_with_profile` | services/view_syncer/view_syncer.rs | `pub async fn config_and_hydrate_with_profile(` |
+| `config_poke_targets` | services/view_syncer/view_syncer.rs | `fn config_poke_targets(` |
 | `custom_query_context_from` | services/view_syncer/view_syncer.rs | `fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryContext> {` |
+| `cvr_store_error_body` | services/view_syncer/view_syncer.rs | `fn cvr_store_error_body(error: &CVRStoreError) -> crate::protocol::ErrorBody {` |
+| `cvr_store_error_thrown` | services/view_syncer/view_syncer.rs | `fn cvr_store_error_thrown<'a>(error: &CVRStoreError, message: &'a str) -> Thrown<'a> {` |
 | `decrement_active_client` | services/view_syncer/view_syncer.rs | `fn decrement_active_client(&mut self, ws_id: &str) {` |
 | `decrement_nonzero` | services/view_syncer/view_syncer.rs | `pub(crate) fn decrement_nonzero(count: &AtomicU64) {` |
 | `delete_client_due_to_disconnect` | services/view_syncer/view_syncer.rs | `fn delete_client_due_to_disconnect(&mut self, client_id: &str, ws_id: &str) {` |
 | `delete_clients` | services/view_syncer/view_syncer.rs | `async fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String> {` |
 | `dispatch_cg_message` | services/view_syncer/view_syncer.rs | `async fn dispatch_cg_message(` |
+| `empty_cvr` | services/view_syncer/view_syncer.rs | `pub fn empty_cvr(id: &str, replica_version: &str) -> CVR {` |
 | `ensure_cvr` | services/view_syncer/view_syncer.rs | `async fn ensure_cvr(&mut self, allow_create: bool) -> Result<bool, LoadCvrError> {` |
+| `existing_rows` | services/view_syncer/view_syncer.rs | `pub async fn existing_rows(&self) -> Result<Arc<RowRecordMap>, CVRStoreError> {` |
 | `fail_group` | services/view_syncer/view_syncer.rs | `fn fail_group(&mut self, message: &str) {` |
-| `fail_group_with_error` | services/view_syncer/view_syncer.rs | `fn fail_group_with_error(&mut self, error: crate::protocol::ErrorBody) {` |
+| `fail_group_js` | services/view_syncer/view_syncer.rs | `fn fail_group_js(&mut self, error: &JsError) {` |
+| `fail_group_with_error` | services/view_syncer/view_syncer.rs | `fn fail_group_with_error(` |
 | `fail_maintenance_connection` | services/view_syncer/view_syncer.rs | `fn fail_maintenance_connection(` |
+| `flush_ops_to_store` | services/view_syncer/view_syncer.rs | `async fn flush_ops_to_store(` |
+| `flush_to_store` | services/view_syncer/view_syncer.rs | `async fn flush_to_store(` |
 | `forces_config_pass` | services/view_syncer/view_syncer.rs | `fn forces_config_pass(self) -> bool {` |
 | `format_transform_error_message` | services/view_syncer/view_syncer.rs | `fn format_transform_error_message(error: &serde_json::Value) -> String {` |
+| `gather_catchup_patches` | services/view_syncer/view_syncer.rs | `async fn gather_catchup_patches(` |
+| `get_clients` | services/view_syncer/view_syncer.rs | `fn get_clients(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {` |
 | `get_ttl_clock` | services/view_syncer/view_syncer.rs | `fn get_ttl_clock(&mut self, now: i64) -> TTLClock {` |
+| `handle_config_update` | services/view_syncer/view_syncer.rs | `async fn handle_config_update(` |
 | `handle_desired_queries` | services/view_syncer/view_syncer.rs | `async fn handle_desired_queries(` |
 | `handle_update_auth` | services/view_syncer/view_syncer.rs | `async fn handle_update_auth(&mut self, client_id: &str, token: &str) {` |
+| `has_client` | services/view_syncer/view_syncer.rs | `fn has_client(&self, client_id: &str) -> bool {` |
+| `hydrate_and_sync` | services/view_syncer/view_syncer.rs | `pub async fn hydrate_and_sync(` |
+| `hydrate_unchanged_queries` | services/view_syncer/view_syncer.rs | `async fn hydrate_unchanged_queries(` |
 | `idle_shutdown_due` | services/view_syncer/view_syncer.rs | `fn idle_shutdown_due(&self) -> bool {` |
 | `inspect` | services/view_syncer/view_syncer.rs | `async fn inspect(&self, selector: &ConnectionSelector, msg: &str) {` |
+| `inspect_queries` | services/view_syncer/view_syncer.rs | `pub async fn inspect_queries(` |
 | `inspector_delegate` | services/view_syncer/view_syncer.rs | `pub fn inspector_delegate(` |
 | `is_init_connection` | services/view_syncer/view_syncer.rs | `fn is_init_connection(self) -> bool {` |
+| `is_retryable_flush_error` | services/view_syncer/view_syncer.rs | `fn is_retryable_flush_error(e: &rust_cvr::cvr_store::CVRStoreError) -> bool {` |
+| `load_cvr` | services/view_syncer/view_syncer.rs | `pub async fn load_cvr(&self, last_connect_time: f64) -> Result<Option<CVR>, LoadCvrErro…` |
 | `lock_unpoisoned` | services/view_syncer/view_syncer.rs | `pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {` |
 | `mark_version_served` | services/view_syncer/view_syncer.rs | `fn mark_version_served(&mut self, version: &CVRVersion) {` |
+| `maybe_log_advance_summary` | services/view_syncer/view_syncer.rs | `fn maybe_log_advance_summary() {` |
 | `merge_notifications` | services/view_syncer/view_syncer.rs | `fn merge_notifications(prev: serde_json::Value, next: serde_json::Value) -> serde_json:…` |
 | `new_with_accepting` | services/view_syncer/view_syncer.rs | `fn new_with_accepting(` |
 | `next_auth_maintenance_delay` | services/view_syncer/view_syncer.rs | `fn next_auth_maintenance_delay(&self) -> Option<Duration> {` |
 | `next_expiry_delay` | services/view_syncer/view_syncer.rs | `fn next_expiry_delay(&self) -> Option<Duration> {` |
 | `next_idle_shutdown_delay` | services/view_syncer/view_syncer.rs | `fn next_idle_shutdown_delay(&self) -> Option<Duration> {` |
 | `next_ttl_clock_delay` | services/view_syncer/view_syncer.rs | `fn next_ttl_clock_delay(&self) -> Option<Duration> {` |
+| `offload` | services/view_syncer/view_syncer.rs | `async fn offload<F, T>(&self, fut: F) -> T` |
 | `older_replica_error` | services/view_syncer/view_syncer.rs | `fn older_replica_error(cvr: &CVR, replica_version: &str) -> Option<String> {` |
 | `on_expiry_tick` | services/view_syncer/view_syncer.rs | `async fn on_expiry_tick(&mut self) {` |
 | `on_inbound` | services/view_syncer/view_syncer.rs | `async fn on_inbound(` |
 | `on_new_connection` | services/view_syncer/view_syncer.rs | `async fn on_new_connection(` |
 | `on_notification` | services/view_syncer/view_syncer.rs | `async fn on_notification(&mut self, notification: serde_json::Value) {` |
 | `parse_desired_queries_patch` | services/view_syncer/view_syncer.rs | `fn parse_desired_queries_patch(` |
+| `pipelines` | services/view_syncer/view_syncer.rs | `pub fn pipelines(&mut self) -> &mut IvmPipelines {` |
 | `process_clock_ms` | services/view_syncer/view_syncer.rs | `fn process_clock_ms() -> f64 {` |
 | `protocol_version_for_ws` | services/view_syncer/view_syncer.rs | `pub fn protocol_version_for_ws(&self, ws_id: &str) -> u32 {` |
 | `publish_serving_lag` | services/view_syncer/view_syncer.rs | `fn publish_serving_lag(&mut self) {` |
 | `query_context_for` | services/view_syncer/view_syncer.rs | `fn query_context_for(&self, client_id: &str, ws_id: &str) -> Option<CustomQueryContext> {` |
 | `query_count` | services/view_syncer/view_syncer.rs | `fn query_count(&mut self) -> usize {` |
+| `query_name_of` | services/view_syncer/view_syncer.rs | `fn query_name_of(cvr: &CVR, qid: &str) -> Option<String> {` |
 | `record_transform_error` | services/view_syncer/view_syncer.rs | `fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<serde_js…` |
+| `register_client` | services/view_syncer/view_syncer.rs | `pub fn register_client(` |
+| `reject_queued_connection` | services/view_syncer/view_syncer.rs | `fn reject_queued_connection(` |
+| `remove_expired_queries` | services/view_syncer/view_syncer.rs | `pub async fn remove_expired_queries(` |
 | `replica_path` | services/view_syncer/view_syncer.rs | `pub fn replica_path(&self) -> Option<&str> {` |
 | `reset_pipelines_and_rehydrate` | services/view_syncer/view_syncer.rs | `async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, message: &str) {` |
+| `row_cache_cow_copies` | services/view_syncer/view_syncer.rs | `pub async fn row_cache_cow_copies(&self) -> u64 {` |
+| `row_change_to_maps` | services/view_syncer/view_syncer.rs | `fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMaps> {` |
 | `row_count` | services/view_syncer/view_syncer.rs | `fn row_count(&self) -> usize {` |
+| `row_to_contents` | services/view_syncer/view_syncer.rs | `fn row_to_contents(row: &rust_ivm::ivm::data::Row) -> serde_json::Value {` |
 | `run_auth_maintenance` | services/view_syncer/view_syncer.rs | `async fn run_auth_maintenance(&mut self) {` |
 | `run_background_retransform` | services/view_syncer/view_syncer.rs | `async fn run_background_retransform(&mut self) {` |
+| `run_in_lock_for_client` | services/view_syncer/view_syncer.rs | `fn run_in_lock_for_client(` |
+| `same_hash_rehydration_bump_reason` | services/view_syncer/view_syncer.rs | `fn same_hash_rehydration_bump_reason(` |
 | `schedule_auth_maintenance` | services/view_syncer/view_syncer.rs | `fn schedule_auth_maintenance(&mut self) {` |
 | `schedule_expire_eviction` | services/view_syncer/view_syncer.rs | `fn schedule_expire_eviction(&mut self, cvr: &CVR) {` |
 | `second_element` | services/view_syncer/view_syncer.rs | `fn second_element(msg: &str) -> serde_json::Value {` |
+| `seed_signatures_from_cvr` | services/view_syncer/view_syncer.rs | `fn seed_signatures_from_cvr(cvr: &CVR) -> HashMap<String, u64> {` |
+| `send_inspect_response` | services/view_syncer/view_syncer.rs | `pub fn send_inspect_response(&self, ws_id: &str, response: serde_json::Value) {` |
+| `send_query_transform_error_to_clients` | services/view_syncer/view_syncer.rs | `fn send_query_transform_error_to_clients(` |
 | `serving_lag_eligible` | services/view_syncer/view_syncer.rs | `fn serving_lag_eligible(&self) -> bool {` |
+| `set_cvr_store` | services/view_syncer/view_syncer.rs | `pub fn set_cvr_store(` |
+| `set_identity_for_tests` | services/view_syncer/view_syncer.rs | `pub fn set_identity_for_tests(&mut self, app_id: &str, shard: ShardID, cg_id: &str) {` |
+| `set_tokio_handle` | services/view_syncer/view_syncer.rs | `pub fn set_tokio_handle(&mut self, handle: tokio::runtime::Handle) {` |
 | `shard` | services/view_syncer/view_syncer.rs | `pub fn shard(&self) -> &ShardID {` |
 | `shard_for` | services/view_syncer/view_syncer.rs | `pub(crate) fn shard_for(cg_id: &str, num_shards: usize) -> usize {` |
 | `shutdown` | services/view_syncer/view_syncer.rs | `fn shutdown(&mut self) {` |
+| `signature_provider` | services/view_syncer/view_syncer.rs | `fn signature_provider() -> (` |
+| `slow_hydrate_threshold_from_env` | services/view_syncer/view_syncer.rs | `pub(crate) fn slow_hydrate_threshold_from_env(var: impl Fn(&str) -> Option<String>) -> …` |
 | `slow_hydrate_threshold_ms` | services/view_syncer/view_syncer.rs | `pub(crate) fn slow_hydrate_threshold_ms() -> f64 {` |
+| `sqlite_real_to_json` | services/view_syncer/view_syncer.rs | `fn sqlite_real_to_json(value: f64) -> serde_json::Value {` |
 | `start` | services/view_syncer/view_syncer.rs | `pub async fn start(&self) {` |
 | `start_lap` | services/view_syncer/view_syncer.rs | `fn start_lap(&self) {` |
 | `start_ttl_clock_interval` | services/view_syncer/view_syncer.rs | `fn start_ttl_clock_interval(&mut self) {` |
@@ -456,10 +533,14 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `stop_lap` | services/view_syncer/view_syncer.rs | `fn stop_lap(&self) {` |
 | `stop_ttl_clock_interval` | services/view_syncer/view_syncer.rs | `fn stop_ttl_clock_interval(&mut self) {` |
 | `str_array` | services/view_syncer/view_syncer.rs | `fn str_array(v: Option<&serde_json::Value>) -> Vec<String> {` |
+| `sync_query_pipeline_set` | services/view_syncer/view_syncer.rs | `async fn sync_query_pipeline_set(` |
 | `sync_query_pipeline_set_inputs` | services/view_syncer/view_syncer.rs | `fn sync_query_pipeline_set_inputs(` |
 | `transform_failure_message` | services/view_syncer/view_syncer.rs | `fn transform_failure_message(body: &serde_json::Value) -> String {` |
+| `unregister_client` | services/view_syncer/view_syncer.rs | `pub fn unregister_client(&mut self, ws_id: &str) {` |
+| `update_ttl_clock` | services/view_syncer/view_syncer.rs | `pub fn update_ttl_clock(&self, ttl_clock: rust_cvr::ttl_clock::TTLClock, last_active: i…` |
 | `update_ttl_clock_in_cvr_without_lock` | services/view_syncer/view_syncer.rs | `fn update_ttl_clock_in_cvr_without_lock(&mut self) {` |
-| `wrap_with_protocol_error` | services/view_syncer/view_syncer.rs | `fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {` |
+| `value_to_serde_json` | services/view_syncer/view_syncer.rs | `fn value_to_serde_json(v: &rust_ivm::ivm::data::Value) -> serde_json::Value {` |
+| `wrap_with_protocol_error` | services/view_syncer/view_syncer.rs | `pub(crate) fn wrap_with_protocol_error(message: &str) -> crate::protocol::ErrorBody {` |
 | `yield_process` | services/view_syncer/view_syncer.rs | `pub(crate) async fn yield_process() {` |
 | `add_centroid` | tdigest.rs | `pub fn add_centroid(&mut self, c: Centroid) {` |
 | `binary_search` | tdigest.rs | `fn binary_search(high: usize, compare: impl Fn(usize) -> f64) -> usize {` |
@@ -479,7 +560,6 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `weighted_average` | tdigest.rs | `fn weighted_average(x1: f64, w1: f64, x2: f64, w2: f64) -> f64 {` |
 | `weighted_average_sorted` | tdigest.rs | `fn weighted_average_sorted(x1: f64, w1: f64, x2: f64, w2: f64) -> f64 {` |
 | `enabled` | trace.rs | `pub fn enabled() -> bool {` |
-| `note` | trace.rs | `pub fn note(op: &str, msg: &str) {` |
 | `thread_cpu_ms` | trace.rs | `pub fn thread_cpu_ms() -> f64 {` |
 | `connection_count` | workers/cg_executor.rs | `pub fn connection_count(&self) -> u64 {` |
 | `default_num_shards` | workers/cg_executor.rs | `pub(crate) fn default_num_shards() -> usize {` |
@@ -494,17 +574,26 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `get_string` | workers/connect_params.rs | `fn get_string(` |
 | `parse_js_integer` | workers/connect_params.rs | `fn parse_js_integer(value: &str) -> Option<i64> {` |
 | `query_params_first_wins` | workers/connect_params.rs | `fn query_params_first_wins(parsed: &url::Url) -> HashMap<String, String> {` |
-| `classify_error_log_level` | workers/connection.rs | `pub fn classify_error_log_level(error: &ErrorBody) -> LogLevel {` |
+| `classify_error_log_level` | workers/connection.rs | `pub fn classify_error_log_level(error: &ErrorBody, thrown: Option<Thrown<'_>>) -> LogLe…` |
 | `client_id` | workers/connection.rs | `pub fn client_id(&self) -> &str {` |
 | `close` | workers/connection.rs | `pub fn close(&self, reason: &str) {` |
 | `close_with_error` | workers/connection.rs | `pub fn close_with_error(&self, error: ErrorBody) {` |
+| `close_with_error_thrown` | workers/connection.rs | `pub fn close_with_error_thrown(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {` |
+| `fail` | workers/connection.rs | `pub fn fail(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {` |
+| `get_log_level` | workers/connection.rs | `fn get_log_level(self) -> LogLevel {` |
 | `handle_inbound` | workers/connection.rs | `pub async fn handle_inbound(&self, data: &str) -> bool {` |
 | `handle_message` | workers/connection.rs | `async fn handle_message(&self, msg: &str) -> Vec<HandlerResult>;` |
 | `handle_result` | workers/connection.rs | `fn handle_result(&self, result: HandlerResult) -> bool {` |
+| `has_errno` | workers/connection.rs | `fn has_errno(msg_lower: &str) -> bool {` |
 | `has_transient_socket_code` | workers/connection.rs | `fn has_transient_socket_code(msg_lower: &str) -> bool {` |
 | `is_closed` | workers/connection.rs | `pub fn is_closed(&self) -> bool {` |
 | `is_transient_socket_message` | workers/connection.rs | `fn is_transient_socket_message(msg_lower: &str) -> bool {` |
+| `plain` | workers/connection.rs | `pub fn plain(message: impl Into<String>) -> Self {` |
+| `protocol_version` | workers/connection.rs | `pub fn protocol_version(&self) -> u32 {` |
 | `send_error` | workers/connection.rs | `pub fn send_error(&self, error: ErrorBody) {` |
+| `send_error_with_thrown` | workers/connection.rs | `pub fn send_error_with_thrown(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {` |
+| `sink` | workers/connection.rs | `pub fn sink(&self) -> &DirectWebSocketSink {` |
+| `thrown` | workers/connection.rs | `pub fn thrown(&self) -> Thrown<'_> {` |
 | `ws_id` | workers/connection.rs | `pub fn ws_id(&self) -> &str {` |
 | `bound_replica_ready_states` | workers/syncer.rs | `pub fn bound_replica_ready_states(replica_ready_states: &mut Vec<ReplicaReadyState>) {` |
 | `broadcast_notification` | workers/syncer.rs | `pub fn broadcast_notification(&self, notification: serde_json::Value) -> usize {` |
@@ -546,13 +635,13 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `cancel` | ws_sink.rs | `fn cancel(&self) {` |
 | `close_with_code` | ws_sink.rs | `pub fn close_with_code(&self, code: u16, reason: String) {` |
 | `count_shed_once` | ws_sink.rs | `fn count_shed_once(limits: &SinkLimits, reason: &'static str) {` |
-| `fail` | ws_sink.rs | `pub fn fail(&self, error: ErrorBody) {` |
 | `fail_with_code` | ws_sink.rs | `pub fn fail_with_code(&self, error: ErrorBody, code: Option<u16>) {` |
+| `frame_value` | ws_sink.rs | `pub fn frame_value(&self) -> Option<Value> {` |
 | `push` | ws_sink.rs | `pub fn push(&self, msg: Value) {` |
 | `send_command` | ws_sink.rs | `fn send_command(&self, command: WsCommand) -> Result<(), String> {` |
 | `with_limits` | ws_sink.rs | `pub fn with_limits(tx: mpsc::UnboundedSender<WsCommand>, limits: Arc<SinkLimits>) -> Se…` |
 
-## ⚙️ IO — async/DB/actor/transport, use the integration diff — 23
+## ⚙️ IO — async/DB/actor/transport, use the integration diff — 24
 
 | fn | file | signature |
 |---|---|---|
@@ -578,4 +667,5 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `run_ws_server` | ws_server.rs | `pub async fn run_ws_server<F>(config: WsServerConfig, handler: F) -> Result<(), std::io…` |
 | `serve_ws` | ws_server.rs | `pub async fn serve_ws<F>(listener: TcpListener, handler: F) -> Result<(), std::io::Error>` |
 | `serve_ws_with_config` | ws_server.rs | `pub async fn serve_ws_with_config<F>(` |
+| `push_poke_part` | ws_sink.rs | `fn push_poke_part(` |
 | `push_sized` | ws_sink.rs | `pub fn push_sized(&self, msg: Value, est_bytes: usize) {` |

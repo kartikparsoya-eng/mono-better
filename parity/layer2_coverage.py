@@ -26,7 +26,7 @@ Usage: python3 parity/layer2_coverage.py [cvr|syncer] > parity/COVERAGE-<crate>.
 import os
 import re
 import sys
-from parity_ledger import extract_rust, canon, CRATES, REPO  # noqa: F401
+from parity_ledger import extract_rust, canon, CRATES, REPO, is_src_test_file  # noqa: F401
 
 CRATE = sys.argv[1] if len(sys.argv) > 1 else "cvr"
 
@@ -181,6 +181,10 @@ for dirpath, _dirs, files in os.walk(RUST_DIR):
 for rel, full in sorted(rs_files):
     src = open(full, encoding="utf-8").read()
     ranges = cfg_test_ranges(src) if cfg["seed_cfg_test"] else []
+    if is_src_test_file(rel):
+        # An out-of-line `mod tests;` body carries no `#[cfg(test)]` of its
+        # own; the whole file is harness text (seeds COVERED, defines no fns).
+        ranges = [(1, src.count("\n") + 1)]
     if cfg["seed_cfg_test"]:
         lines = src.split("\n")
         for a, b in ranges:

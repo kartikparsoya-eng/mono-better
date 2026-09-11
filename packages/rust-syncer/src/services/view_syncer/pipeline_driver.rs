@@ -739,29 +739,27 @@ impl IvmPipelines {
         if let Some(conn) = &source_conn
             && self.enable_query_planner
         {
-            {
-                eng.set_cost_model_conn(conn.clone());
-                // TS `createSQLiteCostModel(db, this.#tableSpecs)`
-                // (pipeline-driver.ts:436): the scanstatus model probes with the
-                // visible zql columns of every syncable table. Without specs the
-                // engine degrades (loudly) to the filter-blind COUNT model —
-                // the exact wiring gap behind the 2026-08-29 prod 144s
-                // flipped-join tickets hydrate.
-                let specs: HashMap<String, HashMap<String, ColumnType>> = self
-                    .syncable_tables
-                    .iter()
-                    .map(|(table, spec)| {
-                        (
-                            table.clone(),
-                            spec.zql_spec
-                                .iter()
-                                .map(|(col, cs)| (col.clone(), zql_column_type(cs)))
-                                .collect(),
-                        )
-                    })
-                    .collect();
-                eng.set_cost_model_table_specs(specs);
-            }
+            eng.set_cost_model_conn(conn.clone());
+            // TS `createSQLiteCostModel(db, this.#tableSpecs)`
+            // (pipeline-driver.ts:436): the scanstatus model probes with the
+            // visible zql columns of every syncable table. Without specs the
+            // engine degrades (loudly) to the filter-blind COUNT model —
+            // the exact wiring gap behind the 2026-08-29 prod 144s
+            // flipped-join tickets hydrate.
+            let specs: HashMap<String, HashMap<String, ColumnType>> = self
+                .syncable_tables
+                .iter()
+                .map(|(table, spec)| {
+                    (
+                        table.clone(),
+                        spec.zql_spec
+                            .iter()
+                            .map(|(col, cs)| (col.clone(), zql_column_type(cs)))
+                            .collect(),
+                    )
+                })
+                .collect();
+            eng.set_cost_model_table_specs(specs);
         }
         for source in self.sources.values() {
             eng.register_source(source.clone());
