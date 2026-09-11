@@ -531,7 +531,7 @@ fn test_received_new_row() {
     rows.insert(id_str, (id, update));
 
     let existing = HashMap::new();
-    let patches = updater.received(&rows, &existing).unwrap();
+    let patches = updater.received(rows.clone(), &existing).unwrap();
 
     // Should produce a put row patch
     assert_eq!(patches.len(), 1);
@@ -595,7 +595,7 @@ fn test_received_no_bump_changed_row_returns_err_not_panic() {
     rows.insert(id_str, (id, update));
 
     // Must be a graceful Err (TS throw semantics), NOT a panic.
-    let result = updater.received(&rows, &existing);
+    let result = updater.received(rows.clone(), &existing);
     assert_eq!(
         result.as_ref().err().map(String::as_str),
         Some("Expected CVR version to have been bumped above original"),
@@ -647,7 +647,7 @@ fn test_received_unref_row() {
     let mut rows = HashMap::new();
     rows.insert(id_str, (id, update));
 
-    let patches = updater.received(&rows, &existing).unwrap();
+    let patches = updater.received(rows.clone(), &existing).unwrap();
 
     // Should produce a del row patch
     assert_eq!(patches.len(), 1);
@@ -707,7 +707,7 @@ fn test_received_null_then_reref_drops_stale_existing_refs() {
             },
         ),
     );
-    updater.received(&rows1, &existing).unwrap();
+    updater.received(rows1.clone(), &existing).unwrap();
     assert!(
         updater
             .received_rows
@@ -729,7 +729,7 @@ fn test_received_null_then_reref_drops_stale_existing_refs() {
             },
         ),
     );
-    updater.received(&rows2, &existing).unwrap();
+    updater.received(rows2.clone(), &existing).unwrap();
 
     // The last PutRowRecord for R must carry ONLY qB — the retracted qA must
     // NOT be resurrected from `existing` (TS: mergeRefCounts(null, {qB:1})).
@@ -798,7 +798,7 @@ fn test_unref_empty_row_version_bumps_patch_version() {
     let mut rows = HashMap::new();
     rows.insert(id_str, (id, update));
 
-    let patches = updater.received(&rows, &existing).unwrap();
+    let patches = updater.received(rows.clone(), &existing).unwrap();
     assert_eq!(patches.len(), 1);
     match &patches[0].patch {
         Patch::Row(RowPatch::Del { .. }) => {}

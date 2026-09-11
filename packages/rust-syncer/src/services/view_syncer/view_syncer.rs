@@ -7249,7 +7249,7 @@ impl ViewSyncerService {
                         }
                         if let Some((ct, qid, table, rk, row)) = row_change_to_maps(&rc)
                             && let Err(e) =
-                                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)
+                                processor.on_row_change(ct, qid, table, rk, row, existing_rows)
                         {
                             cvr_err = Some(e);
                         }
@@ -7454,14 +7454,11 @@ impl ViewSyncerService {
         // (view-syncer.ts). An advance delta is small (only changes since the
         // last version — TS likewise returns `changes` as an array), so buffering
         // it is cheap, unlike a full hydrate.
-        type CollectedChange = (
-            RowChangeType,
-            String,
-            String,
-            serde_json::Map<String, serde_json::Value>,
-            Option<serde_json::Map<String, serde_json::Value>>,
-        );
-        let mut collected: Vec<CollectedChange> = Vec::new();
+        // The row-level changes the advance produced, converted for the
+        // processor only when consumed below (a structural `Child` change
+        // never reaches the CVR row path and is dropped here, as
+        // `row_change_to_maps` does).
+        let mut collected: Vec<rust_ivm::streamer::RowChange> = Vec::new();
         // Port of TS `#advancePipelines` (view-syncer.ts:2596-2606): `const
         // {version, numChanges, changes} = this.#pipelines.advance(timer)`, then
         // `#processChanges(lc, await timer.start(), changes, ...)` — the timer
@@ -7483,7 +7480,9 @@ impl ViewSyncerService {
                     }
                     StreamItem::Data(rc) => {
                         accumulate_signature(&mut sig_acc, &rc);
-                        collected.extend(row_change_to_maps(&rc));
+                        if rc.change_type != rust_ivm::ivm::change::ChangeType::Child {
+                            collected.push(rc);
+                        }
                     }
                 }
             }
@@ -7576,10 +7575,13 @@ impl ViewSyncerService {
             let existing_rows_owned = existing_rows_owned;
             let existing_rows: &RowRecordMap = &existing_rows_owned;
             let mut processor = ChangeProcessor::new(&mut updater, &pokers);
-            for (ct, qid, table, rk, row) in collected {
+            for rc in &collected {
+                let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc) else {
+                    continue;
+                };
                 // A `received` version-bump failure is recoverable (TS throws);
                 // abort the advance before any flush so the client re-hydrates.
-                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)?;
+                processor.on_row_change(ct, qid, table, rk, row, existing_rows)?;
             }
             // TS `#advancePipelines` only processes received row changes. It
             // does not reconcile unreferenced rows because no queries are being
@@ -7882,10 +7884,13 @@ impl ViewSyncerService {
 /// Convert a `rust_ivm` `RowChange` into the `(change_type, query_id, table,
 /// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Rust-only
 /// adapter between the two crates (AGENTS.md rule 5).
-type RowChangeMaps = (
+/// The query id and table are borrowed from the `RowChange` (Rust-only,
+/// AGENTS.md rule 5): the processor takes them as `&str`, and the streamer
+/// already allocated them once per row; cloning them here allocated twice more.
+type RowChangeMaps<'a> = (
     RowChangeType,
-    String,
-    String,
+    &'a str,
+    &'a str,
     serde_json::Map<String, serde_json::Value>,
     Option<serde_json::Map<String, serde_json::Value>>,
 );
@@ -7930,7 +7935,7 @@ fn query_name_of(cvr: &CVR, qid: &str) -> Option<String> {
 /// which the streamer never emits at the row level (see `streamer::stream_nodes`,
 /// which only streams Add/Remove/Edit) — skipping it preserves the prior
 /// `on_row_change` behavior of ignoring non-row changes, without a panic.
-fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMaps> {
+fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMaps<'_>> {
     let change_type = match rc.change_type {
         rust_ivm::ivm::change::ChangeType::Add => RowChangeType::Add,
         rust_ivm::ivm::change::ChangeType::Remove => RowChangeType::Remove,
@@ -7951,13 +7956,7 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMap
         }
         m
     });
-    Some((
-        change_type,
-        rc.query_id.clone(),
-        rc.table.clone(),
-        row_key,
-        row,
-    ))
+    Some((change_type, &rc.query_id, &rc.table, row_key, row))
 }
 
 /// XOR-fold a streamed `RowChange` into a per-query row-set-signature

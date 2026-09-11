@@ -61,7 +61,9 @@ running image for initial-testing environments.
   attribute a regression: `CLONE_DENSITY_SHAPE="Sqlite/related hydrate"
   CLONE_DENSITY_OUT=/tmp/d.json cargo test --test clone_density_test --
   --ignored clone_density_profile`, then view the JSON in dh_view or
-  aggregate it by frame.
+  aggregate it by frame. `packages/rust-cvr/tests/clone_density_test.rs` does
+  the same for the CVR row path (change processor → `received` → pokers, with
+  1 and 3 connected clients; `CLONE_DENSITY_PHASE=adds|edits|removes`).
 
 ## 4 · Leaks — "is memory freed?"
 

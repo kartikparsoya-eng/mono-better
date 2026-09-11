@@ -39,7 +39,9 @@ criterion = "0.5"
 tracing-subscriber = "0.3"
 
 proptest = "1"
-# dhat: heap-profiling harness (tests/cvr_leak_profile.rs, #[ignore]d) that churns
+# dhat: the clone-density harness (tests/clone_density_test.rs: allocations per
+# delivered row on the CVR update + poke path) and the heap-profiling harness
+# (tests/cvr_leak_profile.rs, #[ignore]d) that churns
 # the per-advance CVRQueryDrivenUpdater.received() path to catch retained-block
 # leaks in CVR state, mirroring rust-ivm's advance_leak_profile.
 dhat = "0.3"

@@ -254,7 +254,7 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
             }
             push_patches(
                 &mut patches,
-                updater.received(&rows, &existing).expect("received"),
+                updater.received(rows, &existing).expect("received"),
             );
             if tx.delete_unreferenced {
                 push_patches(

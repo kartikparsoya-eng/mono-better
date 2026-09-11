@@ -107,7 +107,7 @@ fn run(iters: usize) {
         let mut rows: HashMap<String, (RowID, RowUpdate)> = HashMap::new();
         rows.insert(id_str.clone(), (id, update));
 
-        let _patches = updater.received(&rows, &existing_rows);
+        let _patches = updater.received(rows.clone(), &existing_rows);
         // updater drops here — its received_rows/last_patches maps are freed.
 
         // Advance the bounded cache: new row in, the one from 2 iters ago out.

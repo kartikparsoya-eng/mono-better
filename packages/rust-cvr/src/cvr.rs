@@ -1048,11 +1048,8 @@ impl CVRQueryDrivenUpdater {
     /// over 7 days precisely because a thrown-and-caught assert is a benign
     /// retry, not a crash — matching that error semantics is AGENTS.md rule 1.
     fn assert_new_version(&self) -> Result<CVRVersion, String> {
-        if cmp_versions(
-            &Some(self.base.orig.version.clone()),
-            &Some(self.base.cvr.version.clone()),
-        ) != Ordering::Less
-        {
+        // Compare in place; this runs once per received row.
+        if cmp_cvr(&self.base.orig.version, &self.base.cvr.version) != Ordering::Less {
             return Err("Expected CVR version to have been bumped above original".to_string());
         }
         Ok(self.base.cvr.version.clone())
@@ -1063,7 +1060,12 @@ impl CVRQueryDrivenUpdater {
     /// Returns patches to send to clients.
     pub fn received(
         &mut self,
-        rows: &HashMap<String, (RowID, RowUpdate)>, // keyed by rowIDString
+        // Taken by value (Rust-only, AGENTS.md rule 5): TS iterates the Map it
+        // is handed and stores the same `id`/`refCounts` objects by reference;
+        // owning the batch lets each row's id, key string and merged
+        // ref-counts MOVE into the record, the patch and the bookkeeping maps
+        // instead of being cloned once per destination on every row.
+        rows: HashMap<String, (RowID, RowUpdate)>, // keyed by rowIDString
         existing_rows: &RowRecordMap,
     ) -> Result<Vec<PatchToVersion>, String> {
         if crate::tracer::enabled() {
@@ -1079,12 +1081,14 @@ impl CVRQueryDrivenUpdater {
         let mut patches: Vec<PatchToVersion> = Vec::new();
 
         for (id_str, (id, update)) in rows {
-            let contents = &update.contents;
-            let version = &update.version;
-            let ref_counts = &update.ref_counts;
+            let RowUpdate {
+                contents,
+                version,
+                ref_counts,
+            } = update;
 
-            let existing = existing_rows.get(id_str);
-            let previously_received = self.received_rows.get(id_str).and_then(|o| o.clone());
+            let existing = existing_rows.get(&id_str);
+            let previously_received = self.received_rows.get(&id_str);
 
             // Merge refCounts. Branch on ENTRY PRESENCE, not the flattened
             // value: TS keys on `previouslyReceived !== undefined`, so a
@@ -1095,14 +1099,16 @@ impl CVRQueryDrivenUpdater {
             // and wrongly took the existing+filter path, diverging the persisted
             // refCounts and the client patch (put vs del) on cross-batch
             // re-receipt of a shared row. See parity/BEHAVIORAL-SWEEP-FINDINGS.md.
-            let merged = match self.received_rows.get(id_str) {
-                Some(prev_opt) => merge_ref_counts(prev_opt.as_ref(), Some(ref_counts), None),
+            let merged = match previously_received {
+                Some(prev_opt) => merge_ref_counts(prev_opt.as_ref(), Some(&ref_counts), None),
                 None => merge_ref_counts(
                     existing.and_then(|e| e.ref_counts.as_ref()),
-                    Some(ref_counts),
+                    Some(&ref_counts),
                     Some(&self.removed_or_executed_query_ids),
                 ),
             };
+            // `existing || previouslyReceived` below only needs presence.
+            let was_previously_received = previously_received.is_some();
 
             self.received_rows.insert(id_str.clone(), merged.clone());
 
@@ -1112,69 +1118,71 @@ impl CVRQueryDrivenUpdater {
             // Options directly — `Some(rv) == None` is false, matching TS's
             // `rowVersion === undefined`. (The old `.unwrap_or("")` sentinel would have
             // spuriously kept the existing patch_version if a row_version were ever "".)
-            let new_row_version: Option<String> = merged.as_ref().and_then(|_| version.clone());
+            let new_row_version: Option<&str> = merged.as_ref().and(version.as_deref());
             let patch_version = match existing {
-                Some(e) if new_row_version.as_deref() == Some(e.row_version.as_str()) => {
+                Some(e) if new_row_version == Some(e.row_version.as_str()) => {
                     e.patch_version.clone()
                 }
                 _ => self.assert_new_version()?,
             };
 
             // Determine the rowVersion to use for the put.
-            let row_version = version
-                .clone()
-                .or_else(|| existing.map(|e| e.row_version.clone()));
+            let row_version = version.or_else(|| existing.map(|e| e.row_version.clone()));
 
+            // Dedupe against lastPatch and ensure toVersion never backtracks.
+            let last_patch = self.last_patches.get(&id_str);
+            let to_version = match last_patch {
+                Some(lp) if cmp_cvr(&lp.to_version, &patch_version) == Ordering::Greater => {
+                    lp.to_version.clone()
+                }
+                _ => patch_version.clone(),
+            };
+
+            // The store op takes its own copy of `id`; the patch (if any) takes
+            // `id` itself below. The record owns `merged` outright — the match
+            // below only needs to know whether it was null.
+            let merged_is_null = merged.is_none();
             match &row_version {
                 Some(rv) => {
-                    let record = RowRecord {
+                    self.base.store_ops.push(StoreOp::PutRowRecord(RowRecord {
                         id: id.clone(),
                         row_version: rv.clone(),
-                        patch_version: patch_version.clone(),
-                        ref_counts: merged.clone(),
-                    };
-                    self.base.store_ops.push(StoreOp::PutRowRecord(record));
+                        patch_version,
+                        ref_counts: merged,
+                    }));
                 }
                 None => {
                     self.base.store_ops.push(StoreOp::DelRowRecord(id.clone()));
                 }
             }
 
-            // Dedupe against lastPatch and ensure toVersion never backtracks.
-            let last_patch = self.last_patches.get(id_str);
-            let to_version = match last_patch {
-                Some(lp) => max_version(patch_version.clone(), Some(lp.to_version.clone())),
-                None => patch_version.clone(),
-            };
-
-            match &merged {
-                None => {
+            match merged_is_null {
+                true => {
                     // All refCounts gone to zero — delete if previously existed.
-                    if existing.is_some() || previously_received.is_some() {
+                    if existing.is_some() || was_previously_received {
                         let should_send = match last_patch {
                             Some(lp) => lp.row_version.is_some(),
                             None => true,
                         };
                         if should_send {
                             patches.push(PatchToVersion {
-                                patch: Patch::Row(RowPatch::Del { id: id.clone() }),
+                                patch: Patch::Row(RowPatch::Del { id }),
                                 to_version: to_version.clone(),
                             });
                             self.last_patches.insert(
-                                id_str.clone(),
+                                id_str,
                                 RowPatchInfo {
                                     row_version: None,
-                                    to_version: to_version.clone(),
+                                    to_version,
                                 },
                             );
                         }
                     }
                 }
-                Some(_) => {
+                false => {
                     if let Some(contents) = contents {
-                        let rv = row_version
-                            .as_ref()
-                            .expect("a merged (non-deleted) row carries its rowVersion");
+                        let rv =
+                            row_version.expect("a merged (non-deleted) row carries its rowVersion");
                         let should_send = match last_patch {
                             Some(lp) => lp
                                 .row_version
@@ -1184,17 +1192,14 @@ impl CVRQueryDrivenUpdater {
                         };
                         if should_send {
                             patches.push(PatchToVersion {
-                                patch: Patch::Row(RowPatch::Put {
-                                    id: id.clone(),
-                                    contents: contents.clone(),
-                                }),
+                                patch: Patch::Row(RowPatch::Put { id, contents }),
                                 to_version: to_version.clone(),
                             });
                             self.last_patches.insert(
-                                id_str.clone(),
+                                id_str,
                                 RowPatchInfo {
-                                    row_version: Some(rv.clone()),
-                                    to_version: to_version.clone(),
+                                    row_version: Some(rv),
+                                    to_version,
                                 },
                             );
                         }

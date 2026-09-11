@@ -224,8 +224,10 @@ impl<'a> ChangeProcessor<'a> {
         self.total += self.rows.len();
 
         // Call updater.received() — direct call, zero boundary crossing
-        let patches: Vec<PatchToVersion> = self.updater.received(&self.rows, existing_rows)?;
-        self.rows.clear();
+        // The batch moves into `received` (it is cleared either way; on `Err`
+        // the caller aborts the flush with store_ops undrained, as in TS).
+        let rows = std::mem::take(&mut self.rows);
+        let patches: Vec<PatchToVersion> = self.updater.received(rows, existing_rows)?;
 
         // Route patches to all client handlers — direct call, zero crossing
         for patch in &patches {

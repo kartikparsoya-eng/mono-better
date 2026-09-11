@@ -140,7 +140,7 @@ async fn flush_matches_ts_golden() {
             );
         }
         let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
-        updater.received(&rows, &existing).unwrap();
+        updater.received(rows.clone(), &existing).unwrap();
         updater.delete_unreferenced_rows(existing.values()).unwrap();
 
         let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
@@ -325,7 +325,7 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
         );
     }
     let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
-    updater.received(&rows, &existing).unwrap();
+    updater.received(rows.clone(), &existing).unwrap();
 
     let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
     let ops = updater.base.drain_store_ops();
@@ -734,7 +734,7 @@ async fn config_flush_disables_the_session_statement_timeout_like_ts_run_tx() {
         );
     }
     let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
-    updater.received(&rows, &existing).unwrap();
+    updater.received(rows.clone(), &existing).unwrap();
     let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
     let ops = updater.base.drain_store_ops();
     store.apply_store_ops(ops);
