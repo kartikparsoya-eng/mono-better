@@ -802,7 +802,7 @@ HELPER_ALIASES = {
     "zero-protocol/src/push.ts::pushErrorSchema": ("protocol/push.rs PushError", "valita union → `error`-tagged serde enum, passthrough mode (D-17)"),
     "zero-protocol/src/primary-key.ts::primaryKeyValueRecordSchema": ("client_handler.rs make_row_patch", "valita → Value (D-17), client_handler.rs:741"),
     "zero-protocol/src/query-server.ts::queryResponseSchema": ("protocol/query_server.rs QueryResponse", "valita union → discriminated Deserialize, passthrough mode (D-17)"),
-    "zero-schema/src/compiled-permissions.ts::permissionsConfigSchema": ("auth/load_permissions.rs load_permissions", "valita → Value (D-17)"),
+    "zero-schema/src/compiled-permissions.ts::permissionsConfigSchema": ("auth/load_permissions.rs PermissionsConfig", "valita → strict serde twins folded into the consumer, doc kept as Value (D-17)"),
     # ── zqlite internals ──
     "zqlite/src/internal/sql-inline.ts::compileInline": ("sqlite/sqlite_cost_model.rs inline_sql", "probe SQL with inlined literals"),
     "zqlite/src/internal/sql.ts::compile": ("sqlite/query_builder.rs", "SQL text + params builder (D-16)"),

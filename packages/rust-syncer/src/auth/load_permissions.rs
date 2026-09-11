@@ -1,18 +1,26 @@
 //! Loading + hot-reloading the compiled read-permissions doc.
 //!
 //! Port of `zero-cache/src/auth/load-permissions.ts` (`loadPermissions`,
-//! `reloadPermissionsIfChanged`). The structural validation performed by the
-//! `validate_*` family is the rust twin of the TS valita
-//! `permissionsConfigSchema` parse inside `loadPermissions`. (`getSchema`, the
-//! third export of the TS file, has its established twin in the replica
-//! table-spec computation — not duplicated here.)
+//! `reloadPermissionsIfChanged`), plus the `permissionsConfigSchema` twins of
+//! `zero-schema/src/compiled-permissions.ts` that `loadPermissions` parses
+//! with — folded into this consumer because the crate has no zero-schema
+//! twin (rule 3). (`getSchema`, the third export of the TS file, has its
+//! established twin in the replica table-spec computation — not duplicated
+//! here.)
 //!
 //! `deny_all_permissions` / `resolve_permissions` are rust-only fail-CLOSED
 //! helpers around the load outcome (TS throws on an unparseable doc; rust
 //! keeps the CG serving under deny-all instead) — see their doc-comments.
 
+use std::collections::HashMap;
+
 use rusqlite::Connection;
-use serde_json::{Map, Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::protocol::ast::strict::Condition;
+use crate::protocol::optional_no_null;
+use crate::ws_server::elide;
 
 /// A deny-all compiled-permissions config: no table has any `select` rule, so
 /// the read-authorizer's deny-by-default kicks in and every client query
@@ -64,9 +72,26 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
     });
     match row {
         Ok((Some(permissions_json), hash)) => {
+            // load-permissions.ts:46-59: `JSON.parse` then
+            // `v.parse(obj, permissionsConfigSchema)` under one catch. The
+            // accepted doc stays JSON, as TS keeps the parsed object; the
+            // thrown Error's `cause` is appended to the message here.
             let permissions = serde_json::from_str::<Value>(&permissions_json)
-                .map_err(|e| format!("could not parse upstream permissions: {e}"))?;
-            validate_permissions_config(&permissions)?;
+                .map_err(|e| e.to_string())
+                .and_then(|doc| {
+                    PermissionsConfig::deserialize(&doc)
+                        .map(|_| doc)
+                        .map_err(|e| e.to_string())
+                })
+                .map_err(|cause| {
+                    format!(
+                        "Could not parse upstream permissions: '{}'.\n\
+                         This may happen if Permissions with a new internal format are \
+                         deployed before the supporting server has been fully rolled out.\n\
+                         cause: {cause}",
+                        elide(&permissions_json, 100)
+                    )
+                })?;
             Ok(LoadedPermissions {
                 permissions: Some(permissions),
                 hash,
@@ -86,240 +111,69 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
     }
 }
 
-fn validate_permissions_config(value: &Value) -> Result<(), String> {
-    let root = value
-        .as_object()
-        .ok_or_else(|| "permissions config must be an object".to_string())?;
-    let Some(tables) = root.get("tables") else {
-        return Ok(());
-    };
-    let tables = tables
-        .as_object()
-        .ok_or_else(|| "permissions.tables must be an object".to_string())?;
-    for (table, config) in tables {
-        let config = config
-            .as_object()
-            .ok_or_else(|| format!("permissions table {table} must be an object"))?;
-        if let Some(row) = config.get("row") {
-            validate_permission_asset(row, &format!("tables.{table}.row"))?;
-        }
-        if let Some(cells) = config.get("cell") {
-            let cells = cells
-                .as_object()
-                .ok_or_else(|| format!("tables.{table}.cell must be an object"))?;
-            for (column, asset) in cells {
-                validate_permission_asset(asset, &format!("tables.{table}.cell.{column}"))?;
-            }
-        }
-    }
-    Ok(())
+// ─── permissionsConfigSchema (zero-schema/src/compiled-permissions.ts) ───────
+// Parsed by `v.parse(obj, permissionsConfigSchema)` (load-permissions.ts:50)
+// in valita's default STRICT mode: unknown keys are rejected at every level
+// and `.optional()` is absent-or-value, never `null`. The `conditionSchema`
+// member is the strict `ast.ts` twin.
+
+/// `v.literal('allow')` (compiled-permissions.ts:4).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub enum Allow {
+    #[serde(rename = "allow")]
+    Allow,
 }
 
-fn validate_permission_asset(value: &Value, path: &str) -> Result<(), String> {
-    let asset = value
-        .as_object()
-        .ok_or_else(|| format!("{path} must be an object"))?;
-    for operation in ["select", "insert", "delete"] {
-        if let Some(policy) = asset.get(operation) {
-            validate_policy(policy, &format!("{path}.{operation}"))?;
-        }
-    }
-    if let Some(update) = asset.get("update") {
-        let update = update
-            .as_object()
-            .ok_or_else(|| format!("{path}.update must be an object"))?;
-        for phase in ["preMutation", "postMutation"] {
-            if let Some(policy) = update.get(phase) {
-                validate_policy(policy, &format!("{path}.update.{phase}"))?;
-            }
-        }
-    }
-    Ok(())
+/// `ruleSchema` (compiled-permissions.ts:4): `['allow', condition]`.
+pub type Rule = (Allow, Condition);
+
+/// `policySchema` (compiled-permissions.ts:6).
+pub type Policy = Vec<Rule>;
+
+/// The `update` object of `assetSchema` (compiled-permissions.ts:12-17).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdatePermissions {
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub pre_mutation: Option<Policy>,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub post_mutation: Option<Policy>,
 }
 
-fn validate_policy(value: &Value, path: &str) -> Result<(), String> {
-    let rules = value
-        .as_array()
-        .ok_or_else(|| format!("{path} must be an array"))?;
-    for (index, rule) in rules.iter().enumerate() {
-        let rule = rule
-            .as_array()
-            .ok_or_else(|| format!("{path}[{index}] must be a tuple"))?;
-        if rule.len() != 2 || rule[0].as_str() != Some("allow") {
-            return Err(format!("{path}[{index}] must be [\"allow\", condition]"));
-        }
-        validate_permission_condition(&rule[1], &format!("{path}[{index}][1]"))?;
-    }
-    Ok(())
+/// `assetSchema` (compiled-permissions.ts:9-19).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetPermissions {
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub select: Option<Policy>,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub insert: Option<Policy>,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub update: Option<UpdatePermissions>,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub delete: Option<Policy>,
 }
 
-fn validate_permission_condition(value: &Value, path: &str) -> Result<(), String> {
-    let condition = value
-        .as_object()
-        .ok_or_else(|| format!("{path} must be a condition object"))?;
-    match condition.get("type").and_then(Value::as_str) {
-        Some("simple") => {
-            const OPS: &[&str] = &[
-                "=",
-                "!=",
-                "IS",
-                "IS NOT",
-                "<",
-                ">",
-                "<=",
-                ">=",
-                "LIKE",
-                "NOT LIKE",
-                "ILIKE",
-                "NOT ILIKE",
-                "IN",
-                "NOT IN",
-            ];
-            if !condition
-                .get("op")
-                .and_then(Value::as_str)
-                .is_some_and(|op| OPS.contains(&op))
-            {
-                return Err(format!("{path}.op is not a supported operator"));
-            }
-            validate_condition_value(condition.get("left"), true, &format!("{path}.left"))?;
-            validate_condition_value(condition.get("right"), false, &format!("{path}.right"))?;
-        }
-        Some("and") | Some("or") => {
-            let children = condition
-                .get("conditions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("{path}.conditions must be an array"))?;
-            for (index, child) in children.iter().enumerate() {
-                validate_permission_condition(child, &format!("{path}.conditions[{index}]"))?;
-            }
-        }
-        Some("correlatedSubquery") => {
-            let related = condition
-                .get("related")
-                .and_then(Value::as_object)
-                .ok_or_else(|| format!("{path}.related must be an object"))?;
-            if !matches!(
-                condition.get("op").and_then(Value::as_str),
-                Some("EXISTS" | "NOT EXISTS")
-            ) {
-                return Err(format!("{path}.op must be EXISTS or NOT EXISTS"));
-            }
-            for flag in ["flip", "scalar"] {
-                if condition.get(flag).is_some_and(|value| !value.is_boolean()) {
-                    return Err(format!("{path}.{flag} must be a boolean"));
-                }
-            }
-            validate_related_subquery(related, &format!("{path}.related"))?;
-        }
-        _ => return Err(format!("{path} has an unknown condition type")),
-    }
-    Ok(())
+/// The per-table object of `tablePermissionsSchema`
+/// (compiled-permissions.ts:23-28): `{row?, cell?}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableAssets {
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub row: Option<AssetPermissions>,
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub cell: Option<HashMap<String, AssetPermissions>>,
 }
 
-fn validate_condition_value(
-    value: Option<&Value>,
-    allow_column: bool,
-    path: &str,
-) -> Result<(), String> {
-    let value = value
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("{path} must be a value reference"))?;
-    match value.get("type").and_then(Value::as_str) {
-        Some("column") if allow_column => {
-            if value.get("name").and_then(Value::as_str).is_none() {
-                return Err(format!("{path}.name must be a string"));
-            }
-        }
-        Some("literal") => {
-            let literal = value
-                .get("value")
-                .ok_or_else(|| format!("{path}.value is required"))?;
-            let valid = literal.is_null()
-                || literal.is_string()
-                || literal.is_number()
-                || literal.is_boolean()
-                || literal.as_array().is_some_and(|items| {
-                    items
-                        .iter()
-                        .all(|item| item.is_string() || item.is_number() || item.is_boolean())
-                });
-            if !valid {
-                return Err(format!("{path}.value is not a protocol literal"));
-            }
-        }
-        Some("static") => {
-            if !matches!(
-                value.get("anchor").and_then(Value::as_str),
-                Some("authData" | "preMutationRow")
-            ) {
-                return Err(format!("{path}.anchor is invalid"));
-            }
-            let field = value.get("field");
-            if !field.is_some_and(|field| {
-                field.is_string()
-                    || field
-                        .as_array()
-                        .is_some_and(|parts| parts.iter().all(Value::is_string))
-            }) {
-                return Err(format!("{path}.field must be a string or string array"));
-            }
-        }
-        _ => return Err(format!("{path} has an invalid value-reference type")),
-    }
-    Ok(())
-}
+/// `tablePermissionsSchema` (compiled-permissions.ts:23-28).
+pub type TablePermissions = HashMap<String, TableAssets>;
 
-fn validate_related_subquery(related: &Map<String, Value>, path: &str) -> Result<(), String> {
-    let correlation = related
-        .get("correlation")
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("{path}.correlation must be an object"))?;
-    for field in ["parentField", "childField"] {
-        let valid = correlation
-            .get(field)
-            .and_then(Value::as_array)
-            .is_some_and(|parts| !parts.is_empty() && parts.iter().all(Value::is_string));
-        if !valid {
-            return Err(format!(
-                "{path}.correlation.{field} must be a non-empty string array"
-            ));
-        }
-    }
-    if related
-        .get("hidden")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        return Err(format!("{path}.hidden must be a boolean"));
-    }
-    if related
-        .get("system")
-        .is_some_and(|value| !matches!(value.as_str(), Some("permissions" | "client" | "test")))
-    {
-        return Err(format!("{path}.system is invalid"));
-    }
-    let subquery = related
-        .get("subquery")
-        .and_then(Value::as_object)
-        .ok_or_else(|| format!("{path}.subquery must be an AST object"))?;
-    if subquery.get("table").and_then(Value::as_str).is_none() {
-        return Err(format!("{path}.subquery.table must be a string"));
-    }
-    if let Some(condition) = subquery.get("where") {
-        validate_permission_condition(condition, &format!("{path}.subquery.where"))?;
-    }
-    if let Some(nested) = subquery.get("related") {
-        let nested = nested
-            .as_array()
-            .ok_or_else(|| format!("{path}.subquery.related must be an array"))?;
-        for (index, child) in nested.iter().enumerate() {
-            let child = child
-                .as_object()
-                .ok_or_else(|| format!("{path}.subquery.related[{index}] must be an object"))?;
-            validate_related_subquery(child, &format!("{path}.subquery.related[{index}]"))?;
-        }
-    }
-    Ok(())
+/// `permissionsConfigSchema` (compiled-permissions.ts:30-32).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsConfig {
+    #[serde(default, deserialize_with = "optional_no_null")]
+    pub tables: Option<TablePermissions>,
 }
 
 /// Outcome of a hot-reload check against the deployed permissions doc.
@@ -407,7 +261,14 @@ mod tests {
         )
         .unwrap();
         let err = load_permissions(&conn, "zero").unwrap_err();
-        assert!(err.contains("select must be an array"), "{err}");
+        assert!(
+            err.starts_with(
+                "Could not parse upstream permissions: '{\"tables\":{\"issue\":{\"row\":{\"select\":\"allow-all\"}}}}'.\n\
+                 This may happen if Permissions with a new internal format are \
+                 deployed before the supporting server has been fully rolled out.\ncause: "
+            ),
+            "{err}"
+        );
 
         conn.execute(
             r#"UPDATE "zero.permissions" SET permissions = ?1"#,
@@ -415,7 +276,34 @@ mod tests {
         )
         .unwrap();
         let err = load_permissions(&conn, "zero").unwrap_err();
-        assert!(err.contains("not a supported operator"), "{err}");
+        assert!(err.contains("cause: unknown variant `DROP`"), "{err}");
+    }
+
+    /// `v.parse(obj, permissionsConfigSchema)` runs in valita's default
+    /// strict mode (load-permissions.ts:50): an unknown key at any level —
+    /// the config root, a table entry, an asset, a rule's condition — fails
+    /// the parse. The hand-written checks this replaced accepted all four.
+    #[test]
+    fn load_permissions_rejects_unknown_keys_like_strict_valita() {
+        for doc in [
+            r#"{"tables":{},"extra":1}"#,
+            r#"{"tables":{"issue":{"row":{},"extra":1}}}"#,
+            r#"{"tables":{"issue":{"row":{"select":[],"extra":1}}}}"#,
+            r#"{"tables":{"issue":{"row":{"select":[["allow",{"type":"simple","op":"=","left":{"type":"column","name":"id"},"right":{"type":"literal","value":1},"extra":1}]]}}}}"#,
+        ] {
+            let conn = perms_replica("zero", Some(doc), Some("h"));
+            let err = load_permissions(&conn, "zero").unwrap_err();
+            assert!(
+                err.starts_with("Could not parse upstream permissions: '")
+                    && err.contains("cause: unknown field `extra`"),
+                "{doc}: {err}"
+            );
+        }
+        // The elision TS applies to the quoted doc (`elide(…, 100)`).
+        let long = format!(r#"{{"tables":{{"{}":{{}}}},"extra":1}}"#, "t".repeat(120));
+        let conn = perms_replica("zero", Some(&long), Some("h"));
+        let err = load_permissions(&conn, "zero").unwrap_err();
+        assert!(err.contains(&format!("'{}'.", elide(&long, 100))), "{err}");
     }
 
     /// Build an in-memory replica with a `{app}.permissions(permissions, hash)`
