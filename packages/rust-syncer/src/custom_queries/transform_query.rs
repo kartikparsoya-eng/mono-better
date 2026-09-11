@@ -27,6 +27,10 @@ use serde_json::Value;
 use crate::auth::read_authorizer::hash_of_ast;
 use crate::custom::fetch::{api_error_from_result, get_backoff_delay_ms, url_match};
 use crate::protocol::query_server::QueryResponse;
+use crate::protocol::{
+    ErrorBody, ErrorKind, ErrorOrigin, ErrorReason, JsNumber, TransformFailedHttpBody,
+    TransformFailedZeroCacheBody,
+};
 use serde::Deserialize;
 
 /// TS `CustomQueryTransformer` cache TTL — 5s (chosen to be shorter than a
@@ -249,7 +253,8 @@ pub async fn transform(
         .map(|s| Value::String(s.id.clone()))
         .collect();
 
-    let (queries, validation) = request_transform(ctx, shard, &body, &query_ids).await?;
+    let (queries, validation) =
+        request_transform(ctx, shard, &body, &query_ids, "transform").await?;
 
     for q in queries {
         let id = q
@@ -300,7 +305,7 @@ pub async fn validate(
     shard: &ShardID,
 ) -> Result<ConnectionValidation, Value> {
     let body = serde_json::json!(["transform", []]);
-    let (_, validation) = request_transform(ctx, shard, &body, &[]).await?;
+    let (_, validation) = request_transform(ctx, shard, &body, &[], "validate").await?;
     Ok(validation)
 }
 
@@ -356,17 +361,32 @@ async fn request_transform(
     shard: &ShardID,
     body: &Value,
     query_ids: &[Value],
+    operation: &str,
 ) -> Result<(Vec<Value>, ConnectionValidation), Value> {
-    let transform_failed = |reason: &str, msg: String| -> Value {
-        serde_json::json!({
-            "kind": "TransformFailed",
-            "origin": "zero-cache",
-            "reason": reason,
-            "message": msg,
-            // Real batch IDs (not `[]`) so the client can attribute the failure
-            // to the specific queries. Port of TS `transform-query.ts` catch.
-            "queryIDs": query_ids,
-        })
+    // Real batch IDs (not `[]`) so the client can attribute the failure to
+    // the specific queries. Port of TS `transform-query.ts` catch.
+    let query_ids: Vec<String> = query_ids
+        .iter()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect();
+    // `apiFailedBody('transform', reason, message)` (custom/fetch.ts:437-451),
+    // built through the wire types so every literal (`origin: 'zeroCache'`)
+    // is one `errorBodySchema` accepts. A plain `Error` thrown inside
+    // `fetchFromAPIServer` takes `#requestTransform`'s catch instead
+    // (transform-query.ts:248-254): reason `internal`, message
+    // `Failed to ${operation} queries: ${message}`.
+    let transform_failed = |reason: ErrorReason, msg: String| -> Value {
+        serde_json::to_value(ErrorBody::TransformFailedZeroCache(
+            TransformFailedZeroCacheBody {
+                kind: ErrorKind::TransformFailed,
+                details: None,
+                query_ids: query_ids.clone(),
+                message: msg,
+                origin: ErrorOrigin::ZeroCache,
+                reason,
+            },
+        ))
+        .expect("an error body serializes")
     };
 
     // URL allow-check at request time (TS fetch.ts). An override the config
@@ -378,7 +398,7 @@ async fn request_transform(
     {
         crate::custom::metrics::record_api_request("url_not_allowed", 0, 0.0, None, None);
         return Err(transform_failed(
-            "internal",
+            ErrorReason::Internal,
             format!(
                 "URL \"{}\" is not allowed by the ZERO_QUERY_URL configuration",
                 ctx.url
@@ -386,16 +406,25 @@ async fn request_transform(
         ));
     }
 
-    let mut url = reqwest::Url::parse(&ctx.url)
-        .map_err(|e| transform_failed("internal", format!("invalid userQueryURL: {e}")))?;
+    // TS `new URL(url)` (fetch.ts:176) throws a plain `TypeError('Invalid URL')`.
+    let mut url = reqwest::Url::parse(&ctx.url).map_err(|_| {
+        transform_failed(
+            ErrorReason::Internal,
+            format!("Failed to {operation} queries: Invalid URL"),
+        )
+    })?;
     // Reserved-param guard (TS `reservedParams`): the configured URL may not
     // already carry the params zero-cache appends.
     for reserved in RESERVED_PARAMS {
         if url.query_pairs().any(|(k, _)| k == reserved) {
             crate::custom::metrics::record_api_request("config_error", 0, 0.0, None, None);
+            // TS says "push URL" for both sources (fetch.ts:184-186), thrown as
+            // a plain `Error`.
             return Err(transform_failed(
-                "internal",
-                format!("The query URL cannot contain the reserved query param \"{reserved}\""),
+                ErrorReason::Internal,
+                format!(
+                    "Failed to {operation} queries: The push URL cannot contain the reserved query param \"{reserved}\""
+                ),
             ));
         }
     }
@@ -427,7 +456,8 @@ async fn request_transform(
     });
     let client = &*HTTP_CLIENT;
     crate::custom::metrics::record_api_in_flight(1);
-    let result = post_transform_attempts(client, url, &headers, body, &transform_failed).await;
+    let result =
+        post_transform_attempts(client, url, &headers, body, &query_ids, &transform_failed).await;
     crate::custom::metrics::record_api_in_flight(-1);
     let v = result?;
 
@@ -465,7 +495,8 @@ async fn post_transform_attempts(
     url: reqwest::Url,
     headers: &[(String, String)],
     body: &Value,
-    transform_failed: &dyn Fn(&str, String) -> Value,
+    query_ids: &[String],
+    transform_failed: &dyn Fn(ErrorReason, String) -> Value,
 ) -> Result<Value, Value> {
     let request_started = Instant::now();
     let mut attempt = 1u32;
@@ -501,7 +532,11 @@ async fn post_transform_attempts(
                     // A network failure (no HTTP response) is the ZeroCache
                     // non-`http` variant — no `status`, so `reason: 'internal'`
                     // per TS `transformFailedBodySchema` (not an auth failure).
-                    transform_failed("internal", format!("query transform request failed: {e}")),
+                    // fetch.ts:349-353 `Fetch from API server threw error: …`.
+                    transform_failed(
+                        ErrorReason::Internal,
+                        format!("Fetch from API server threw error: {e}"),
+                    ),
                     None,
                     None,
                 ));
@@ -542,14 +577,24 @@ async fn post_transform_attempts(
                     // HTTP `status` (+ `bodyPreview`) so a 401/403 is recognizable
                     // as a server-side auth failure — see `is_auth_error_body`,
                     // used by the auth-maintenance revocation probe.
-                    let mut failure = transform_failed(
-                        "http",
-                        format!("query transform returned {status}: {preview}"),
-                    );
-                    if let Some(obj) = failure.as_object_mut() {
-                        obj.insert("status".into(), serde_json::json!(status.as_u16()));
-                        obj.insert("bodyPreview".into(), serde_json::json!(preview));
-                    }
+                    // fetch.ts:242-247: `apiFailedBody(source, HTTP, 'Fetch from API
+                    // server returned non-OK status …', response, bodyPreview)`.
+                    let failure = serde_json::to_value(ErrorBody::TransformFailedHttp(
+                        TransformFailedHttpBody {
+                            kind: ErrorKind::TransformFailed,
+                            details: None,
+                            query_ids: query_ids.to_vec(),
+                            message: format!(
+                                "Fetch from API server returned non-OK status {}",
+                                status.as_u16()
+                            ),
+                            origin: ErrorOrigin::ZeroCache,
+                            reason: ErrorReason::Http,
+                            status: JsNumber::from(i64::from(status.as_u16())),
+                            body_preview: Some(preview.clone()),
+                        },
+                    ))
+                    .expect("an error body serializes");
                     break Err(("http_error", failure, Some(status.as_u16()), error));
                 }
                 // fetch.ts:258-262: `response.json()` then
@@ -586,7 +631,7 @@ async fn post_transform_attempts(
                         tracing::warn!(url = %url, error = %e, "failed to parse response");
                         // fetch.ts:301-305 `apiFailedBody(source, ErrorReason.Parse, …)`.
                         let failure = transform_failed(
-                            "parse",
+                            ErrorReason::Parse,
                             format!("Failed to parse response from API server: {e}"),
                         );
                         let error = crate::custom::metrics::ApiErrorAttrs::from_value(&failure);
@@ -1105,8 +1150,11 @@ mod tests {
         .await
         .expect_err("a non-string table must fail the parse");
         assert_eq!(err["kind"], "TransformFailed");
-        assert_eq!(err["origin"], "zero-cache");
+        assert_eq!(err["origin"], "zeroCache");
         assert_eq!(err["reason"], "parse");
+        // The body must be one `errorBodySchema` accepts — it is sent to the
+        // client as-is (`["error", body]`), where the client parses it.
+        ErrorBody::deserialize(&err).expect("a TransformFailed body the client can parse");
         assert!(
             err["message"]
                 .as_str()
@@ -1321,9 +1369,14 @@ mod tests {
             .await
             .expect_err("401 must fail validation");
         assert_eq!(err["kind"], "TransformFailed");
-        assert_eq!(err["origin"], "zero-cache");
+        assert_eq!(err["origin"], "zeroCache");
         assert_eq!(err["reason"], "http");
         assert_eq!(err["status"], 401);
+        assert_eq!(
+            err["message"],
+            "Fetch from API server returned non-OK status 401"
+        );
+        ErrorBody::deserialize(&err).expect("a TransformFailed body the client can parse");
         assert_eq!(err["queryIDs"], serde_json::json!([]));
         assert!(
             is_auth_error_body(&err),

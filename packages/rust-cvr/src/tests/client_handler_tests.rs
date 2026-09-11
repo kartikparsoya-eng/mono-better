@@ -1390,7 +1390,7 @@ fn send_query_transform_failed_error_emits_exact_error_frame_and_fails() {
     // A TransformFailedBody-shaped error (zero-protocol error body).
     let body = serde_json::json!({
         "kind": "TransformFailed",
-        "origin": "zero-cache",
+        "origin": "zeroCache",
         "message": "failed to transform query",
         "queryHashes": ["qh1"],
     });
