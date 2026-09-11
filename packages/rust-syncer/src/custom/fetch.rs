@@ -2,7 +2,14 @@
 //! URL-pattern allowlist matching, retry backoff, and the error body preview
 //!.
 
+use serde::Deserialize;
+use serde_json::Value;
 use urlpattern::{UrlPattern, UrlPatternInit, UrlPatternMatchInput, UrlPatternOptions};
+
+use crate::custom::metrics::ApiErrorAttrs;
+use crate::protocol::error::ErrorBody;
+use crate::protocol::error_reason_enum::ErrorReason;
+use crate::protocol::push::PushError;
 
 /// WHATWG URLPattern match of `url` against `pattern` (TS `urlMatch` /
 /// `compileUrlPattern`), backed by the `urlpattern` crate for true parity with
@@ -64,6 +71,48 @@ pub(crate) async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Op
     }
     let end = bytes.len().min(cap);
     Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
+/// Port of `apiErrorFromResult` (custom/fetch.ts:462-486): a 2xx whose
+/// parsed body is itself an error — an `errorBodySchema` body, the legacy
+/// `['transformFailed', body]` tuple, or a legacy `pushErrorSchema` body — is
+/// recorded as `api_error` rather than `success`, labelled by kind/reason.
+/// Every `try` is valita `passthrough`: unknown keys do not disqualify a body.
+pub fn api_error_from_result(result: &Value) -> Option<ApiErrorAttrs> {
+    if ErrorBody::deserialize(result).is_ok() {
+        return ApiErrorAttrs::from_value(result);
+    }
+
+    if let Some(arr) = result.as_array()
+        && arr.first().and_then(Value::as_str) == Some("transformFailed")
+    {
+        let legacy_transform_failed = arr.get(1).unwrap_or(&Value::Null);
+        return if ErrorBody::deserialize(legacy_transform_failed).is_ok() {
+            ApiErrorAttrs::from_value(legacy_transform_failed)
+        } else {
+            None
+        };
+    }
+
+    let legacy_push_error = PushError::deserialize(result).ok()?;
+    let reason = serde_json::to_value(legacy_push_error_reason(&legacy_push_error))
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string));
+    Some(ApiErrorAttrs {
+        kind: "PushFailed".to_string(),
+        reason,
+    })
+}
+
+/// Port of `legacyPushErrorReason` (custom/fetch.ts:488-499).
+fn legacy_push_error_reason(error: &PushError) -> ErrorReason {
+    match error {
+        PushError::Http { .. } => ErrorReason::Http,
+        PushError::UnsupportedPushVersion { .. } => ErrorReason::UnsupportedPushVersion,
+        PushError::UnsupportedSchemaVersion { .. } | PushError::ZeroPusher { .. } => {
+            ErrorReason::Internal
+        }
+    }
 }
 
 #[cfg(test)]

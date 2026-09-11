@@ -25,7 +25,9 @@ use rust_cvr::shards::ShardID;
 use serde_json::Value;
 
 use crate::auth::read_authorizer::hash_of_ast;
-use crate::custom::fetch::{get_backoff_delay_ms, url_match};
+use crate::custom::fetch::{api_error_from_result, get_backoff_delay_ms, url_match};
+use crate::protocol::query_server::QueryResponse;
+use serde::Deserialize;
 
 /// TS `CustomQueryTransformer` cache TTL — 5s (chosen to be shorter than a
 /// typical short-lived auth token, so a re-auth re-transforms promptly).
@@ -156,7 +158,7 @@ pub struct CustomQuerySpec {
 }
 
 /// A successfully transformed query (its concrete AST + `hashOfAST`).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TransformedQuery {
     pub id: String,
     pub ast: Value,
@@ -164,6 +166,7 @@ pub struct TransformedQuery {
 }
 
 /// The per-query outcome of a transform.
+#[derive(Debug)]
 pub enum CustomTransformed {
     /// A concrete AST was returned.
     Ok(TransformedQuery),
@@ -175,6 +178,7 @@ pub enum CustomTransformed {
 /// Port of TS `HashedTransformResponse` (transform-query.ts:43-60), success
 /// arm: `{kind: 'success', result, cached: true} | {…, cached: false,
 /// validation}`. The `failed` arm is [`transform`]'s `Err(TransformFailed body)`.
+#[derive(Debug)]
 pub struct HashedTransformResponse {
     pub result: Vec<CustomTransformed>,
     /// Every query was served from the cache — no API round trip, nothing
@@ -245,13 +249,7 @@ pub async fn transform(
         .map(|s| Value::String(s.id.clone()))
         .collect();
 
-    let response = request_transform(ctx, shard, &body, &query_ids).await?;
-
-    // A `QueryResponse` carries `queries: [...]`; a legacy `["transformed", [...]]`
-    // tuple is a client-fallback response. Anything else (e.g. a `TransformFailed`
-    // body) fails the whole request.
-    let queries = extract_transform_queries(&response).ok_or_else(|| response.clone())?;
-    let validation = validation_of(&response);
+    let (queries, validation) = request_transform(ctx, shard, &body, &query_ids).await?;
 
     for q in queries {
         let id = q
@@ -264,13 +262,9 @@ pub async fn transform(
             continue;
         }
         let Some(ast) = q.get("ast").cloned() else {
-            // Malformed entry — treat as a per-query error so it doesn't take
-            // the whole batch down.
-            results.push(CustomTransformed::Errored {
-                id,
-                error: serde_json::json!({"error": "parse", "id": q.get("id"), "message": "missing ast"}),
-            });
-            continue;
+            // `request_transform` parsed the response against
+            // `queryResponseSchema`: a non-error entry carries an `ast`.
+            unreachable!("transformedQuerySchema requires `ast`");
         };
         let hash = hash_of_ast(&ast);
         let transformed = TransformedQuery {
@@ -289,33 +283,6 @@ pub async fn transform(
     })
 }
 
-/// Extract the per-query results from a transform response. Port of the response
-/// handling in TS `transform-query.ts`: a `QueryResponse` carries `queries: [...]`;
-/// a legacy API server returns a `["transformed", [...queries]]` tuple (treated as
-/// a client-fallback response). Returns `None` for anything else (e.g. a
-/// `TransformFailed` body) so the caller fails the whole request.
-fn extract_transform_queries(response: &Value) -> Option<Vec<Value>> {
-    if let Some(arr) = response.get("queries").and_then(|q| q.as_array()) {
-        return Some(arr.clone());
-    }
-    if response
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        == Some("transformed")
-    {
-        return Some(
-            response
-                .as_array()
-                .and_then(|a| a.get(1))
-                .and_then(|q| q.as_array())
-                .cloned()
-                .unwrap_or_default(),
-        );
-    }
-    None
-}
-
 /// Force the empty `/query` validation request used by auth maintenance. Port of
 /// TS `CustomQueryTransformer.validate` (`transform-query.ts`).
 ///
@@ -326,18 +293,15 @@ fn extract_transform_queries(response: &Value) -> Option<Vec<Value>> {
 /// Returns the API server's validation of the connection (TS returns the
 /// `TransformResponse`, whose `validation` `#validateConnection` records;
 /// view-syncer.ts:2753-2757). A 200 that is itself a `TransformFailed` body
-/// is the failure (TS `#requestTransform` returns it as-is and the caller
-/// throws on `kind === 'TransformFailed'`).
+/// is `request_transform`'s `Err` (TS `#requestTransform` returns it as-is
+/// and the caller throws on `kind === 'TransformFailed'`).
 pub async fn validate(
     ctx: &CustomQueryContext,
     shard: &ShardID,
 ) -> Result<ConnectionValidation, Value> {
     let body = serde_json::json!(["transform", []]);
-    let response = request_transform(ctx, shard, &body, &[]).await?;
-    if response.get("kind").and_then(Value::as_str) == Some("TransformFailed") {
-        return Err(response);
-    }
-    Ok(validation_of(&response))
+    let (_, validation) = request_transform(ctx, shard, &body, &[]).await?;
+    Ok(validation)
 }
 
 /// Whether an error body denotes an authorization failure. Port of TS
@@ -380,14 +344,19 @@ const RESERVED_PARAMS: [&str; 2] = ["schema", "appID"];
 
 /// POST `["transform", [...]]` to the API server. Port of `fetchFromAPIServer`:
 /// URL allow-check (`urlMatch`), reserved-param guard, composed headers with
-/// TS overwrite precedence, and the 4-attempt retry loop with backoff+jitter
-/// on 5xx / network errors. Appends the `schema` + `appID` query params.
+/// TS overwrite precedence, the 4-attempt retry loop with backoff+jitter on
+/// 5xx / network errors, and the `queryResponseSchema` parse of the body
+/// (valita `passthrough`, custom/fetch.ts:258-262). Appends the `schema` +
+/// `appID` query params. Then `#requestTransform`'s branching on the parsed
+/// reply (transform-query.ts:211-234): `Ok` is TS's `QueryResponse` arm — the
+/// transformed queries, still raw JSON, with the connection validation —
+/// and `Err` a `TransformFailed` body.
 async fn request_transform(
     ctx: &CustomQueryContext,
     shard: &ShardID,
     body: &Value,
     query_ids: &[Value],
-) -> Result<Value, Value> {
+) -> Result<(Vec<Value>, ConnectionValidation), Value> {
     let transform_failed = |reason: &str, msg: String| -> Value {
         serde_json::json!({
             "kind": "TransformFailed",
@@ -460,7 +429,35 @@ async fn request_transform(
     crate::custom::metrics::record_api_in_flight(1);
     let result = post_transform_attempts(client, url, &headers, body, &transform_failed).await;
     crate::custom::metrics::record_api_in_flight(-1);
-    result
+    let v = result?;
+
+    // transform-query.ts:211-234: `'kind' in transformResponse` is a
+    // `QueryResponse` (queries + validation) or a `TransformFailed` body
+    // returned as-is; a legacy `['transformed', body]` tuple is a
+    // client-fallback response, and `['transformFailed', body]` yields its
+    // body. `post_transform_attempts` parsed the reply against
+    // `queryResponseSchema`, so the lookups below cannot miss.
+    if v.get("kind").is_some() {
+        if v.get("kind").and_then(Value::as_str) == Some("QueryResponse") {
+            let queries = v
+                .get("queries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok((queries, validation_of(&v)))
+        } else {
+            Err(v)
+        }
+    } else if v.get(0).and_then(Value::as_str) == Some("transformed") {
+        let queries = v
+            .get(1)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok((queries, ConnectionValidation::ClientFallback))
+    } else {
+        Err(v.get(1).cloned().unwrap_or(Value::Null))
+    }
 }
 
 async fn post_transform_attempts(
@@ -555,38 +552,53 @@ async fn post_transform_attempts(
                     }
                     break Err(("http_error", failure, Some(status.as_u16()), error));
                 }
-                match resp.json::<Value>().await {
+                // fetch.ts:258-262: `response.json()` then
+                // `validator.parse(json, {mode: 'passthrough'})` — a body that
+                // is not JSON and a body outside `queryResponseSchema` are the
+                // same `parse` failure.
+                let parsed = match resp.json::<Value>().await {
+                    Ok(v) => QueryResponse::deserialize(&v)
+                        .map(|_| v)
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                match parsed {
                     Ok(v) => {
+                        // fetch.ts:263-285: a 2xx whose body is itself an
+                        // error body is recorded as `api_error`, not `success`.
+                        let api_error = api_error_from_result(&v);
                         crate::custom::metrics::record_api_attempt(
-                            "success",
+                            if api_error.is_some() {
+                                "api_error"
+                            } else {
+                                "success"
+                            },
                             false,
                             attempt_ms,
                             attempt,
                             Some(status.as_u16()),
-                            None,
+                            api_error.as_ref(),
                         );
-                        break Ok((v, status.as_u16()));
+                        break Ok((v, status.as_u16(), api_error));
                     }
                     Err(e) => {
                         // TS fetch.ts:294 `lc.warn?.('failed to parse response', …)`.
                         tracing::warn!(url = %url, error = %e, "failed to parse response");
+                        // fetch.ts:301-305 `apiFailedBody(source, ErrorReason.Parse, …)`.
+                        let failure = transform_failed(
+                            "parse",
+                            format!("Failed to parse response from API server: {e}"),
+                        );
+                        let error = crate::custom::metrics::ApiErrorAttrs::from_value(&failure);
                         crate::custom::metrics::record_api_attempt(
                             "parse_error",
                             false,
                             attempt_ms,
                             attempt,
                             Some(status.as_u16()),
-                            None,
+                            error.as_ref(),
                         );
-                        break Err((
-                            "parse_error",
-                            transform_failed(
-                                "internal",
-                                format!("invalid transform response: {e}"),
-                            ),
-                            Some(status.as_u16()),
-                            None,
-                        ));
+                        break Err(("parse_error", failure, Some(status.as_u16()), error));
                     }
                 }
             }
@@ -597,13 +609,17 @@ async fn post_transform_attempts(
     // `apiRequests` + `apiRequestDuration` sample carrying the attempt count,
     // the last response's status and the error body's kind/reason.
     match outcome {
-        Ok((v, status)) => {
+        Ok((v, status, api_error)) => {
             crate::custom::metrics::record_api_request(
-                "success",
+                if api_error.is_some() {
+                    "api_error"
+                } else {
+                    "success"
+                },
                 attempt,
                 request_ms,
                 Some(status),
-                None,
+                api_error.as_ref(),
             );
             Ok(v)
         }
@@ -977,7 +993,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let url = super::test_support::spawn_http_stub_seq(vec![(
             "200 OK",
-            r#"{"kind":"QueryResponse","userID":"u1","queries":[{"id":"qv1","ast":{"table":"issue"}}]}"#,
+            r#"{"kind":"QueryResponse","userID":"u1","queries":[{"id":"qv1","name":"n","ast":{"table":"issue"}}]}"#,
         )]);
         let mut ctx = ctx_at(&url);
         ctx.auth = Some("tok-validation".to_string());
@@ -1035,19 +1051,119 @@ mod tests {
         );
     }
 
-    #[test]
-    fn extract_transform_queries_handles_modern_and_legacy() {
-        // Modern `QueryResponse` with `queries: [...]`.
-        let modern = serde_json::json!({"queries": [{"id": "a", "ast": {}}]});
-        assert_eq!(extract_transform_queries(&modern).unwrap().len(), 1);
-        // Legacy `["transformed", [...]]` tuple → client-fallback (F-TQ-7). Fails
-        // on the pre-fix code, which only read `queries` → this arm went to Err.
-        let legacy =
-            serde_json::json!(["transformed", [{"id": "a", "ast": {}}, {"id": "b", "ast": {}}]]);
-        assert_eq!(extract_transform_queries(&legacy).unwrap().len(), 2);
-        // A `TransformFailed` body (or any other shape) → None (whole-batch fail).
-        let failed = serde_json::json!({"kind": "TransformFailed", "message": "boom"});
-        assert!(extract_transform_queries(&failed).is_none());
+    /// One-query batch (`id: "a"`) against a stub answering `body` with 200.
+    async fn transform_one_against(body: &'static str) -> Result<HashedTransformResponse, Value> {
+        let url = spawn_http_stub("200 OK", body);
+        let ctx = ctx_at(&url);
+        let spec = CustomQuerySpec {
+            id: "a".to_string(),
+            name: "n".to_string(),
+            args: vec![],
+        };
+        transform(&ctx, &shard(), &[spec]).await
+    }
+
+    /// `#requestTransform` (transform-query.ts:211-229): a `QueryResponse`
+    /// with a `userID` is server-validated; the legacy `['transformed', …]`
+    /// tuple is a client-fallback response carrying its queries.
+    #[tokio::test]
+    async fn transform_handles_modern_and_legacy_responses() {
+        let ok = transform_one_against(
+            r#"{"kind":"QueryResponse","userID":"u1","queries":[{"id":"a","name":"n","ast":{"table":"issue"}}]}"#,
+        )
+        .await
+        .expect("a QueryResponse");
+        assert!(
+            matches!(&ok.validation, Some(ConnectionValidation::ServerValidated { validated_user_id }) if validated_user_id.as_deref() == Some("u1")),
+            "got {:?}",
+            ok.validation
+        );
+        assert_eq!(ok.result.len(), 1);
+
+        let ok = transform_one_against(
+            r#"["transformed",[{"id":"a","name":"n","ast":{"table":"issue"}},{"id":"b","name":"n","ast":{"table":"issue"}}]]"#,
+        )
+        .await
+        .expect("a legacy transformed tuple");
+        assert!(matches!(
+            ok.validation,
+            Some(ConnectionValidation::ClientFallback)
+        ));
+        assert_eq!(ok.result.len(), 2);
+    }
+
+    /// `fetchFromAPIServer` (custom/fetch.ts:258-262) parses the body against
+    /// `queryResponseSchema`: a 200 that fails it is a `parse` failure of the
+    /// whole batch (fetch.ts:301-305, then transform-query.ts:240-245 adds
+    /// the batch ids). Before the port the entry was accepted and its AST
+    /// hashed and hydrated.
+    #[tokio::test]
+    async fn transform_fails_the_batch_when_the_response_is_outside_query_response_schema() {
+        let err = transform_one_against(
+            r#"{"kind":"QueryResponse","queries":[{"id":"a","name":"n","ast":{"table":5}}]}"#,
+        )
+        .await
+        .expect_err("a non-string table must fail the parse");
+        assert_eq!(err["kind"], "TransformFailed");
+        assert_eq!(err["origin"], "zero-cache");
+        assert_eq!(err["reason"], "parse");
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Failed to parse response from API server: "),
+            "{err}"
+        );
+        assert_eq!(err["queryIDs"], serde_json::json!(["a"]));
+    }
+
+    /// valita `passthrough` (custom/fetch.ts:260): unknown keys anywhere in
+    /// the response are kept, not rejected.
+    #[tokio::test]
+    async fn transform_keeps_unknown_keys_in_the_response() {
+        let ok = transform_one_against(
+            r#"{"kind":"QueryResponse","extra":1,"queries":[{"id":"a","name":"n","extra":2,"ast":{"table":"issue","extra":3}}]}"#,
+        )
+        .await
+        .expect("unknown keys pass through");
+        assert_eq!(ok.result.len(), 1);
+        match &ok.result[0] {
+            CustomTransformed::Ok(q) => assert_eq!(q.ast["extra"], 3),
+            CustomTransformed::Errored { .. } => panic!("not an errored query"),
+        }
+    }
+
+    /// custom/fetch.ts:301-305: a body that is not JSON is the same `parse`
+    /// failure. Before the port it was reported as reason `internal`.
+    #[tokio::test]
+    async fn transform_reports_a_non_json_body_as_a_parse_failure() {
+        let err = transform_one_against("not json")
+            .await
+            .expect_err("a non-JSON body must fail");
+        assert_eq!(err["reason"], "parse");
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Failed to parse response from API server: "),
+            "{err}"
+        );
+        assert_eq!(err["queryIDs"], serde_json::json!(["a"]));
+    }
+
+    /// transform-query.ts:230-234: the legacy `['transformFailed', body]`
+    /// tuple yields its body. Before the port the whole tuple was the error.
+    #[tokio::test]
+    async fn transform_returns_the_body_of_a_legacy_transform_failed_tuple() {
+        let err = transform_one_against(
+            r#"["transformFailed",{"kind":"TransformFailed","origin":"server","reason":"internal","message":"boom","queryIDs":["a"]}]"#,
+        )
+        .await
+        .expect_err("a legacy transformFailed tuple must fail");
+        assert_eq!(
+            err,
+            serde_json::json!({"kind":"TransformFailed","origin":"server","reason":"internal","message":"boom","queryIDs":["a"]})
+        );
     }
 
     #[tokio::test]
@@ -1080,8 +1196,7 @@ mod tests {
         ];
         let err = transform(&ctx, &shard, &specs)
             .await
-            .err()
-            .expect("transform should fail for a disallowed URL");
+            .expect_err("transform should fail for a disallowed URL");
         let ids: Vec<&str> = err["queryIDs"]
             .as_array()
             .expect("queryIDs array")
@@ -1186,7 +1301,7 @@ mod tests {
         };
 
         // Happy path: 200 with an empty QueryResponse → opaque Ok(()).
-        let ok_url = spawn_http_stub("200 OK", r#"{"queries":[]}"#);
+        let ok_url = spawn_http_stub("200 OK", r#"{"kind":"QueryResponse","queries":[]}"#);
         let ctx = CustomQueryContext {
             url: ok_url.clone(),
             allowed_urls: vec![ok_url],

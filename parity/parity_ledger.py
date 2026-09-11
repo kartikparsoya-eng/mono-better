@@ -799,9 +799,9 @@ HELPER_ALIASES = {
     "zero-protocol/src/mutation-type-enum.ts::*": ("N/A", "MutationType enum; rust relays custom pushes only — I-3"),
     "zero-protocol/src/mutation.ts::mutationResultSchema": ("client_handler.rs normalize_mutation_result", "valita → Value (D-17)"),
     "zero-protocol/src/primary-key.ts::primaryKeySchema": ("N/A", "valita → Vec<String> (D-17)"),
+    "zero-protocol/src/push.ts::pushErrorSchema": ("protocol/push.rs PushError", "valita union → `error`-tagged serde enum, passthrough mode (D-17)"),
     "zero-protocol/src/primary-key.ts::primaryKeyValueRecordSchema": ("client_handler.rs make_row_patch", "valita → Value (D-17), client_handler.rs:741"),
-    "zero-protocol/src/push.ts::pushErrorSchema": ("protocol/push.rs", "valita → serde (D-17)"),
-    "zero-protocol/src/query-server.ts::queryResponseSchema": ("custom_queries/transform_query.rs validation_of", "valita → Value (D-17)"),
+    "zero-protocol/src/query-server.ts::queryResponseSchema": ("protocol/query_server.rs QueryResponse", "valita union → discriminated Deserialize, passthrough mode (D-17)"),
     "zero-schema/src/compiled-permissions.ts::permissionsConfigSchema": ("auth/load_permissions.rs load_permissions", "valita → Value (D-17)"),
     # ── zqlite internals ──
     "zqlite/src/internal/sql-inline.ts::compileInline": ("sqlite/sqlite_cost_model.rs inline_sql", "probe SQL with inlined literals"),

@@ -69,6 +69,11 @@ impl ApiErrorAttrs {
     /// that is not an object with a string `kind` contributes nothing.
     pub fn from_body(body: &str) -> Option<ApiErrorAttrs> {
         let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        ApiErrorAttrs::from_value(&v)
+    }
+
+    /// The same read on an already-parsed body.
+    pub fn from_value(v: &serde_json::Value) -> Option<ApiErrorAttrs> {
         let kind = v.get("kind")?.as_str()?.to_string();
         let reason = v.get("reason").and_then(|r| r.as_str()).map(str::to_string);
         Some(ApiErrorAttrs { kind, reason })

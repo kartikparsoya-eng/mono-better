@@ -4,6 +4,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::mutation_id::passthrough::MutationID as PassthroughMutationID;
+use super::optional_no_null;
+
 // pushBodySchema uses clientGroupID and requestID (capital ID)
 //
 // `pushVersion`/`timestamp` are `v.number()` in TS (push.ts) — a JS number, i.e.
@@ -57,4 +60,38 @@ pub struct AckMutationResponsesBody {
     pub id: crate::protocol::JsNumber,
     #[serde(rename = "clientID")]
     pub client_id: String,
+}
+
+/// `pushErrorSchema` (push.ts:26-81) — every member `@deprecated`: push
+/// errors are `['error', {…}]` messages now. Still a member of
+/// `queryResponseSchema`'s error detection (`apiErrorFromResult`,
+/// custom/fetch.ts:475), so parsed in valita `passthrough` mode: no
+/// `deny_unknown_fields`, and the passthrough `mutationIDSchema`. Told apart
+/// by the `error` literal.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "error")]
+pub enum PushError {
+    #[serde(rename = "unsupportedPushVersion")]
+    UnsupportedPushVersion {
+        #[serde(rename = "mutationIDs", default, deserialize_with = "optional_no_null")]
+        mutation_ids: Option<Vec<PassthroughMutationID>>,
+    },
+    #[serde(rename = "unsupportedSchemaVersion")]
+    UnsupportedSchemaVersion {
+        #[serde(rename = "mutationIDs", default, deserialize_with = "optional_no_null")]
+        mutation_ids: Option<Vec<PassthroughMutationID>>,
+    },
+    #[serde(rename = "http")]
+    Http {
+        status: crate::protocol::JsNumber,
+        details: String,
+        #[serde(rename = "mutationIDs", default, deserialize_with = "optional_no_null")]
+        mutation_ids: Option<Vec<PassthroughMutationID>>,
+    },
+    #[serde(rename = "zeroPusher")]
+    ZeroPusher {
+        details: String,
+        #[serde(rename = "mutationIDs", default, deserialize_with = "optional_no_null")]
+        mutation_ids: Option<Vec<PassthroughMutationID>>,
+    },
 }

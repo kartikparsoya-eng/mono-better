@@ -123,6 +123,31 @@ pub struct TransformFailedZeroCacheBody {
     pub reason: ErrorReason,
 }
 
+/// `transformFailedBodySchema` (error.ts:112-136): the three `TransformFailed`
+/// members of `errorBodySchema`, resolved the same way. A body of any other
+/// kind is rejected, as valita rejects it for this narrower union.
+#[derive(Debug, Clone)]
+pub enum TransformFailedBody {
+    Server(TransformFailedServerBody),
+    Http(TransformFailedHttpBody),
+    ZeroCache(TransformFailedZeroCacheBody),
+}
+
+impl<'de> Deserialize<'de> for TransformFailedBody {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match ErrorBody::deserialize(deserializer)? {
+            ErrorBody::TransformFailedServer(body) => Ok(TransformFailedBody::Server(body)),
+            ErrorBody::TransformFailedHttp(body) => Ok(TransformFailedBody::Http(body)),
+            ErrorBody::TransformFailedZeroCache(body) => Ok(TransformFailedBody::ZeroCache(body)),
+            other => Err(D::Error::custom(format!(
+                "expected a TransformFailed body, got kind {:?}",
+                other.kind()
+            ))),
+        }
+    }
+}
+
 /// The full error body union. Matches `errorBodySchema` in error.ts.
 ///
 /// Serialization is untagged (each member is a flat object). Deserialization
