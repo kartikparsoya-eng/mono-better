@@ -377,7 +377,7 @@ guarantees, error semantics) versus TS.
   `zero.sync.cvr.pool-connections`, `zero.sync.cvr.pool-idle-connections` — the
   write-behind's failure count and the sqlx pool it drains into; TS flushes
   inline on its postgres.js connection and has neither.
-- **Tests:** `g8_mychannelparticipations_real_ast`, diff-oracle full-catalog.
+- **Tests:** `my_channel_participations_real_ast_test`, diff-oracle full-catalog.
 
 ## I-8 — Promote the ported ConnectionContextManager to single live owner
 - **Files (post-L9):** `services/view_syncer/connection_context_manager.rs` (the
