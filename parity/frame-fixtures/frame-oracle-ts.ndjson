@@ -1,424 +1,453 @@
-{"id":"valid/ping","accepted":true,"tag":"ping","stage":null}
-{"id":"valid/closeConnection","accepted":true,"tag":"closeConnection","stage":null}
-{"id":"valid/deleteClients","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"valid/updateAuth","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"valid/pull","accepted":true,"tag":"pull","stage":null}
-{"id":"valid/changeDesiredQueries","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"valid/initConnection","accepted":true,"tag":"initConnection","stage":null}
-{"id":"valid/push","accepted":true,"tag":"push","stage":null}
-{"id":"valid/inspect","accepted":true,"tag":"inspect","stage":null}
-{"id":"valid/ackMutationResponses","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"structural/not-json","accepted":false,"tag":null,"stage":"json"}
-{"id":"structural/not-array-object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/not-array-string","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/not-array-number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/empty-array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/one-element","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/three-elements","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/tag-number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/tag-null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/tag-array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/unknown-tag","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/tag-wrong-case","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/tag-trailing-space","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/body-null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/body-string","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/body-array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/trailing-comma","accepted":false,"tag":null,"stage":"json"}
-{"id":"structural/duplicate-key","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"structural/deep-nesting","accepted":false,"tag":null,"stage":"valita"}
-{"id":"structural/bom-prefix","accepted":false,"tag":null,"stage":"json"}
-{"id":"structural/leading-whitespace","accepted":true,"tag":"ping","stage":null}
-{"id":"structural/trailing-garbage","accepted":false,"tag":null,"stage":"json"}
-{"id":"structural/nul-in-body-key","accepted":false,"tag":null,"stage":"valita"}
-{"id":"string/updateAuth.auth/plain","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/empty","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/lone-high-surr","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/lone-low-surr","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/valid-pair-escaped","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/pair-then-lone","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/nul-escape","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/noncharacter","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/escaped-backslash","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/escaped-quote","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/escaped-solidus","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/tab-newline","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/updateAuth.auth/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/updateAuth.auth/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/updateAuth.auth/long","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/whitespace-pad","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/combining","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/sql-ish","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/updateAuth.auth/like-meta","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"wrongtype/updateAuth.auth/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/updateAuth.auth/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/updateAuth.auth/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/updateAuth.auth/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/updateAuth.auth/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/updateAuth.auth/string","accepted":true,"tag":"updateAuth","stage":null}
-{"id":"string/pull.clientGroupID/plain","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/empty","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/lone-high-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/lone-low-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/valid-pair-escaped","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/pair-then-lone","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/nul-escape","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/noncharacter","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/escaped-backslash","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/escaped-quote","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/escaped-solidus","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/tab-newline","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.clientGroupID/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.clientGroupID/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.clientGroupID/long","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/whitespace-pad","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/combining","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/sql-ish","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.clientGroupID/like-meta","accepted":true,"tag":"pull","stage":null}
-{"id":"wrongtype/pull.clientGroupID/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.clientGroupID/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.clientGroupID/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.clientGroupID/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.clientGroupID/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.clientGroupID/string","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/plain","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/empty","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/lone-high-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/lone-low-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/valid-pair-escaped","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/pair-then-lone","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/nul-escape","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/noncharacter","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/escaped-backslash","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/escaped-quote","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/escaped-solidus","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/tab-newline","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.requestID/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.requestID/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.requestID/long","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/whitespace-pad","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/combining","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/sql-ish","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.requestID/like-meta","accepted":true,"tag":"pull","stage":null}
-{"id":"wrongtype/pull.requestID/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.requestID/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.requestID/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.requestID/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.requestID/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.requestID/string","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/plain","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/empty","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/lone-high-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/lone-low-surr","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/valid-pair-escaped","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/pair-then-lone","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/nul-escape","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/noncharacter","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/escaped-backslash","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/escaped-quote","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/escaped-solidus","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/tab-newline","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.cookie/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.cookie/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/pull.cookie/long","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/whitespace-pad","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/combining","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/sql-ish","accepted":true,"tag":"pull","stage":null}
-{"id":"string/pull.cookie/like-meta","accepted":true,"tag":"pull","stage":null}
-{"id":"wrongtype/pull.cookie/null","accepted":true,"tag":"pull","stage":null}
-{"id":"wrongtype/pull.cookie/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.cookie/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.cookie/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.cookie/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/pull.cookie/string","accepted":true,"tag":"pull","stage":null}
-{"id":"string/deleteClients.clientIDs0/plain","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/empty","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/lone-high-surr","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/lone-low-surr","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/valid-pair-escaped","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/pair-then-lone","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/nul-escape","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/noncharacter","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/escaped-backslash","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/escaped-quote","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/escaped-solidus","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/tab-newline","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/deleteClients.clientIDs0/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/deleteClients.clientIDs0/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/deleteClients.clientIDs0/long","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/whitespace-pad","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/combining","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/sql-ish","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/deleteClients.clientIDs0/like-meta","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"wrongtype/deleteClients.clientIDs0/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/deleteClients.clientIDs0/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/deleteClients.clientIDs0/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/deleteClients.clientIDs0/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/deleteClients.clientIDs0/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/deleteClients.clientIDs0/string","accepted":true,"tag":"deleteClients","stage":null}
-{"id":"string/initConnection.userPushURL/plain","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/empty","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/lone-high-surr","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/lone-low-surr","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/valid-pair-escaped","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/pair-then-lone","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/nul-escape","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/noncharacter","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/escaped-backslash","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/escaped-quote","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/escaped-solidus","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/tab-newline","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.userPushURL/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.userPushURL/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.userPushURL/long","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/whitespace-pad","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/combining","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/sql-ish","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.userPushURL/like-meta","accepted":true,"tag":"initConnection","stage":null}
-{"id":"wrongtype/initConnection.userPushURL/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.userPushURL/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.userPushURL/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.userPushURL/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.userPushURL/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.userPushURL/string","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/plain","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/empty","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/lone-high-surr","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/lone-low-surr","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/valid-pair-escaped","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/pair-then-lone","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/nul-escape","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/noncharacter","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/escaped-backslash","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/escaped-quote","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/escaped-solidus","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/tab-newline","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.traceparent/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.traceparent/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/initConnection.traceparent/long","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/whitespace-pad","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/combining","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/sql-ish","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/initConnection.traceparent/like-meta","accepted":true,"tag":"initConnection","stage":null}
-{"id":"wrongtype/initConnection.traceparent/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.traceparent/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.traceparent/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.traceparent/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.traceparent/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.traceparent/string","accepted":true,"tag":"initConnection","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/plain","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/empty","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/lone-high-surr","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/lone-low-surr","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/valid-pair-escaped","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/pair-then-lone","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/nul-escape","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/noncharacter","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/escaped-backslash","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/escaped-quote","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/escaped-solidus","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/tab-newline","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/changeDesiredQueries.traceparent/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/changeDesiredQueries.traceparent/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/changeDesiredQueries.traceparent/long","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/whitespace-pad","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/combining","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/sql-ish","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/changeDesiredQueries.traceparent/like-meta","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"wrongtype/changeDesiredQueries.traceparent/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/changeDesiredQueries.traceparent/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/changeDesiredQueries.traceparent/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/changeDesiredQueries.traceparent/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/changeDesiredQueries.traceparent/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/changeDesiredQueries.traceparent/string","accepted":true,"tag":"changeDesiredQueries","stage":null}
-{"id":"string/inspect.id/plain","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/empty","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/lone-high-surr","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/lone-low-surr","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/valid-pair-escaped","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/pair-then-lone","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/nul-escape","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/noncharacter","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/escaped-backslash","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/escaped-quote","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/escaped-solidus","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/tab-newline","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/inspect.id/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/inspect.id/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/inspect.id/long","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/whitespace-pad","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/combining","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/sql-ish","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/inspect.id/like-meta","accepted":true,"tag":"inspect","stage":null}
-{"id":"wrongtype/inspect.id/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/inspect.id/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/inspect.id/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/inspect.id/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/inspect.id/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/inspect.id/string","accepted":true,"tag":"inspect","stage":null}
-{"id":"string/push.clientGroupID/plain","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/empty","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/lone-high-surr","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/lone-low-surr","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/valid-pair-escaped","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/pair-then-lone","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/nul-escape","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/noncharacter","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/escaped-backslash","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/escaped-quote","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/escaped-solidus","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/tab-newline","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/truncated-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/push.clientGroupID/bad-escape","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/push.clientGroupID/raw-control","accepted":false,"tag":null,"stage":"json"}
-{"id":"string/push.clientGroupID/long","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/whitespace-pad","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/combining","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/sql-ish","accepted":true,"tag":"push","stage":null}
-{"id":"string/push.clientGroupID/like-meta","accepted":true,"tag":"push","stage":null}
-{"id":"wrongtype/push.clientGroupID/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/push.clientGroupID/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/push.clientGroupID/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/push.clientGroupID/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/push.clientGroupID/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/push.clientGroupID/string","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/zero","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/neg-zero","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/neg-one","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/int32-max-plus","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/max-safe","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/max-safe-plus-1","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/max-safe-plus-2","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/min-safe","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/fractional","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/overflow-f64","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/neg-overflow-f64","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/tiny","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/exp-upper","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.pushVersion/leading-plus","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.pushVersion/leading-zero","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.pushVersion/hex","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.pushVersion/bare-inf","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.pushVersion/bare-nan","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.timestamp/zero","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/neg-zero","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/neg-one","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/int32-max-plus","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/max-safe","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/max-safe-plus-1","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/max-safe-plus-2","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/min-safe","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/fractional","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/overflow-f64","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/neg-overflow-f64","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/tiny","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/exp-upper","accepted":true,"tag":"push","stage":null}
-{"id":"number/push.timestamp/leading-plus","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.timestamp/leading-zero","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.timestamp/hex","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.timestamp/bare-inf","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/push.timestamp/bare-nan","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/ackMutationResponses.id/zero","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/neg-zero","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/neg-one","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/int32-max-plus","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/max-safe","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/max-safe-plus-1","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/max-safe-plus-2","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/min-safe","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/fractional","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/overflow-f64","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/neg-overflow-f64","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/tiny","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/exp-upper","accepted":true,"tag":"ackMutationResponses","stage":null}
-{"id":"number/ackMutationResponses.id/leading-plus","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/ackMutationResponses.id/leading-zero","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/ackMutationResponses.id/hex","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/ackMutationResponses.id/bare-inf","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/ackMutationResponses.id/bare-nan","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/pull.cookie/zero","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/neg-zero","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/neg-one","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/int32-max-plus","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/max-safe","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/max-safe-plus-1","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/max-safe-plus-2","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/min-safe","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/fractional","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/overflow-f64","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/neg-overflow-f64","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/tiny","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/exp-upper","accepted":false,"tag":null,"stage":"valita"}
-{"id":"number/pull.cookie/leading-plus","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/pull.cookie/leading-zero","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/pull.cookie/hex","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/pull.cookie/bare-inf","accepted":false,"tag":null,"stage":"json"}
-{"id":"number/pull.cookie/bare-nan","accepted":false,"tag":null,"stage":"json"}
-{"id":"wrongtype/initConnection.clientSchema/null","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.clientSchema/true","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.clientSchema/number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.clientSchema/array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.clientSchema/object","accepted":false,"tag":null,"stage":"valita"}
-{"id":"wrongtype/initConnection.clientSchema/string","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/empty-tables","accepted":true,"tag":"initConnection","stage":null}
-{"id":"clientschema/one-table","accepted":true,"tag":"initConnection","stage":null}
-{"id":"clientschema/all-value-types","accepted":true,"tag":"initConnection","stage":null}
-{"id":"clientschema/no-tables-key","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/unknown-key","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/tables-array","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/table-unknown-key","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/table-no-columns","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/table-no-pk","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/column-bad-type","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/column-no-type","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/column-unknown-key","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/pk-number","accepted":false,"tag":null,"stage":"valita"}
-{"id":"clientschema/pk-string","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/updateAuth/auth","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/updateAuth/auth","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/updateAuth","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/pull/clientGroupID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/pull/clientGroupID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/pull/cookie","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/pull/cookie","accepted":true,"tag":"pull","stage":null}
-{"id":"missing/pull/requestID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/pull/requestID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/pull","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/changeDesiredQueries/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/changeDesiredQueries/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/changeDesiredQueries","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/initConnection/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/initConnection/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/initConnection","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/inspect/id","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/inspect/id","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/inspect/op","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/inspect/op","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/inspect","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/ackMutationResponses/id","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/ackMutationResponses/id","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/ackMutationResponses/clientID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/ackMutationResponses/clientID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/ackMutationResponses","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/clientGroupID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/push/clientGroupID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/mutations","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/push/mutations","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/pushVersion","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/push/pushVersion","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/schemaVersion","accepted":true,"tag":"push","stage":null}
-{"id":"nullfield/push/schemaVersion","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/timestamp","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/push/timestamp","accepted":false,"tag":null,"stage":"valita"}
-{"id":"missing/push/requestID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"nullfield/push/requestID","accepted":false,"tag":null,"stage":"valita"}
-{"id":"extrafield/push","accepted":false,"tag":null,"stage":"valita"}
+{"id":"valid/ping","accepted":true,"tag":"ping","stage":null,"message":null}
+{"id":"valid/closeConnection","accepted":true,"tag":"closeConnection","stage":null,"message":null}
+{"id":"valid/deleteClients","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"valid/updateAuth","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"valid/pull","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"valid/changeDesiredQueries","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"valid/initConnection","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"valid/push","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"valid/inspect","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"valid/ackMutationResponses","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"structural/not-json","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)"}
+{"id":"structural/not-array-object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array. Got object"}
+{"id":"structural/not-array-string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array. Got \"ping\""}
+{"id":"structural/not-array-number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array. Got 7"}
+{"id":"structural/empty-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: []"}
+{"id":"structural/one-element","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\"]"}
+{"id":"structural/three-elements","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\",{},{}]"}
+{"id":"structural/tag-number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [1,{}]"}
+{"id":"structural/tag-null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [null,{}]"}
+{"id":"structural/tag-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [[\"ping\"],{}]"}
+{"id":"structural/unknown-tag","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"definitelyNotAThing\",{}]"}
+{"id":"structural/tag-wrong-case","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"Ping\",{}]"}
+{"id":"structural/tag-trailing-space","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping \",{}]"}
+{"id":"structural/body-null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\",null]"}
+{"id":"structural/body-string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\",\"x\"]"}
+{"id":"structural/body-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\",[]]"}
+{"id":"structural/trailing-comma","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token ']', \"[\"ping\",{},]\" is not valid JSON"}
+{"id":"structural/duplicate-key","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"structural/deep-nesting","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"pull\",[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"}
+{"id":"structural/bom-prefix","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token '﻿', \"﻿[\"ping\",{}]\" is not valid JSON"}
+{"id":"structural/leading-whitespace","accepted":true,"tag":"ping","stage":null,"message":null}
+{"id":"structural/trailing-garbage","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected non-whitespace character after JSON at position 11 (line 1 column 12)"}
+{"id":"structural/nul-in-body-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property auth at 1"}
+{"id":"schema/ast-unknown-key-deep","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property bogus at 1.desiredQueriesPatch.0.ast.where.left"}
+{"id":"schema/ast-two-unknown-keys","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected properties a and b at 1.desiredQueriesPatch.0"}
+{"id":"schema/ast-bad-direction","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"asc\" or \"desc\" at 1.desiredQueriesPatch.0.ast.orderBy.0.1 Got \"up\""}
+{"id":"schema/ast-condition-bad-type","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"simple\", \"and\", \"or\" or \"correlatedSubquery\" at 1.desiredQueriesPatch.0.ast.where.type Got \"weird\""}
+{"id":"schema/ast-condition-not-object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.desiredQueriesPatch.0.ast.where. Got 5"}
+{"id":"schema/ast-bad-operator","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"=\", \"!=\", \"IS\", \"IS NOT\", \"<\", \">\", \"<=\", \">=\", \"LIKE\", \"NOT LIKE\", \"ILIKE\", \"NOT ILIKE\", \"IN\" or \"NOT IN\" at 1.desiredQueriesPatch.0.ast.where.op Got \"DROP\""}
+{"id":"schema/ast-column-on-right","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"static\" or \"literal\" at 1.desiredQueriesPatch.0.ast.where.right.type Got \"column\""}
+{"id":"schema/ast-literal-object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string, number, boolean, null or array at 1.desiredQueriesPatch.0.ast.where.right.value. Got object"}
+{"id":"schema/ast-empty-parent-field","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array with length between 1 and undefined at 1.desiredQueriesPatch.0.ast.where.related.correlation.parentField. Got array with length 2"}
+{"id":"schema/ast-not-object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.desiredQueriesPatch.0.ast. Got 5"}
+{"id":"schema/ast-table-not-string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.desiredQueriesPatch.0.ast.table. Got 5"}
+{"id":"schema/patch-bad-op","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"put\", \"del\" or \"clear\" at 1.desiredQueriesPatch.0.op Got \"nope\""}
+{"id":"schema/patch-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property x at 1.desiredQueriesPatch.0"}
+{"id":"schema/patch-missing-hash","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property hash at 1.desiredQueriesPatch.0"}
+{"id":"schema/patch-hash-not-string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.desiredQueriesPatch.0.hash. Got 7"}
+{"id":"schema/patch-not-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.desiredQueriesPatch. Got object"}
+{"id":"schema/patch-null-ttl","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected number at 1.desiredQueriesPatch.0.ttl. Got null"}
+{"id":"schema/push-mutation-bad-type","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"crud\" or \"custom\" at 1.mutations.0.type Got \"other\""}
+{"id":"schema/push-mutation-missing-type","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property type at 1.mutations.0"}
+{"id":"schema/push-crud-args-arity","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array with length 1 at 1.mutations.0.args. Got array with length 2"}
+{"id":"schema/push-crud-bad-name","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"_zero_crud\" at 1.mutations.0.name Got \"mutate\""}
+{"id":"schema/push-crud-op-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property x at 1.mutations.0.args.0.ops.0"}
+{"id":"schema/push-crud-delete-value-object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string, number or boolean at 1.mutations.0.args.0.ops.0.value.id. Got object"}
+{"id":"schema/push-custom-args-not-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.mutations.0.args. Got object"}
+{"id":"schema/push-body-root-missing","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property mutations at 1"}
+{"id":"schema/inspect-ast-bad","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.ast.table. Got 5"}
+{"id":"schema/inspect-ast-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property zzz at 1.ast"}
+{"id":"schema/body-root-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ping\",{\"x\":1}]"}
+{"id":"schema/init-client-schema-bad","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"string\", \"number\", \"boolean\", \"null\" or \"json\" at 1.clientSchema.tables.t.columns.id.type Got \"nope\""}
+{"id":"string/updateAuth.auth/plain","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/empty","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/lone-high-surr","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/lone-low-surr","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/valid-pair-escaped","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/pair-then-lone","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/nul-escape","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/noncharacter","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/escaped-backslash","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/escaped-quote","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/escaped-solidus","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/tab-newline","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 27 (line 1 column 28)"}
+{"id":"string/updateAuth.auth/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 24 (line 1 column 25)"}
+{"id":"string/updateAuth.auth/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 24 (line 1 column 25)"}
+{"id":"string/updateAuth.auth/long","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/whitespace-pad","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/combining","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/sql-ish","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/updateAuth.auth/like-meta","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"wrongtype/updateAuth.auth/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got null"}
+{"id":"wrongtype/updateAuth.auth/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got true"}
+{"id":"wrongtype/updateAuth.auth/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got 42"}
+{"id":"wrongtype/updateAuth.auth/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got array"}
+{"id":"wrongtype/updateAuth.auth/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got object"}
+{"id":"wrongtype/updateAuth.auth/string","accepted":true,"tag":"updateAuth","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/plain","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/empty","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/lone-high-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/lone-low-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/valid-pair-escaped","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/pair-then-lone","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/nul-escape","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/noncharacter","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/escaped-backslash","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/escaped-quote","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/escaped-solidus","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/tab-newline","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 30 (line 1 column 31)"}
+{"id":"string/pull.clientGroupID/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 27 (line 1 column 28)"}
+{"id":"string/pull.clientGroupID/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 27 (line 1 column 28)"}
+{"id":"string/pull.clientGroupID/long","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/whitespace-pad","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/combining","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/sql-ish","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.clientGroupID/like-meta","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"wrongtype/pull.clientGroupID/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got null"}
+{"id":"wrongtype/pull.clientGroupID/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got true"}
+{"id":"wrongtype/pull.clientGroupID/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got 42"}
+{"id":"wrongtype/pull.clientGroupID/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got array"}
+{"id":"wrongtype/pull.clientGroupID/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got object"}
+{"id":"wrongtype/pull.clientGroupID/string","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/plain","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/empty","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/lone-high-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/lone-low-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/valid-pair-escaped","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/pair-then-lone","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/nul-escape","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/noncharacter","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/escaped-backslash","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/escaped-quote","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/escaped-solidus","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/tab-newline","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 61 (line 1 column 62)"}
+{"id":"string/pull.requestID/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 58 (line 1 column 59)"}
+{"id":"string/pull.requestID/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 58 (line 1 column 59)"}
+{"id":"string/pull.requestID/long","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/whitespace-pad","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/combining","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/sql-ish","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.requestID/like-meta","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"wrongtype/pull.requestID/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got null"}
+{"id":"wrongtype/pull.requestID/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got true"}
+{"id":"wrongtype/pull.requestID/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got 42"}
+{"id":"wrongtype/pull.requestID/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got array"}
+{"id":"wrongtype/pull.requestID/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got object"}
+{"id":"wrongtype/pull.requestID/string","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/plain","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/empty","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/lone-high-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/lone-low-surr","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/valid-pair-escaped","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/pair-then-lone","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/nul-escape","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/noncharacter","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/escaped-backslash","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/escaped-quote","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/escaped-solidus","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/tab-newline","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 44 (line 1 column 45)"}
+{"id":"string/pull.cookie/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 41 (line 1 column 42)"}
+{"id":"string/pull.cookie/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 41 (line 1 column 42)"}
+{"id":"string/pull.cookie/long","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/whitespace-pad","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/combining","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/sql-ish","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/pull.cookie/like-meta","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"wrongtype/pull.cookie/null","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"wrongtype/pull.cookie/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got true"}
+{"id":"wrongtype/pull.cookie/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 42"}
+{"id":"wrongtype/pull.cookie/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got array"}
+{"id":"wrongtype/pull.cookie/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got object"}
+{"id":"wrongtype/pull.cookie/string","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/plain","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/empty","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/lone-high-surr","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/lone-low-surr","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/valid-pair-escaped","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/pair-then-lone","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/nul-escape","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/noncharacter","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/escaped-backslash","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/escaped-quote","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/escaped-solidus","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/tab-newline","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 36 (line 1 column 37)"}
+{"id":"string/deleteClients.clientIDs0/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 33 (line 1 column 34)"}
+{"id":"string/deleteClients.clientIDs0/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 33 (line 1 column 34)"}
+{"id":"string/deleteClients.clientIDs0/long","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/whitespace-pad","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/combining","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/sql-ish","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/deleteClients.clientIDs0/like-meta","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"wrongtype/deleteClients.clientIDs0/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientIDs.0. Got null"}
+{"id":"wrongtype/deleteClients.clientIDs0/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientIDs.0. Got true"}
+{"id":"wrongtype/deleteClients.clientIDs0/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientIDs.0. Got 42"}
+{"id":"wrongtype/deleteClients.clientIDs0/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientIDs.0. Got array"}
+{"id":"wrongtype/deleteClients.clientIDs0/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientIDs.0. Got object"}
+{"id":"wrongtype/deleteClients.clientIDs0/string","accepted":true,"tag":"deleteClients","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/plain","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/empty","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/lone-high-surr","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/lone-low-surr","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/valid-pair-escaped","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/pair-then-lone","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/nul-escape","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/noncharacter","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/escaped-backslash","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/escaped-quote","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/escaped-solidus","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/tab-newline","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 63 (line 1 column 64)"}
+{"id":"string/initConnection.userPushURL/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 60 (line 1 column 61)"}
+{"id":"string/initConnection.userPushURL/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 60 (line 1 column 61)"}
+{"id":"string/initConnection.userPushURL/long","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/whitespace-pad","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/combining","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/sql-ish","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.userPushURL/like-meta","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"wrongtype/initConnection.userPushURL/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.userPushURL. Got null"}
+{"id":"wrongtype/initConnection.userPushURL/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.userPushURL. Got true"}
+{"id":"wrongtype/initConnection.userPushURL/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.userPushURL. Got 42"}
+{"id":"wrongtype/initConnection.userPushURL/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.userPushURL. Got array"}
+{"id":"wrongtype/initConnection.userPushURL/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.userPushURL. Got object"}
+{"id":"wrongtype/initConnection.userPushURL/string","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/plain","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/empty","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/lone-high-surr","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/lone-low-surr","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/valid-pair-escaped","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/pair-then-lone","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/nul-escape","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/noncharacter","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/escaped-backslash","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/escaped-quote","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/escaped-solidus","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/tab-newline","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 63 (line 1 column 64)"}
+{"id":"string/initConnection.traceparent/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 60 (line 1 column 61)"}
+{"id":"string/initConnection.traceparent/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 60 (line 1 column 61)"}
+{"id":"string/initConnection.traceparent/long","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/whitespace-pad","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/combining","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/sql-ish","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/initConnection.traceparent/like-meta","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"wrongtype/initConnection.traceparent/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got null"}
+{"id":"wrongtype/initConnection.traceparent/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got true"}
+{"id":"wrongtype/initConnection.traceparent/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got 42"}
+{"id":"wrongtype/initConnection.traceparent/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got array"}
+{"id":"wrongtype/initConnection.traceparent/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got object"}
+{"id":"wrongtype/initConnection.traceparent/string","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/plain","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/empty","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/lone-high-surr","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/lone-low-surr","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/valid-pair-escaped","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/pair-then-lone","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/nul-escape","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/noncharacter","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/escaped-backslash","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/escaped-quote","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/escaped-solidus","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/tab-newline","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 69 (line 1 column 70)"}
+{"id":"string/changeDesiredQueries.traceparent/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 66 (line 1 column 67)"}
+{"id":"string/changeDesiredQueries.traceparent/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 66 (line 1 column 67)"}
+{"id":"string/changeDesiredQueries.traceparent/long","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/whitespace-pad","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/combining","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/sql-ish","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/changeDesiredQueries.traceparent/like-meta","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"wrongtype/changeDesiredQueries.traceparent/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got null"}
+{"id":"wrongtype/changeDesiredQueries.traceparent/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got true"}
+{"id":"wrongtype/changeDesiredQueries.traceparent/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got 42"}
+{"id":"wrongtype/changeDesiredQueries.traceparent/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got array"}
+{"id":"wrongtype/changeDesiredQueries.traceparent/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.traceparent. Got object"}
+{"id":"wrongtype/changeDesiredQueries.traceparent/string","accepted":true,"tag":"changeDesiredQueries","stage":null,"message":null}
+{"id":"string/inspect.id/plain","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/empty","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/lone-high-surr","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/lone-low-surr","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/valid-pair-escaped","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/pair-then-lone","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/nul-escape","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/noncharacter","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/escaped-backslash","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/escaped-quote","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/escaped-solidus","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/tab-newline","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 22 (line 1 column 23)"}
+{"id":"string/inspect.id/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 19 (line 1 column 20)"}
+{"id":"string/inspect.id/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 19 (line 1 column 20)"}
+{"id":"string/inspect.id/long","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/whitespace-pad","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/combining","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/sql-ish","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/inspect.id/like-meta","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"wrongtype/inspect.id/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got null"}
+{"id":"wrongtype/inspect.id/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got true"}
+{"id":"wrongtype/inspect.id/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got 42"}
+{"id":"wrongtype/inspect.id/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got array"}
+{"id":"wrongtype/inspect.id/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got object"}
+{"id":"wrongtype/inspect.id/string","accepted":true,"tag":"inspect","stage":null,"message":null}
+{"id":"string/push.clientGroupID/plain","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/empty","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/lone-high-surr","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/lone-low-surr","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/valid-pair-escaped","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/pair-then-lone","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/nul-escape","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/noncharacter","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/escaped-backslash","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/escaped-quote","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/escaped-solidus","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/tab-newline","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/truncated-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad Unicode escape in JSON at position 30 (line 1 column 31)"}
+{"id":"string/push.clientGroupID/bad-escape","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad escaped character in JSON at position 27 (line 1 column 28)"}
+{"id":"string/push.clientGroupID/raw-control","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Bad control character in string literal in JSON at position 27 (line 1 column 28)"}
+{"id":"string/push.clientGroupID/long","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/whitespace-pad","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/combining","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/sql-ish","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"string/push.clientGroupID/like-meta","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"wrongtype/push.clientGroupID/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got null"}
+{"id":"wrongtype/push.clientGroupID/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got true"}
+{"id":"wrongtype/push.clientGroupID/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got 42"}
+{"id":"wrongtype/push.clientGroupID/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got array"}
+{"id":"wrongtype/push.clientGroupID/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got object"}
+{"id":"wrongtype/push.clientGroupID/string","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/zero","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/neg-zero","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/neg-one","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/int32-max-plus","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/max-safe","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/max-safe-plus-1","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/max-safe-plus-2","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/min-safe","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/fractional","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/overflow-f64","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/neg-overflow-f64","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/tiny","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/exp-upper","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.pushVersion/leading-plus","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token '+', ...\"hVersion\":+1,\"schema\"... is not valid JSON"}
+{"id":"number/push.pushVersion/leading-zero","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected number in JSON at position 60 (line 1 column 61)"}
+{"id":"number/push.pushVersion/hex","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Expected ',' or '}' after property value in JSON at position 60 (line 1 column 61)"}
+{"id":"number/push.pushVersion/bare-inf","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'I', ...\"hVersion\":Infinity,\"\"... is not valid JSON"}
+{"id":"number/push.pushVersion/bare-nan","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'N', ...\"hVersion\":NaN,\"schem\"... is not valid JSON"}
+{"id":"number/push.timestamp/zero","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/neg-zero","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/neg-one","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/int32-max-plus","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/max-safe","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/max-safe-plus-1","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/max-safe-plus-2","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/min-safe","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/fractional","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/overflow-f64","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/neg-overflow-f64","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/tiny","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/exp-upper","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"number/push.timestamp/leading-plus","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token '+', ...\"imestamp\":+1,\"reques\"... is not valid JSON"}
+{"id":"number/push.timestamp/leading-zero","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected number in JSON at position 92 (line 1 column 93)"}
+{"id":"number/push.timestamp/hex","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Expected ',' or '}' after property value in JSON at position 92 (line 1 column 93)"}
+{"id":"number/push.timestamp/bare-inf","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'I', ...\"imestamp\":Infinity,\"\"... is not valid JSON"}
+{"id":"number/push.timestamp/bare-nan","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'N', ...\"imestamp\":NaN,\"reque\"... is not valid JSON"}
+{"id":"number/ackMutationResponses.id/zero","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/neg-zero","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/neg-one","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/int32-max-plus","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/max-safe","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/max-safe-plus-1","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/max-safe-plus-2","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/min-safe","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/fractional","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/overflow-f64","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/neg-overflow-f64","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/tiny","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/exp-upper","accepted":true,"tag":"ackMutationResponses","stage":null,"message":null}
+{"id":"number/ackMutationResponses.id/leading-plus","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token '+', ...\"es\",{\"id\":+1,\"client\"... is not valid JSON"}
+{"id":"number/ackMutationResponses.id/leading-zero","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected number in JSON at position 31 (line 1 column 32)"}
+{"id":"number/ackMutationResponses.id/hex","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Expected ',' or '}' after property value in JSON at position 31 (line 1 column 32)"}
+{"id":"number/ackMutationResponses.id/bare-inf","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'I', ...\"es\",{\"id\":Infinity,\"\"... is not valid JSON"}
+{"id":"number/ackMutationResponses.id/bare-nan","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'N', ...\"es\",{\"id\":NaN,\"clien\"... is not valid JSON"}
+{"id":"number/pull.cookie/zero","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 0"}
+{"id":"number/pull.cookie/neg-zero","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 0"}
+{"id":"number/pull.cookie/neg-one","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got -1"}
+{"id":"number/pull.cookie/int32-max-plus","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 2147483648"}
+{"id":"number/pull.cookie/max-safe","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 9007199254740991"}
+{"id":"number/pull.cookie/max-safe-plus-1","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 9007199254740992"}
+{"id":"number/pull.cookie/max-safe-plus-2","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 9007199254740992"}
+{"id":"number/pull.cookie/min-safe","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got -9007199254740992"}
+{"id":"number/pull.cookie/fractional","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 1.5"}
+{"id":"number/pull.cookie/overflow-f64","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got null"}
+{"id":"number/pull.cookie/neg-overflow-f64","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got null"}
+{"id":"number/pull.cookie/tiny","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 0"}
+{"id":"number/pull.cookie/exp-upper","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string or null at 1.cookie. Got 100000"}
+{"id":"number/pull.cookie/leading-plus","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token '+', ...\",\"cookie\":+1,\"reques\"... is not valid JSON"}
+{"id":"number/pull.cookie/leading-zero","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected number in JSON at position 40 (line 1 column 41)"}
+{"id":"number/pull.cookie/hex","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Expected ',' or '}' after property value in JSON at position 40 (line 1 column 41)"}
+{"id":"number/pull.cookie/bare-inf","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'I', ...\",\"cookie\":Infinity,\"\"... is not valid JSON"}
+{"id":"number/pull.cookie/bare-nan","accepted":false,"tag":null,"stage":"json","message":"SyntaxError: Unexpected token 'N', ...\",\"cookie\":NaN,\"reque\"... is not valid JSON"}
+{"id":"wrongtype/initConnection.clientSchema/null","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema. Got null"}
+{"id":"wrongtype/initConnection.clientSchema/true","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema. Got true"}
+{"id":"wrongtype/initConnection.clientSchema/number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema. Got 42"}
+{"id":"wrongtype/initConnection.clientSchema/array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema. Got array"}
+{"id":"wrongtype/initConnection.clientSchema/object","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property tables at 1.clientSchema"}
+{"id":"wrongtype/initConnection.clientSchema/string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema. Got \"s\""}
+{"id":"clientschema/empty-tables","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"clientschema/one-table","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"clientschema/all-value-types","accepted":true,"tag":"initConnection","stage":null,"message":null}
+{"id":"clientschema/no-tables-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property tables at 1.clientSchema"}
+{"id":"clientschema/unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property extra at 1.clientSchema"}
+{"id":"clientschema/tables-array","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected object at 1.clientSchema.tables. Got array"}
+{"id":"clientschema/table-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property x at 1.clientSchema.tables.t"}
+{"id":"clientschema/table-no-columns","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property columns at 1.clientSchema.tables.t"}
+{"id":"clientschema/table-no-pk","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property primaryKey at 1.clientSchema.tables.t"}
+{"id":"clientschema/column-bad-type","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"string\", \"number\", \"boolean\", \"null\" or \"json\" at 1.clientSchema.tables.t.columns.id.type Got \"date\""}
+{"id":"clientschema/column-no-type","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property type at 1.clientSchema.tables.t.columns.id"}
+{"id":"clientschema/column-unknown-key","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Unexpected property opt at 1.clientSchema.tables.t.columns.id"}
+{"id":"clientschema/pk-number","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientSchema.tables.t.primaryKey.0. Got 1"}
+{"id":"clientschema/pk-string","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.clientSchema.tables.t.primaryKey. Got \"id\""}
+{"id":"missing/updateAuth/auth","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property auth at 1"}
+{"id":"nullfield/updateAuth/auth","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.auth. Got null"}
+{"id":"extrafield/updateAuth","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"updateAuth\",{\"auth\":\"tok\",\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/pull/clientGroupID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property clientGroupID at 1"}
+{"id":"nullfield/pull/clientGroupID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got null"}
+{"id":"missing/pull/cookie","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property cookie at 1"}
+{"id":"nullfield/pull/cookie","accepted":true,"tag":"pull","stage":null,"message":null}
+{"id":"missing/pull/requestID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property requestID at 1"}
+{"id":"nullfield/pull/requestID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got null"}
+{"id":"extrafield/pull","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"pull\",{\"clientGroupID\":\"g1\",\"cookie\":null,\"requestID\":\"r1\",\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/changeDesiredQueries/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property desiredQueriesPatch at 1"}
+{"id":"nullfield/changeDesiredQueries/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.desiredQueriesPatch. Got null"}
+{"id":"extrafield/changeDesiredQueries","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"changeDesiredQueries\",{\"desiredQueriesPatch\":[],\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/initConnection/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property desiredQueriesPatch at 1"}
+{"id":"nullfield/initConnection/desiredQueriesPatch","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.desiredQueriesPatch. Got null"}
+{"id":"extrafield/initConnection","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"initConnection\",{\"desiredQueriesPatch\":[],\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/inspect/id","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property id at 1"}
+{"id":"nullfield/inspect/id","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.id. Got null"}
+{"id":"missing/inspect/op","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property op at 1"}
+{"id":"nullfield/inspect/op","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected literal value \"queries\", \"metrics\", \"version\", \"authenticate\" or \"analyze-query\" at 1.op Got null"}
+{"id":"extrafield/inspect","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"inspect\",{\"id\":\"i1\",\"op\":\"version\",\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/ackMutationResponses/id","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property id at 1"}
+{"id":"nullfield/ackMutationResponses/id","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected number at 1.id. Got null"}
+{"id":"missing/ackMutationResponses/clientID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property clientID at 1"}
+{"id":"nullfield/ackMutationResponses/clientID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientID. Got null"}
+{"id":"extrafield/ackMutationResponses","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"ackMutationResponses\",{\"id\":1,\"clientID\":\"c1\",\"unknownExtraField\":\"x\"}]"}
+{"id":"missing/push/clientGroupID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property clientGroupID at 1"}
+{"id":"nullfield/push/clientGroupID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.clientGroupID. Got null"}
+{"id":"missing/push/mutations","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property mutations at 1"}
+{"id":"nullfield/push/mutations","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected array at 1.mutations. Got null"}
+{"id":"missing/push/pushVersion","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property pushVersion at 1"}
+{"id":"nullfield/push/pushVersion","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected number at 1.pushVersion. Got null"}
+{"id":"missing/push/schemaVersion","accepted":true,"tag":"push","stage":null,"message":null}
+{"id":"nullfield/push/schemaVersion","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected number at 1.schemaVersion. Got null"}
+{"id":"missing/push/timestamp","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property timestamp at 1"}
+{"id":"nullfield/push/timestamp","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected number at 1.timestamp. Got null"}
+{"id":"missing/push/requestID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Missing property requestID at 1"}
+{"id":"nullfield/push/requestID","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Expected string at 1.requestID. Got null"}
+{"id":"extrafield/push","accepted":false,"tag":null,"stage":"valita","message":"TypeError: Invalid union value: [\"push\",{\"clientGroupID\":\"g1\",\"mutations\":[],\"pushVersion\":1,\"schemaVersion\":1,\"timestamp\":1,\"requestID\":\"r1\",\"unknownExtraField\":\"x\"}]"}

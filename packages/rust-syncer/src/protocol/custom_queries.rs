@@ -29,7 +29,7 @@ pub struct TransformedQuery {
 /// validate, then hand the JSON back unchanged.
 fn passthrough_ast<'de, D: Deserializer<'de>>(d: D) -> Result<Value, D::Error> {
     let value = Value::deserialize(d)?;
-    passthrough::Ast::deserialize(&value).map_err(serde::de::Error::custom)?;
+    super::validate_nested::<passthrough::Ast, D::Error>(&value, &[])?;
     Ok(value)
 }
 
@@ -59,14 +59,12 @@ pub struct ParseErroredQuery {
 
 /// `erroredQuerySchema` (custom-queries.ts:36-39): `app | parse`, told apart
 /// by the `error` literal.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "error")]
+#[derive(Debug, Clone)]
 pub enum ErroredQuery {
-    #[serde(rename = "app")]
     App(AppErroredQuery),
-    #[serde(rename = "parse")]
     Parse(ParseErroredQuery),
 }
+crate::tagged_union!(ErroredQuery, "error", ["app" => App(AppErroredQuery), "parse" => Parse(ParseErroredQuery)]);
 
 /// `transformResponseBodySchema` (custom-queries.ts:42-44): an array of the
 /// `transformedQuery | erroredQuery` union, which query-server.ts names

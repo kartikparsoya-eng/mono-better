@@ -53,6 +53,15 @@ use rust_syncer::protocol::parse_upstream;
 ///    v.object({})` requires an object). Rust checks `arr.len() < 2` and, for
 ///    `ping`, ignores the body entirely.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
+    // R7 — both reject, but the CLASS differs: `serde_json` stops at its
+    // recursion limit (128) while parsing, so rust says `SyntaxError`; V8
+    // parses 135 levels fine and valita then rejects the value, so TS says
+    // `TypeError: Invalid union value: …`. Lifting serde's limit would trade
+    // a bounded parse for stack exhaustion on hostile input.
+    ("structural/deep-nesting", "R7"),
+    // R6, `pull.cookie` slot: `1e309` fails the JSON parse in rust (see R6).
+    ("number/pull.cookie/overflow-f64", "R6"),
+    ("number/pull.cookie/neg-overflow-f64", "R6"),
     // R6 — 6 frames. `1e309` overflows f64. JS coerces the literal to
     // `Infinity` and valita's `v.number()` accepts it; `serde_json` refuses to
     // construct an out-of-range number and fails the FRAME parse, before any
@@ -127,7 +136,30 @@ fn rust_frame_parse_matches_the_ts_upstream_schema() {
         let ts_accepted = expected["accepted"].as_bool().expect("accepted flag");
 
         let diverged = match (parse_upstream(frame), ts_accepted) {
-            (Ok(_), true) | (Err(_), false) => None,
+            (Ok(_), true) => None,
+            // M15: the InvalidMessage TEXT is part of the contract —
+            // `String(e)` (connection.ts:207). A valita rejection must render
+            // byte-for-byte (`shared/src/valita.ts` → `rust_cvr::shared::valita`);
+            // a JSON.parse rejection shares only the class, `SyntaxError: `, as
+            // the rest of the text is V8's.
+            (Err(e), false) => {
+                let ts_message = expected["message"].as_str().unwrap_or_default();
+                let rust_message = e.to_string();
+                let same = match expected["stage"].as_str() {
+                    Some("valita") => rust_message == ts_message,
+                    _ => {
+                        rust_message.starts_with("SyntaxError: ")
+                            && ts_message.starts_with("SyntaxError: ")
+                    }
+                };
+                if same {
+                    None
+                } else {
+                    Some(format!(
+                        "{id}: both reject, but the message differs\n    TS:   {ts_message}\n    rust: {rust_message}"
+                    ))
+                }
+            }
             (Err(e), true) => Some(format!("{id}: TS accepted, rust REJECTED ({e})")),
             (Ok(_), false) => Some(format!(
                 "{id}: TS rejected at {}, rust ACCEPTED",

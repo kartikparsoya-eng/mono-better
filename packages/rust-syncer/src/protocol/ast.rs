@@ -46,7 +46,7 @@ macro_rules! ast_schema {
             pub related: Option<Vec<CorrelatedSubquery>>,
             #[serde(default, deserialize_with = "optional_no_null")]
             pub limit: Option<serde_json::Number>,
-            #[serde(default, deserialize_with = "optional_no_null")]
+            #[serde(default, deserialize_with = "ordering_elements")]
             pub order_by: Option<Vec<OrderingElement>>,
             #[serde(default, deserialize_with = "optional_no_null")]
             pub start: Option<Bound>,
@@ -54,6 +54,25 @@ macro_rules! ast_schema {
 
         /// `orderingElementSchema` (ast.ts:23-25): `[selector, 'asc' | 'desc']`.
         pub type OrderingElement = (String, Direction);
+
+        /// `orderBy: v.array(orderingElementSchema).optional()` (ast.ts:190): each
+        /// element an exact 2-tuple, `null` rejected like every `.optional()`.
+        fn ordering_elements<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<Vec<OrderingElement>>, D::Error> {
+            let value = Value::deserialize(d)?;
+            let items = Vec::<Value>::deserialize(&value).map_err(serde::de::Error::custom)?;
+            let mut out = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                out.push(crate::protocol::exact_tuple::<OrderingElement, D::Error>(
+                    item,
+                    2,
+                    &[crate::protocol::valita::Key::Index(index)],
+                )?);
+            }
+            Ok(Some(out))
+        }
+
 
         /// `v.literalUnion('asc', 'desc')` (ast.ts:24).
         #[derive(Debug, Clone, Copy, Deserialize)]
@@ -76,18 +95,14 @@ macro_rules! ast_schema {
 
         /// `conditionSchema` (ast.ts:129-134), discriminated by `type`. Each variant
         /// wraps its own object schema so `deny_unknown_fields` applies per object.
-        #[derive(Debug, Clone, Deserialize)]
-        #[serde(tag = "type")]
+        #[derive(Debug, Clone)]
         pub enum Condition {
-            #[serde(rename = "simple")]
             Simple(SimpleCondition),
-            #[serde(rename = "and")]
             And(Conjunction),
-            #[serde(rename = "or")]
             Or(Disjunction),
-            #[serde(rename = "correlatedSubquery")]
             CorrelatedSubquery(CorrelatedSubqueryCondition),
         }
+        $crate::tagged_union!(Condition, "type", ["simple" => Simple(SimpleCondition), "and" => And(Conjunction), "or" => Or(Disjunction), "correlatedSubquery" => CorrelatedSubquery(CorrelatedSubqueryCondition)]);
 
         /// `simpleConditionSchema` (ast.ts:108-113): `left` is any condition value,
         /// `right` is a parameter or a literal — never a column.
@@ -133,27 +148,22 @@ macro_rules! ast_schema {
         }
 
         /// `conditionValueSchema` (ast.ts:100-104): literal | column | parameter.
-        #[derive(Debug, Clone, Deserialize)]
-        #[serde(tag = "type")]
+        #[derive(Debug, Clone)]
         pub enum ConditionValue {
-            #[serde(rename = "literal")]
             Literal(LiteralReference),
-            #[serde(rename = "column")]
             Column(ColumnReference),
-            #[serde(rename = "static")]
             Static(ParameterReference),
         }
+        $crate::tagged_union!(ConditionValue, "type", ["literal" => Literal(LiteralReference), "column" => Column(ColumnReference), "static" => Static(ParameterReference)]);
 
         /// The `right` side of `simpleConditionSchema` (ast.ts:112):
         /// `v.union(parameterReferenceSchema, literalReferenceSchema)`.
-        #[derive(Debug, Clone, Deserialize)]
-        #[serde(tag = "type")]
+        #[derive(Debug, Clone)]
         pub enum RightValue {
-            #[serde(rename = "static")]
             Static(ParameterReference),
-            #[serde(rename = "literal")]
             Literal(LiteralReference),
         }
+        $crate::tagged_union!(RightValue, "type", ["static" => Static(ParameterReference), "literal" => Literal(LiteralReference)]);
 
         /// `literalReferenceSchema` (ast.ts:57-66).
         #[derive(Debug, Clone, Deserialize)]
@@ -307,10 +317,9 @@ pub use strict::*;
 fn compound_key<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     let key = Vec::<String>::deserialize(d)?;
     if key.is_empty() {
-        return Err(serde::de::Error::invalid_length(
-            0,
-            &"a compound key with at least one column",
-        ));
+        // `v.tuple([v.string()]).concat(v.array(v.string()))`: valita reports
+        // `invalid_length` with `minLength: 1` and no `maxLength`.
+        return Err(serde::de::Error::invalid_length(0, &"at least 1 column"));
     }
     Ok(key)
 }
@@ -320,7 +329,7 @@ fn compound_key<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error
 /// `null` is rejected like every valita `.optional()`.
 pub fn optional_strict_ast<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
     let value = Value::deserialize(d)?;
-    Ast::deserialize(&value).map_err(serde::de::Error::custom)?;
+    super::validate_nested::<Ast, D::Error>(&value, &[])?;
     Ok(Some(value))
 }
 

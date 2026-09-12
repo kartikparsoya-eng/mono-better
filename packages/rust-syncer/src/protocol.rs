@@ -75,6 +75,99 @@ impl<'de> serde::Deserialize<'de> for JsNumber {
     }
 }
 
+/// A `v.union` of objects told apart by one literal key, deserialized the way
+/// valita resolves it: read the discriminator, then parse the value as that
+/// member. serde's `#[serde(tag)]` would do the same but BUFFERS the content,
+/// which loses every path below the union for `serde_path_to_error` — and
+/// with it the `at a.b.c` of the TS message. Rust-only machinery; each
+/// invocation names the TS union it stands for.
+///
+/// The discriminator key is removed from a copy of the object before the
+/// member parses it (the members are `deny_unknown_fields`); the copy keeps
+/// every path and value the message may cite.
+#[macro_export]
+macro_rules! tagged_union {
+    ($name:ident, $tag:literal, [$($lit:literal => $variant:ident($member:ty)),+ $(,)?]) => {
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                use serde::de::Error as _;
+                use $crate::protocol::valita::{deserialize_at, encode_nested, Issue, Key, ValitaIssue};
+                let value = serde_json::Value::deserialize(d)?;
+                let fail = |issue: ValitaIssue| D::Error::custom(encode_nested(&issue));
+                let Some(object) = value.as_object() else {
+                    return Err(fail(ValitaIssue {
+                        issue: Issue::InvalidType { expected: vec!["object".to_string()] },
+                        path: vec![],
+                    }));
+                };
+                let tag = object.get($tag).and_then(serde_json::Value::as_str);
+                $(
+                    if tag == Some($lit) {
+                        let mut inner = value.clone();
+                        if let Some(m) = inner.as_object_mut() {
+                            // `shift_remove`: `remove` swaps the last key in, which
+                            // reorders the unknown keys valita lists.
+                            m.shift_remove($tag);
+                        }
+                        return deserialize_at::<$member>(&inner, &[], &inner)
+                            .map($name::$variant)
+                            .map_err(fail);
+                    }
+                )+
+                let issue = if object.contains_key($tag) {
+                    Issue::InvalidLiteral { expected: vec![$(serde_json::Value::from($lit)),+] }
+                } else {
+                    Issue::MissingValue
+                };
+                Err(fail(ValitaIssue { issue, path: vec![Key::Prop($tag.to_string())] }))
+            }
+        }
+    };
+}
+
+/// Parse a value as a fixed-size `v.tuple([...])` of `size` elements.
+/// serde's derived tuple visitor names the size only when the array is too
+/// SHORT (`expected a tuple of size N`); a longer array is `fewer elements in
+/// array`, which no message can be built from — so the length is checked
+/// here first, reporting valita's `invalid_length` at `base`.
+pub fn exact_tuple<T, E>(
+    value: &serde_json::Value,
+    size: usize,
+    base: &[valita::Key],
+) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    if let Some(items) = value.as_array()
+        && items.len() != size
+    {
+        return Err(E::custom(valita::encode_nested(&valita::ValitaIssue {
+            issue: valita::Issue::InvalidLength {
+                min: size,
+                max: Some(size),
+            },
+            path: base.to_vec(),
+        })));
+    }
+    valita::deserialize_at::<T>(value, base, value)
+        .map_err(|issue| E::custom(valita::encode_nested(&issue)))
+}
+
+/// Validate a nested value against `T` on its own, reporting a failure the
+/// way TS's `parse` would once the enclosing parse splices the paths back
+/// together (`rust_cvr::shared::valita::deserialize_at`). For the
+/// `deserialize_with` helpers that validate and keep the JSON.
+pub fn validate_nested<T, E>(value: &serde_json::Value, base: &[valita::Key]) -> Result<(), E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    valita::deserialize_at::<T>(value, base, value)
+        .map(|_| ())
+        .map_err(|issue| E::custom(valita::encode_nested(&issue)))
+}
+
 /// valita `.nullable().optional()` for serde: the outer `Option` is presence
 /// (serde `default` fills absent), the inner one is `null`. Rust-only adapter,
 /// the twin of [`optional_no_null`] for the tri-state fields.
@@ -107,6 +200,8 @@ where
 {
     T::deserialize(d).map(Some)
 }
+
+pub use rust_cvr::shared::valita;
 
 pub mod analyze_query_result;
 pub mod ast;

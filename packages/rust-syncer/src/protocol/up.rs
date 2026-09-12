@@ -5,6 +5,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::valita;
+
 //
 // All upstream messages are `["messageType", body]` tuples.
 // We deserialize the tag first, then the body.
@@ -97,7 +99,7 @@ fn replace_unpaired_surrogate_escapes(text: &str) -> Option<String> {
 /// (zero-cache/src/workers/connection.ts:203).
 ///
 /// TS parses each ws frame with `JSON.parse` and then `valita.parse(value,
-/// upstreamSchema)` (connection.ts:204). JS strings are UTF-16, so an unpaired
+/// upstreamSchema)` (workers/connection.ts:204). JS strings are UTF-16, so an unpaired
 /// surrogate is a legal string value: `JSON.parse` accepts `"\ud800"`, and
 /// valita's string check is a `typeof` test, so NEITHER layer rejects it. Rust
 /// `String` is UTF-8 and cannot hold a lone surrogate, so `serde_json` rejects
@@ -126,19 +128,64 @@ fn replace_unpaired_surrogate_escapes(text: &str) -> Option<String> {
 /// there would still fail on the frames this now accepts, collapsing the body
 /// to `Null` — an empty `initConnection` context breaks push auth downstream.
 pub fn parse_frame_json(text: &str) -> Result<Vec<Value>, serde_json::Error> {
-    match serde_json::from_str(text) {
-        Ok(arr) => Ok(arr),
+    let value: Value = match serde_json::from_str(text) {
+        Ok(value) => value,
         Err(e) => match replace_unpaired_surrogate_escapes(text) {
-            Some(fixed) => serde_json::from_str(&fixed),
-            None => Err(e),
+            Some(fixed) => serde_json::from_str(&fixed)
+                .map_err(|e| serde::de::Error::custom(format!("SyntaxError: {e}")))?,
+            None => return Err(serde::de::Error::custom(format!("SyntaxError: {e}"))),
         },
+    };
+    match value {
+        Value::Array(arr) => Ok(arr),
+        // Valid JSON that is not an array fails `upstreamSchema`'s tuple union
+        // at the root: valita folds it into `Expected array. Got <value>`.
+        other => Err(serde::de::Error::custom(format!(
+            "TypeError: Expected array. Got {}",
+            valita::to_display(Some(&other))
+        ))),
     }
 }
 
 /// Parse an upstream message from a JSON array `["type", body]`.
 pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {
+    // `Connection.#handleMessage` (connection.ts:203-209) puts `String(e)` in
+    // the `InvalidMessage` body: `SyntaxError: …` from `JSON.parse` (the text
+    // is V8's — serde's wording differs, the class does not), `TypeError: …`
+    // from `valita.parse` (rendered 1:1 by `shared::valita`).
     let arr = parse_frame_json(text)?;
     parse_upstream_array(&arr)
+}
+
+/// The frame-level `v.union` of `upstreamSchema` (up.ts): when every member
+/// fails at the same depth — the type literal, the tuple arity, the body's
+/// own type, or an unknown key directly on the body — TS's message is the
+/// union fallback, `Invalid union value: <frame>` (shared/src/valita.ts:141).
+fn invalid_union(arr: &[Value]) -> serde_json::Error {
+    serde::de::Error::custom(format!(
+        "TypeError: {}",
+        valita::invalid_union_message(&Value::Array(arr.to_vec()))
+    ))
+}
+
+/// Parse a frame's body (`arr[1]`) as `T`; a failure renders TS's message —
+/// the first issue at its path from the frame root, or the union fallback
+/// when the issue sits directly on the body (path `1`).
+fn parse_body<T: serde::de::DeserializeOwned>(
+    body: &Value,
+    arr: &[Value],
+) -> Result<T, serde_json::Error> {
+    valita::deserialize_at::<T>(body, &[], body).map_err(|mut issue| {
+        issue.path.insert(0, valita::Key::Index(1));
+        if issue.path.len() == 1 {
+            return invalid_union(arr);
+        }
+        let frame = Value::Array(arr.to_vec());
+        serde::de::Error::custom(format!(
+            "TypeError: {}",
+            valita::get_message(&issue, &frame)
+        ))
+    })
 }
 
 /// Validate + dispatch an already-parsed `["type", body]` array. Split out of
@@ -149,13 +196,9 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
     // elements — a 3-element array fails the tuple, it is not truncated. Rust
     // checked only `< 2` and ignored the extras.
     if arr.len() != 2 {
-        return Err(serde::de::Error::custom(
-            "message must be a tuple [type, body]",
-        ));
+        return Err(invalid_union(arr));
     }
-    let msg_type = arr[0]
-        .as_str()
-        .ok_or_else(|| serde::de::Error::custom("message type must be a string"))?;
+    let msg_type = arr[0].as_str().ok_or_else(|| invalid_union(arr))?;
     let body = &arr[1];
 
     let result = match msg_type {
@@ -167,50 +210,42 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
             // never reach the init handling (which would otherwise fail
             // later with a misleading InvalidConnectionRequest). Keep the
             // raw Value: the header-delivered init path parses it itself.
-            serde_json::from_value::<InitConnectionBody>(body.clone())?;
+            parse_body::<InitConnectionBody>(body, arr)?;
             Upstream::InitConnection(body.clone())
         }
         "ping" => {
             // TS `pingBodySchema = v.object({})` (ping.ts:3) — the body must be
             // an object, and valita rejects any key in it. Rust ignored the
             // ping body entirely.
-            serde_json::from_value::<PingBody>(body.clone())?;
+            parse_body::<PingBody>(body, arr)?;
             Upstream::Ping
         }
-        "deleteClients" => {
-            Upstream::DeleteClients(serde_json::from_value::<DeleteClientsBody>(body.clone())?)
+        "deleteClients" => Upstream::DeleteClients(parse_body::<DeleteClientsBody>(body, arr)?),
+        "changeDesiredQueries" => {
+            Upstream::ChangeDesiredQueries(parse_body::<ChangeDesiredQueriesBody>(body, arr)?)
         }
-        "changeDesiredQueries" => Upstream::ChangeDesiredQueries(serde_json::from_value::<
-            ChangeDesiredQueriesBody,
-        >(body.clone())?),
         "pull" => {
             // TS validates the body against `pullRequestBodySchema`
             // (pull.ts:5). Rust kept the raw `Value` and validated NOTHING, so
             // wrong types, missing fields and null fields all passed.
             // Keep the raw Value afterwards: the handler forwards it verbatim.
-            serde_json::from_value::<PullRequestBody>(body.clone())?;
+            parse_body::<PullRequestBody>(body, arr)?;
             Upstream::Pull(body.clone())
         }
-        "updateAuth" => {
-            Upstream::UpdateAuth(serde_json::from_value::<UpdateAuthBody>(body.clone())?)
-        }
-        "push" => Upstream::Push(serde_json::from_value::<PushBody>(body.clone())?),
+        "updateAuth" => Upstream::UpdateAuth(parse_body::<UpdateAuthBody>(body, arr)?),
+        "push" => Upstream::Push(parse_body::<PushBody>(body, arr)?),
         "closeConnection" => {
             // TS `closeConnectionBodySchema = v.array(v.unknown())`
             // (close-connection.ts:3) — the body must be an ARRAY. Rust ignored
             // it.
-            serde_json::from_value::<CloseConnectionBody>(body.clone())?;
+            parse_body::<CloseConnectionBody>(body, arr)?;
             Upstream::CloseConnection
         }
-        "inspect" => Upstream::Inspect(serde_json::from_value::<InspectUpBody>(body.clone())?),
-        "ackMutationResponses" => Upstream::AckMutationResponses(serde_json::from_value::<
-            AckMutationResponsesBody,
-        >(body.clone())?),
-        other => {
-            return Err(serde::de::Error::custom(format!(
-                "unknown message type: {other}"
-            )));
+        "inspect" => Upstream::Inspect(parse_body::<InspectUpBody>(body, arr)?),
+        "ackMutationResponses" => {
+            Upstream::AckMutationResponses(parse_body::<AckMutationResponsesBody>(body, arr)?)
         }
+        _ => return Err(invalid_union(arr)),
     };
     Ok(result)
 }

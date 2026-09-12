@@ -1439,7 +1439,10 @@ fn mutation_row_with_string_result_is_rejected_like_ts_mutation_row_schema() {
             }),
         ))
         .expect_err("a string result must fail mutationRowSchema");
-    assert!(err.starts_with("mutationRowSchema: "), "{err}");
+    assert_eq!(
+        err, "TypeError: Expected object at result. Got \"{\\\"ok\\\":true}\"",
+        "{err}"
+    );
 }
 
 /// `clientGroupID: v.string()` is required by `mutationRowSchema` even though

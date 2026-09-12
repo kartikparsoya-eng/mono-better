@@ -36,7 +36,8 @@ pub struct QuerySuccess {
     pub kind: QueryResponseKind,
     /// `v.string().nullable().optional()`: absent, `null`, or a string. TS
     /// reads present-but-`null` as server-validated with no user
-    /// (transform-query.ts:216-221), so absent and `null` stay distinct.
+    /// (`transformResponse.userID`, custom-queries/transform-query.ts:216-221), so
+    /// absent and `null` stay distinct.
     #[serde(default, rename = "userID", deserialize_with = "nullable_optional")]
     pub user_id: Option<Option<String>>,
     pub queries: QueryResponseBody,
@@ -58,17 +59,26 @@ impl<'de> Deserialize<'de> for QueryResponse {
     /// then parse the whole value as that member, so the error names the
     /// field that failed instead of "no variant matched".
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use super::valita::{deepest_union_issue, deserialize_at, encode_nested};
         use serde::de::Error as _;
         let value = Value::deserialize(d)?;
-        let parsed = if value.get("kind").is_some() {
-            if value.get("kind").and_then(Value::as_str) == Some("QueryResponse") {
-                serde_json::from_value(value).map(QueryResponse::Success)
-            } else {
-                serde_json::from_value(value).map(QueryResponse::Failed)
-            }
-        } else {
-            serde_json::from_value(value).map(QueryResponse::Legacy)
-        };
-        parsed.map_err(D::Error::custom)
+        // Each member is tried on the value in schema order; the failure
+        // reported is the deepest one (`getDeepestUnionParseError`).
+        let mut failures = Vec::new();
+        match deserialize_at::<QuerySuccess>(&value, &[], &value) {
+            Ok(v) => return Ok(QueryResponse::Success(v)),
+            Err(issue) => failures.push(issue),
+        }
+        match deserialize_at::<TransformFailedBody>(&value, &[], &value) {
+            Ok(v) => return Ok(QueryResponse::Failed(v)),
+            Err(issue) => failures.push(issue),
+        }
+        match deserialize_at::<TransformResponseMessage>(&value, &[], &value) {
+            Ok(v) => return Ok(QueryResponse::Legacy(v)),
+            Err(issue) => failures.push(issue),
+        }
+        Err(D::Error::custom(encode_nested(&deepest_union_issue(
+            failures,
+        ))))
     }
 }

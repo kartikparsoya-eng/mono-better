@@ -39,16 +39,13 @@ pub struct QueriesClearOp {}
 
 /// `upPatchOpSchema` (queries-patch.ts:26): put | del | clear, discriminated
 /// by `op`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "op")]
+#[derive(Debug, Clone)]
 pub enum UpQueriesPatchOp {
-    #[serde(rename = "put")]
     Put(UpQueriesPutOp),
-    #[serde(rename = "del")]
     Del(QueriesDelOp),
-    #[serde(rename = "clear")]
     Clear(QueriesClearOp),
 }
+crate::tagged_union!(UpQueriesPatchOp, "op", ["put" => Put(UpQueriesPutOp), "del" => Del(QueriesDelOp), "clear" => Clear(QueriesClearOp)]);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -80,8 +77,11 @@ pub fn strict_up_queries_patch<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<UpQueriesPatch, D::Error> {
     let entries = Vec::<Value>::deserialize(d)?;
-    for entry in &entries {
-        UpQueriesPatchOp::deserialize(entry).map_err(serde::de::Error::custom)?;
+    for (index, entry) in entries.iter().enumerate() {
+        super::validate_nested::<UpQueriesPatchOp, D::Error>(
+            entry,
+            &[super::valita::Key::Index(index)],
+        )?;
     }
     Ok(entries)
 }

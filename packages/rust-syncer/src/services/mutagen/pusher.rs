@@ -309,8 +309,8 @@ impl PusherService {
                     match req.send().await {
                         Ok(resp) if resp.status().is_success() => {
                             // The TS loopback relay answers 200 with the API
-                            // server's validated `MutateResponse` verbatim
-                            // (rust-push-relay.ts:166) — which may itself be a
+                            // server's `mutateResponseSchema`-validated response verbatim
+                            // (rust-push-relay.ts:158-167) — which may itself be a
                             // `PushFailed` body. Port of TS `#processPush`'s
                             // response handling (pusher.ts:535-556) followed by
                             // `#fanOutResponses` (pusher.ts:366-486).
@@ -325,9 +325,15 @@ impl PusherService {
                             let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
                                 .map_err(|e| e.to_string())
                                 .and_then(|v| {
-                                    <crate::protocol::mutate_server::MutateResponse as serde::Deserialize>::deserialize(&v)
-                                        .map(|_| v)
-                                        .map_err(|e| e.to_string())
+                                    match crate::protocol::valita::deserialize_at::<
+                                        crate::protocol::mutate_server::MutateResponse,
+                                    >(&v, &[], &v)
+                                    {
+                                        Ok(_) => Ok(v),
+                                        Err(issue) => {
+                                            Err(crate::protocol::valita::get_message(&issue, &v))
+                                        }
+                                    }
                                 });
                             let mut response = match parsed {
                                 Ok(v) => v,
@@ -1309,8 +1315,8 @@ mod tests {
     }
 
     /// TS `#fanOutResponses`: a 2xx response that IS a `PushFailed` body (the
-    /// TS loopback relay forwards the API server's validated response verbatim,
-    /// rust-push-relay.ts:166) fails the clients named in its `mutationIDs`
+    /// TS loopback relay forwards the API server's `mutateResponseSchema`-validated
+    /// response verbatim, rust-push-relay.ts:158-167) fails the clients named in its `mutationIDs`
     /// with that body.
     #[tokio::test]
     async fn drainer_fails_downstream_on_push_failed_body_in_2xx() {

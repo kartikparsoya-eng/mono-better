@@ -30,7 +30,7 @@ impl<'de> serde::Deserialize<'de> for NullableVersion {
             type Value = NullableVersion;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a version string or null")
+                f.write_str("string or null")
             }
 
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {

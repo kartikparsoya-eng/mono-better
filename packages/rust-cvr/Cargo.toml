@@ -11,6 +11,7 @@ path = "src/lib.rs"
 tracing = "0.1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_path_to_error = "0.1"
 rustc-hash = "2"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 parking_lot = "0.12"

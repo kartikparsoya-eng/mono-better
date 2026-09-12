@@ -385,10 +385,23 @@ the port, then the same tests green. Port F's round-trip test
 (`ErrorBody::deserialize(&err)`) is the shape to reuse for any hand-built error
 body: it fails today on any literal the wire enums do not carry.
 
-**Residual, documented:** error *text* — serde's `unknown field \`x\`` vs valita's
-`Unexpected property x at .path` — is unchanged on every `InvalidMessage` /
-`parse` path; `elide` is byte-aware where TS's is char-based (differs only for
-non-ASCII permissions docs). Neither is a client-visible *decision* change.
+**Error text (closed 2026-09-12).** The last residual — serde's `unknown field
+\`x\`` where TS sends valita's `Unexpected property x at 1.desiredQueriesPatch.0`
+— is ported: `rust_cvr::shared::valita` is the twin of `shared/src/valita.ts`
+(`toDisplay`/`displayList`/`getMessage` per issue code, the union fallback,
+`getDeepestUnionParseError`'s path ordering), and a Rust-only `deserialize_at`
+turns a `serde_json` error at its `serde_path_to_error` path into the valita
+issue (unknown keys listed like valita, unknown variant → `invalid_literal` at
+the union's tag key, tuple length, untagged primitive unions → the folded type
+list). `parse_upstream` renders `TypeError: <message at its frame path>` /
+`SyntaxError: …` as `Connection.#handleMessage`'s `String(e)` does
+(connection.ts:203-209); the transform / push-relay / permissions /
+`zero_mutations`-row parses render the bare message like `getErrorMessage(e)`.
+M13's oracle now records `String(e)` per rejected frame and the frame test
+compares it byte-for-byte (453 frames, 216 rejected; JSON-stage rejections are
+compared by class, R6/R7: V8's `SyntaxError` text and its recursion depth are
+not reproduced). Left as documented: `elide` is byte-aware where TS's is
+char-based (differs only for non-ASCII permissions docs).
 
 **Guard lessons.** `helper_imports.py` matches a valita `xxxSchema` twin by
 alias only (`XxxSchema` ≠ `Xxx` under `canon`) — repoint the alias at the real

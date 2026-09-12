@@ -161,6 +161,42 @@ STRUCTURAL = {
 }
 
 
+
+# Rejections INSIDE a body: the AST, patch-op, mutation and inspect schemas
+# (2026-09-12). Each pins one valita issue class at depth, so the TS golden
+# carries the exact `String(e)` message rust must render (shared/src/valita.ts).
+SCHEMA_DEPTH = {
+    "ast-unknown-key-deep": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"simple","op":"=","left":{"type":"column","name":"id","bogus":1},"right":{"type":"literal","value":1}}}}]}]',
+    "ast-two-unknown-keys": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"del","hash":"h","a":1,"b":2}]}]',
+    "ast-bad-direction": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","orderBy":[["id","up"]]}}]}]',
+    "ast-condition-bad-type": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"weird"}}}]}]',
+    "ast-condition-not-object": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":5}}]}]',
+    "ast-bad-operator": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"simple","op":"DROP","left":{"type":"column","name":"id"},"right":{"type":"literal","value":1}}}}]}]',
+    "ast-column-on-right": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"simple","op":"=","left":{"type":"column","name":"id"},"right":{"type":"column","name":"x"}}}}]}]',
+    "ast-literal-object": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"simple","op":"=","left":{"type":"column","name":"id"},"right":{"type":"literal","value":{"o":1}}}}}]}]',
+    "ast-empty-parent-field": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":"t","where":{"type":"correlatedSubquery","op":"EXISTS","related":{"correlation":{"parentField":[],"childField":["a"]},"subquery":{"table":"s"}}}}}]}]',
+    "ast-not-object": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":5}]}]',
+    "ast-table-not-string": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ast":{"table":5}}]}]',
+    "patch-bad-op": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"nope","hash":"h"}]}]',
+    "patch-unknown-key": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"del","hash":"h","x":1}]}]',
+    "patch-missing-hash": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"del"}]}]',
+    "patch-hash-not-string": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"del","hash":7}]}]',
+    "patch-not-array": '["changeDesiredQueries",{"desiredQueriesPatch":{}}]',
+    "patch-null-ttl": '["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"h","ttl":null}]}]',
+    "push-mutation-bad-type": '["push",{"clientGroupID":"g","mutations":[{"type":"other","id":1,"clientID":"c","name":"n","args":[],"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-mutation-missing-type": '["push",{"clientGroupID":"g","mutations":[{"id":1,"clientID":"c"}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-crud-args-arity": '["push",{"clientGroupID":"g","mutations":[{"type":"crud","id":1,"clientID":"c","name":"_zero_crud","args":[{"ops":[]},{"ops":[]}],"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-crud-bad-name": '["push",{"clientGroupID":"g","mutations":[{"type":"crud","id":1,"clientID":"c","name":"mutate","args":[{"ops":[]}],"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-crud-op-unknown-key": '["push",{"clientGroupID":"g","mutations":[{"type":"crud","id":1,"clientID":"c","name":"_zero_crud","args":[{"ops":[{"op":"insert","tableName":"t","primaryKey":["id"],"value":{},"x":1}]}],"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-crud-delete-value-object": '["push",{"clientGroupID":"g","mutations":[{"type":"crud","id":1,"clientID":"c","name":"_zero_crud","args":[{"ops":[{"op":"delete","tableName":"t","primaryKey":["id"],"value":{"id":{"n":1}}}]}],"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-custom-args-not-array": '["push",{"clientGroupID":"g","mutations":[{"type":"custom","id":1,"clientID":"c","name":"n","args":{},"timestamp":1}],"pushVersion":1,"timestamp":1,"requestID":"r"}]',
+    "push-body-root-missing": '["push",{"clientGroupID":"g"}]',
+    "inspect-ast-bad": '["inspect",{"op":"analyze-query","id":"x","ast":{"table":5}}]',
+    "inspect-ast-unknown-key": '["inspect",{"op":"analyze-query","id":"x","ast":{"table":"t","zzz":1}}]',
+    "body-root-unknown-key": '["ping",{"x":1}]',
+    "init-client-schema-bad": '["initConnection",{"desiredQueriesPatch":[],"clientSchema":{"tables":{"t":{"columns":{"id":{"type":"nope"}},"primaryKey":["id"]}}}}]',
+}
+
 def main() -> int:
     rows = []
 
@@ -171,6 +207,8 @@ def main() -> int:
         add("valid/" + name, frame)
     for name, frame in STRUCTURAL.items():
         add("structural/" + name, frame)
+    for name, frame in SCHEMA_DEPTH.items():
+        add("schema/" + name, frame)
 
     for slot, tmpl in STRING_SLOTS.items():
         for sname, stext in STRINGS.items():

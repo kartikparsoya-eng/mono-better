@@ -1,6 +1,7 @@
 //! Port of `zero-protocol/src/primary-key.ts` — serde equivalents of the
 //! valita schemas. Parsed at the upstream boundary in valita's default
-//! strict mode (inside `mutationSchema`, mutation.ts:39-72).
+//! strict mode (the `crudOpSchema` members, mutation.ts:45-85, inside
+//! `mutationSchema`, mutation.ts:116).
 
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
@@ -13,10 +14,7 @@ pub struct PrimaryKey(#[serde(deserialize_with = "non_empty_strings")] pub Vec<S
 fn non_empty_strings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     let key = Vec::<String>::deserialize(d)?;
     if key.is_empty() {
-        return Err(serde::de::Error::invalid_length(
-            0,
-            &"a primary key with at least one column",
-        ));
+        return Err(serde::de::Error::invalid_length(0, &"at least 1 column"));
     }
     Ok(key)
 }

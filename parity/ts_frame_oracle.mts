@@ -36,21 +36,27 @@ for (const {id, frame} of rows) {
   let accepted: boolean;
   let tag: string | null = null;
   let stage: 'json' | 'valita' | null = null;
+  // `message` is what the client sees: connection.ts:207 puts `String(e)` in
+  // the InvalidMessage body — `TypeError: <shared/src/valita.ts message>` or
+  // `SyntaxError: <V8 text>`.
+  let message: string | null = null;
   try {
     const value = JSON.parse(frame);
     try {
       const msg = v.parse(value, upstreamSchema);
       accepted = true;
       tag = String((msg as unknown[])[0]);
-    } catch {
+    } catch (e) {
       accepted = false;
       stage = 'valita';
+      message = String(e);
     }
-  } catch {
+  } catch (e) {
     accepted = false;
     stage = 'json';
+    message = String(e);
   }
-  out.push(JSON.stringify({id, accepted, tag, stage}));
+  out.push(JSON.stringify({id, accepted, tag, stage, message}));
 }
 
 writeFileSync(outPath, out.join('\n') + '\n', 'utf8');

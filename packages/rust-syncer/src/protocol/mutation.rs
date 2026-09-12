@@ -36,18 +36,14 @@ pub enum CrudMutationName {
 /// `crudOpSchema` (mutation.ts:63-68): `insert | upsert | update | delete`,
 /// told apart by the `op` literal (mutation.ts:39-62). A write op carries a
 /// `rowSchema` value; `delete` carries a `primaryKeyValueRecordSchema`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "op")]
+#[derive(Debug, Clone)]
 pub enum CrudOp {
-    #[serde(rename = "insert")]
     Insert(CrudWriteOp),
-    #[serde(rename = "upsert")]
     Upsert(CrudWriteOp),
-    #[serde(rename = "update")]
     Update(CrudWriteOp),
-    #[serde(rename = "delete")]
     Delete(CrudDeleteOp),
 }
+crate::tagged_union!(CrudOp, "op", ["insert" => Insert(CrudWriteOp), "upsert" => Upsert(CrudWriteOp), "update" => Update(CrudWriteOp), "delete" => Delete(CrudDeleteOp)]);
 
 /// The body shared by `insertOpSchema` / `upsertOpSchema` / `updateOpSchema`
 /// (mutation.ts:39-56), minus the `op` tag.
@@ -78,6 +74,12 @@ pub struct CrudArg {
 /// `crudArgsSchema` (mutation.ts:73): `v.tuple([crudArgSchema])` — exactly one.
 pub type CrudArgs = (CrudArg,);
 
+/// `crudArgsSchema`: exactly one `crudArgSchema`.
+fn crud_args<'de, D: Deserializer<'de>>(d: D) -> Result<CrudArgs, D::Error> {
+    let value = Value::deserialize(d)?;
+    super::exact_tuple::<CrudArgs, D::Error>(&value, 1, &[])
+}
+
 /// `crudMutationSchema` (mutation.ts:96-103), minus the `type` tag.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -86,6 +88,7 @@ pub struct CrudMutation {
     #[serde(rename = "clientID")]
     pub client_id: String,
     pub name: CrudMutationName,
+    #[serde(deserialize_with = "crud_args")]
     pub args: CrudArgs,
     pub timestamp: JsNumber,
 }
@@ -105,22 +108,20 @@ pub struct CustomMutation {
 /// `mutationSchema` (mutation.ts:112): `crudMutation | customMutation`, told
 /// apart by the `type` literal (`MutationType.CRUD` / `MutationType.Custom`,
 /// mutation-type-enum.ts).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum Mutation {
-    #[serde(rename = "crud")]
     Crud(CrudMutation),
-    #[serde(rename = "custom")]
     Custom(CustomMutation),
 }
+crate::tagged_union!(Mutation, "type", ["crud" => Crud(CrudMutation), "custom" => Custom(CustomMutation)]);
 
 /// `deserialize_with` for `pushBodySchema.mutations` (`v.array(mutationSchema)`,
 /// push.ts:8): every entry must satisfy the strict schema; the accepted JSON
 /// is kept as-is because the push is relayed verbatim (I-3).
 pub fn strict_mutations<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Value>, D::Error> {
     let entries = Vec::<Value>::deserialize(d)?;
-    for entry in &entries {
-        Mutation::deserialize(entry).map_err(serde::de::Error::custom)?;
+    for (index, entry) in entries.iter().enumerate() {
+        super::validate_nested::<Mutation, D::Error>(entry, &[super::valita::Key::Index(index)])?;
     }
     Ok(entries)
 }

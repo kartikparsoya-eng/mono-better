@@ -66,6 +66,6 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = Value::deserialize(d)?;
-    ClientSchema::deserialize(&value).map_err(serde::de::Error::custom)?;
+    super::validate_nested::<ClientSchema, D::Error>(&value, &[])?;
     Ok(Some(value))
 }

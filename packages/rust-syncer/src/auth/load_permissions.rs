@@ -79,9 +79,14 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
             let permissions = serde_json::from_str::<Value>(&permissions_json)
                 .map_err(|e| e.to_string())
                 .and_then(|doc| {
-                    PermissionsConfig::deserialize(&doc)
-                        .map(|_| doc)
-                        .map_err(|e| e.to_string())
+                    match crate::protocol::valita::deserialize_at::<PermissionsConfig>(
+                        &doc,
+                        &[],
+                        &doc,
+                    ) {
+                        Ok(_) => Ok(doc),
+                        Err(issue) => Err(crate::protocol::valita::get_message(&issue, &doc)),
+                    }
                 })
                 .map_err(|cause| {
                     format!(
@@ -276,7 +281,11 @@ mod tests {
         )
         .unwrap();
         let err = load_permissions(&conn, "zero").unwrap_err();
-        assert!(err.contains("cause: unknown variant `DROP`"), "{err}");
+        assert!(
+            err.contains("cause: Expected literal value \"=\"")
+                && err.contains("at tables.issue.row.select.0.1.op Got \"DROP\""),
+            "{err}"
+        );
     }
 
     /// `v.parse(obj, permissionsConfigSchema)` runs in valita's default
@@ -295,7 +304,7 @@ mod tests {
             let err = load_permissions(&conn, "zero").unwrap_err();
             assert!(
                 err.starts_with("Could not parse upstream permissions: '")
-                    && err.contains("cause: unknown field `extra`"),
+                    && err.contains("cause: Unexpected property extra"),
                 "{doc}: {err}"
             );
         }

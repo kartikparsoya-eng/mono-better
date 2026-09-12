@@ -31,7 +31,6 @@ use crate::protocol::{
     ErrorBody, ErrorKind, ErrorOrigin, ErrorReason, JsNumber, TransformFailedHttpBody,
     TransformFailedZeroCacheBody,
 };
-use serde::Deserialize;
 
 /// TS `CustomQueryTransformer` cache TTL — 5s (chosen to be shorter than a
 /// typical short-lived auth token, so a re-auth re-transforms promptly).
@@ -602,9 +601,16 @@ async fn post_transform_attempts(
                 // is not JSON and a body outside `queryResponseSchema` are the
                 // same `parse` failure.
                 let parsed = match resp.json::<Value>().await {
-                    Ok(v) => QueryResponse::deserialize(&v)
-                        .map(|_| v)
-                        .map_err(|e| e.to_string()),
+                    // `getErrorMessage(e)` of the TypeError `parse` throws
+                    // (custom/fetch.ts:305): the bare valita message, paths
+                    // from the reply root.
+                    Ok(v) => {
+                        match crate::protocol::valita::deserialize_at::<QueryResponse>(&v, &[], &v)
+                        {
+                            Ok(_) => Ok(v),
+                            Err(issue) => Err(crate::protocol::valita::get_message(&issue, &v)),
+                        }
+                    }
                     Err(e) => Err(e.to_string()),
                 };
                 match parsed {
@@ -1154,7 +1160,8 @@ mod tests {
         assert_eq!(err["reason"], "parse");
         // The body must be one `errorBodySchema` accepts — it is sent to the
         // client as-is (`["error", body]`), where the client parses it.
-        ErrorBody::deserialize(&err).expect("a TransformFailed body the client can parse");
+        <ErrorBody as serde::Deserialize>::deserialize(&err)
+            .expect("a TransformFailed body the client can parse");
         assert!(
             err["message"]
                 .as_str()
@@ -1199,8 +1206,8 @@ mod tests {
         assert_eq!(err["queryIDs"], serde_json::json!(["a"]));
     }
 
-    /// transform-query.ts:230-234: the legacy `['transformFailed', body]`
-    /// tuple yields its body. Before the port the whole tuple was the error.
+    /// custom-queries/transform-query.ts:236: a legacy tuple yields `transformResponse[1]`,
+    /// so `['transformFailed', body]` yields its body. Before the port the whole tuple was the error.
     #[tokio::test]
     async fn transform_returns_the_body_of_a_legacy_transform_failed_tuple() {
         let err = transform_one_against(
@@ -1376,7 +1383,8 @@ mod tests {
             err["message"],
             "Fetch from API server returned non-OK status 401"
         );
-        ErrorBody::deserialize(&err).expect("a TransformFailed body the client can parse");
+        <ErrorBody as serde::Deserialize>::deserialize(&err)
+            .expect("a TransformFailed body the client can parse");
         assert_eq!(err["queryIDs"], serde_json::json!([]));
         assert!(
             is_auth_error_body(&err),

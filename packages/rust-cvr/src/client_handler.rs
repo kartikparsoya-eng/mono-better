@@ -454,7 +454,7 @@ impl PokeHandler {
         })();
 
         // Once a frame cannot be assembled or delivered, this poke is dead.
-        // Match TS's per-poker addPatch wrapper (client-handler.ts:463), which
+        // Match TS's per-poker addPatch wrapper (client-handler.ts:300-306), which
         // catches the throw and calls `downstream.fail(...)` — failing THIS
         // client's connection so it reconnects and rehydrates, rather than
         // silently dropping the row and completing the poke. (MultiPoker then
@@ -753,8 +753,14 @@ impl PokeHandler {
                 // same unsafe-integer guard as the rows path, then the row
                 // schema; either failure throws out of the poke.
                 ensure_safe_json(contents)?;
-                MutationRow::deserialize(&**contents)
-                    .map_err(|e| format!("mutationRowSchema: {e}"))?;
+                // The TypeError `parse` throws, as `String(e)` renders it.
+                crate::shared::valita::deserialize_at::<MutationRow>(contents, &[], contents)
+                    .map_err(|issue| {
+                        format!(
+                            "TypeError: {}",
+                            crate::shared::valita::get_message(&issue, contents)
+                        )
+                    })?;
                 let client_id = contents
                     .get("clientID")
                     .and_then(|v| v.as_str())
