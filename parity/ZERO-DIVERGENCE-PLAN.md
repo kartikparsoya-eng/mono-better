@@ -411,6 +411,49 @@ prod reaches it — make it `#[cfg(test)]`, not an alias. A sweep of every
 hand-built `"origin"/"kind"/"reason"` literal against the TS enum values is
 now clean; keep it so by building bodies through `ErrorBody`.
 
+## M16 — citation freshness: the TS-drift blind spot (added + executed 2026-09-12)
+
+Rule 6 makes the port auditable through `Port of TS <symbol> (<file>.ts:<line>)`
+citations, and every re-read (rule 1) starts from one. Nothing checked that a
+citation still pointed at the symbol it names: TS moves on, a port cites the
+wrong twin, a basename resolves to three files. The first sweep of the 1,643
+citations in the three crates found 80 stale + 10 dead at a ±40-line window
+(188 at ±10): `addPatch` cited at client-handler.ts:463 (now 300-306),
+`applyCorrelatedSubQuery` at builder.ts:593 (650), `gatherStartConstraints` at
+query-builder.ts:332 (377), `#conflictRowsDeleted` at pipeline-driver.ts:755
+(1004), the `cg${clientGroupID}` default at view-syncer.ts:862 (952-955),
+`mutationSchema` at mutation.ts:39 (116), the relay's verbatim reply at
+rust-push-relay.ts:166 (158-167); a `#hydrateAndSync` that does not exist
+(the time-slicing is `#addAndRemoveQueries`'s), a `handleConnection` that is
+`#createConnection`, `lmids`/`mutationResults` cited to view-syncer.ts (they
+are `lmidsQuery`/`mutationResultsQuery` in cvr.ts:234-262), `mustGetTableSpec`
+cited to builder.ts:264 (that is `buildPipeline`'s `Source not found` throw);
+and bare `syncer.ts` / `pusher.ts` / `connection.ts` / `transform-query.ts` /
+`cvr.ts` that name two or three files each. All re-cited in the commit that
+added the guard.
+
+`parity/citation_freshness.py` (in `local-rust-ci.sh`, ratchet `BASELINE = 0`
+on STALE + DEAD): for each `file.ts:N[-M]` in a `.rs` file it resolves the
+file (suffix match under `packages/`, `<pkg>/<file>` as `<pkg>/src/<file>`),
+extracts the symbol the comment names — backtick spans on the citation's line
+and the comment lines around it (a span may wrap), `#name` / camelCase /
+CONSTANT_CASE words of an assertion string, double-quoted literals (matched
+whitespace-, backtick- and comment-marker-insensitively, or by a 4-word prefix
+when rust appends its own tail), the camelCase spelling of a snake_case rust
+name, the `xSchema` name of a valita twin — and passes when any anchor occurs
+within ±40 lines of the cited line OR the cited line sits inside a declaration
+whose header names it (an indentation walk that knows `*#gen(` generator
+headers, `} else {` continuations and multi-line signatures). Classes: OK /
+STALE / DEAD / AMBIGUOUS (several files, none matching) / UNANCHORED (prose
+with no symbol — file existence only; 157 today; add a symbol to make one
+checkable). `--selftest` pins the eight extraction rules; `--list` prints the
+failures.
+
+**Limit.** The window is the tolerance: a symbol that moved fewer than 40
+lines still passes, so the guard catches a citation that no longer points at
+its symbol, not one that is off by a few lines. A citation of *prose* (a TS
+comment, a test name) anchors only if the prose is quoted.
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree

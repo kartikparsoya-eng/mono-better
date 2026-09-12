@@ -4,7 +4,7 @@
 //! `StreamItem::Yield`; `yieldProcess` actually hands the shard's event loop to
 //! a co-scheduled task; and `TimeSliceTimer` measures process time (yielded
 //! time excluded) — the number per-query hydration time and the advance budget
-//! are built on (pipeline-driver.ts:703 / view-syncer.ts:2943-3010).
+//! are built on (`timer.totalElapsed()`, pipeline-driver.ts:703 / view-syncer.ts:2943-3010).
 //!
 //! Each test fails on the pre-port shape: the engine `skip_yields`'d every
 //! sentinel and the source never produced one (0 yields at any threshold); a

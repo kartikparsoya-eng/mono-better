@@ -1352,8 +1352,8 @@ async fn slow_query_materialization_warns_per_query_with_its_ast() {
         .lines()
         .filter(|l| l.contains("Slow query materialization"))
         .collect();
-    // TS's loop covers every query in `addQueries` — the internal `lmids` /
-    // `mutationResults` queries (view-syncer.ts:1206-1208) included — so an
+    // TS's loop covers every query in `addQueries` — the internal `lmidsQuery` /
+    // `mutationResultsQuery` (cvr.ts:234-262) included — so an
     // initConnection carrying q1 + q2 yields four per-query lines.
     assert_eq!(
         lines.len(),
@@ -3049,9 +3049,10 @@ fn background_retransform_auth_error_fails_connection_and_retries() {
         pinned_params("c2", "ws2", "user-1"),
         DirectWebSocketSink::new(tx2),
     ));
-    // "Two VALIDATED connections": TS validates at initConnection, not at
-    // socket accept (view-syncer.ts:942; connection-context-manager.ts:267
-    // registers with `revalidateAt: undefined`), and the CCM only promotes a
+    // "Two VALIDATED connections": TS validates at initConnection
+    // (`#validateConnection`, view-syncer.ts:942), not at socket accept;
+    // connection-context-manager.ts:267 registers `revalidateAt: undefined`,
+    // and the CCM only promotes a
     // background connection from a validated one.
     validate_test_connection(&rt, &mut state, "c1", "ws1");
     validate_test_connection(&rt, &mut state, "c2", "ws2");

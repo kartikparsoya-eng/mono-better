@@ -148,7 +148,8 @@ pub struct SyncerConfig {
     /// fairness at the cost of reduced throughput. Port of TS
     /// `yieldThresholdMs` (zero-config.ts:534, default 10). Env
     /// `ZERO_YIELD_THRESHOLD_MS`. `server/syncer.rs` derives the two
-    /// per-driver thresholds from it (syncer.ts:209-213).
+    /// per-driver thresholds from it (`config.yieldThresholdMs`,
+    /// zero-cache/src/server/syncer.ts:209-213).
     pub yield_threshold_ms: f64,
 }
 

@@ -131,7 +131,8 @@ struct PipelineEntry {
 /// This MUST be byte-identical to TS: the `rowSetSignature` (XOR-fold of these
 /// units) is PERSISTED to the shared CVR (`cvr.queries[queryID].rowSetSignature`)
 /// and later compared against a freshly-computed value to detect row-set drift
-/// (view-syncer.ts:1659-1669). A non-TS hash (the previous `FxHasher` over
+/// (`rowSetSignature`, view-syncer.ts:1659-1669). A non-TS hash (the previous
+/// `FxHasher` over
 /// `format!("{:?}", v)`) would mismatch any signature written by a TS process →
 /// forced re-hydration of every query on a rolling / mixed / shadow deploy. So
 /// we reuse the ported xxHash-based `h64` over the ported canonical
@@ -2617,7 +2618,7 @@ impl AdvanceStream {
                 // A different-PK prev row displaced by this change is a
                 // unique-conflict deletion — TS `#conflictRowsDeleted`,
                 // counted only when the change carries a nextValue
-                // (pipeline-driver.ts:755-757).
+                // (pipeline-driver.ts:1002-1005).
                 if sc.next_value.is_some() {
                     crate::otel_metrics::record_conflict_row_deleted();
                 }

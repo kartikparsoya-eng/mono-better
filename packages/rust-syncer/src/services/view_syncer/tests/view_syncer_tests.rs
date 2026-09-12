@@ -1787,7 +1787,7 @@ fn periodic_revalidation_closes_expired_connection() {
 }
 
 /// initConnection with NO profileID must default the CVR profileID to
-/// `cg{clientGroupID}` — TS view-syncer.ts:862
+/// `cg{clientGroupID}` — TS view-syncer.ts:952-955
 /// (`connCtx.profileID ?? `cg${this.id}``). Ported from
 /// view-syncer.pg.test.ts "initConnectionMessage with no profileID sets a
 /// default profileID based on the client group ID".
@@ -3706,7 +3706,7 @@ fn reconnect_closes_superseded_connection() {
     assert!(ws1_closed, "the superseded ws1 connection must be closed");
     assert!(
         !ws1_errored,
-        "the supersede close carries no error frame (TS syncer.ts:649)"
+        "the supersede close carries no error frame (TS workers/syncer.ts:649)"
     );
 
     // The mapping now points at ws2, with exactly one registered client.

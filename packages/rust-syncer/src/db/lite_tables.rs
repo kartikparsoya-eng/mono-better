@@ -84,7 +84,8 @@ pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableS
 pub struct ZqlSpecOptions {
     /// Whether BACKFILLING columns (a `backfill` id in `_zero.column_metadata`)
     /// are part of the computed spec. Replication logic includes them; the
-    /// serving/read path must NOT (pipeline-driver.ts:359, run-ast.ts:136,
+    /// serving/read path must NOT (`includeBackfillingColumns: false`,
+    /// pipeline-driver.ts:359, run-ast.ts:136,
     /// analyze.ts:44 all pass `false`).
     pub include_backfilling_columns: bool,
 }

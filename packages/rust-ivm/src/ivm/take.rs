@@ -1116,7 +1116,7 @@ mod bound_none_edit_tests {
     /// Test-only upstream that yields no rows: the partition under test must
     /// look EMPTY on hydrate. Rust-only stub with no TS twin; the same struct
     /// used to be the engine's fallback for an unregistered table until that
-    /// was ported to `mustGetTableSpec`'s throw (builder.ts:264-267).
+    /// was ported to the builder's `Source not found` throw (builder.ts:264-267).
     struct EmptyInput {
         schema: SourceSchema,
     }

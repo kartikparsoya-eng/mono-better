@@ -239,7 +239,7 @@ fn multi_constraint_to_sql(mc: &MultiConstraint) -> (String, Vec<SqlParam>) {
 }
 
 /// Build start constraints for pagination.
-/// Port of TS `gatherStartConstraints` (query-builder.ts:332).
+/// Port of TS `gatherStartConstraints` (query-builder.ts:377).
 ///
 /// For `after` (a=1, b=2, c=3) with [a asc, b desc, c asc]:
 /// `WHERE a > 1 OR (a = 1 AND b < 2) OR (a = 1 AND b = 2 AND c > 3)`

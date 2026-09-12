@@ -204,5 +204,8 @@ python3 "$ROOT/parity/prod_reachability.py"; chk $? "M11 prod-path reachability"
 step "parity — M14 log differential (a rust log line with no TS twin, or a twin at a different severity, is a divergence operators see)"
 python3 "$ROOT/parity/log_differential.py"; chk $? "M14 log differential"
 
+step "parity — M16 citation freshness (every cited TS file:line still holds the symbol the comment names)"
+python3 "$ROOT/parity/citation_freshness.py"; chk $? "M16 citation freshness"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

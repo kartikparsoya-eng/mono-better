@@ -664,7 +664,8 @@ fn make_event_format(singular_athletes: bool) -> Format {
     // TS shape (view-apply-change.test.ts:86-89, 338-346): the format follows
     // the VISIBLE tree — ONE `athletes` entry for the visible athlete level;
     // the hidden matchup level has no format entry (the outer format passes
-    // through it unchanged, view-apply-change.ts:222-262). The previous
+    // through it unchanged — `schema.isHidden`, view-apply-change.ts:222-262).
+    // The previous
     // nested-per-structural-level shape here compensated for the NEW-5 bug.
     let mut fmt = default_format();
     fmt.relationships.insert(

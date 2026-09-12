@@ -1,6 +1,6 @@
 //! Tests for small pure helper functions that each mirror a real TS branch
-//! (triage bucket-3 promotions): `assert_ordering_includes_pk` (complete-
-//! ordering.ts:31) and `is_interrupt_error` (sqlite-cost-model.ts). Both were
+//! (triage bucket-3 promotions): `assert_ordering_includes_pk`
+//! (complete-ordering.ts:31) and `is_interrupt_error` (sqlite-cost-model.ts). Both were
 //! FNDA:0.
 
 use rust_ivm::query::complete_ordering::assert_ordering_includes_pk;

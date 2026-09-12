@@ -56,8 +56,8 @@ use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 ///   owning `_conn`. This order is part of the safety contract.
 struct LazyRows {
     rows: Option<rusqlite::Rows<'static>>,
-    /// Cached statement (TS parity: zqlite's `StatementCache` keyed by SQL
-    /// text, table-source.ts:289). Dropping a `CachedStatement` RESETS it and
+    /// Cached statement (TS parity: zqlite's `StatementCache`, table-source.ts:51-143,
+    /// hit by SQL text at :289). Dropping a `CachedStatement` RESETS it and
     /// returns it to the connection's cache instead of finalizing — the next
     /// fetch with the same SQL skips the prepare. A reset statement is not
     /// busy, so it can never block the snapshotter's ROLLBACK; the cache is

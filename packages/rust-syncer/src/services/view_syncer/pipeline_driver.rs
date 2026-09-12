@@ -102,7 +102,8 @@ pub fn init_and_reset_common(
 /// Test fixture: the `{schema}.clients` / `{schema}.mutations` tables every
 /// replica carries and the view-syncer's internal queries read
 /// (rust-cvr `cvr.rs` `ensureClient` / `getMutationResultsQuery`), with the
-/// columns TS's test replica creates (view-syncer-test-util.ts:662-676).
+/// columns TS's test replica creates (`CREATE TABLE "this_app_2.clients"`,
+/// view-syncer-test-util.ts:662-676).
 /// Without them the engine throws `mustGetTableSpec`'s error for the internal
 /// query — exactly as TS would against a replica missing them.
 #[cfg(test)]
@@ -1340,7 +1341,7 @@ impl IvmPipelines {
         });
         // The between-change yield arm handed to the engine's stream — the same
         // `should_yield` the sources consult, evaluated at TS's per-change site
-        // (pipeline-driver.ts:975-977).
+        // (`#shouldAdvanceYieldMaybeAbortAdvance`, pipeline-driver.ts:978-980).
         let should_yield = self
             .yield_threshold_ms
             .as_ref()

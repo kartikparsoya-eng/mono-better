@@ -88,8 +88,9 @@ const TTL_CLOCK_INTERVAL: i64 = 60_000;
 /// `type CustomQueryTransformMode = 'all' | 'missing'` (view-syncer.ts:212).
 ///
 /// `All` is used where TS re-validates authorization with the user's API server
-/// on every pass — new connections (view-syncer.ts:945), `updateAuth`
-/// (view-syncer.ts:1019), and the background retransform (view-syncer.ts:2670).
+/// on every pass — new connections (`#handleConfigUpdate` 'all', view-syncer.ts:945-950),
+/// `updateAuth` (view-syncer.ts:1019), and `#runBackgroundRetransform`
+/// (view-syncer.ts:2668-2672).
 /// `Missing` is the steady-state mode — `changeDesiredQueries`
 /// (view-syncer.ts:978), `deleteClients` (view-syncer.ts:1040), the run-loop
 /// init sync (view-syncer.ts:599), and `#removeExpiredQueries`
@@ -306,10 +307,11 @@ pub struct SyncEngineConfig {
     /// zero-config.ts:510 default true → PipelineDriver `enablePlanner`).
     pub enable_query_planner: bool,
     /// The two IVM time-slice thresholds TS `createViewSyncer` derives from
-    /// `config.yieldThresholdMs` (server/syncer.ts:209-213): `max(threshold/4,
+    /// `config.yieldThresholdMs` (zero-cache/src/server/syncer.ts:209-213): `max(threshold/4,
     /// 2)` while a priority op is running on this event loop, `max(threshold,
     /// 2)` otherwise. The driver's `yield_threshold_ms` selector picks between
-    /// them per call (syncer.ts:230-233).
+    /// them (`normalYieldThresholdMs` / `priorityOpRunningYieldThresholdMs`) per
+    /// call (zero-cache/src/server/syncer.ts:230-233).
     pub priority_op_running_yield_threshold_ms: f64,
     pub normal_yield_threshold_ms: f64,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
@@ -823,7 +825,7 @@ fn cvr_store_error_thrown<'a>(error: &CVRStoreError, message: &'a str) -> Thrown
         },
         // TS `versionFromString`: a third `:` part is `new TypeError(...)`
         // (schema/types.ts:339); every other failure is a plain `Error`
-        // (:333, lexi-version.ts:54).
+        // (:333, and the `assert` at lexi-version.ts:52-55).
         CVRStoreError::VersionParse(rust_cvr::schema::types::VersionError::TooManyParts(_)) => {
             Thrown::Other {
                 name: "TypeError",
@@ -1865,7 +1867,7 @@ impl ViewSyncerService {
 
     /// Port of TS `#stopExpireTimer` (view-syncer.ts:773-777). Clears the
     /// eviction timer; no eviction runs until `schedule_expire_eviction` re-arms
-    /// it. The last-client-disconnect branch calls this (TS view-syncer.ts:767)
+    /// it. The last-client-disconnect branch calls `this.#stopExpireTimer()` (view-syncer.ts:767)
     /// so an idle group with no connected clients performs zero eviction work.
     fn stop_expire_timer(&mut self) {
         self.expired_queries_timer = None;
@@ -2176,7 +2178,8 @@ impl ViewSyncerService {
     ///     closed it (TS `catch` → `#failMaintenanceConnection` → `return false`).
     ///   * `Err(body)` — a NON-auth failure (API down / 5xx / malformed). TS
     ///     rethrows here so each CALLER decides: auth maintenance defers
-    ///     (view-syncer.ts:839-856), init/updateAuth propagate.
+    ///     (`isTransformFailedError` branch, view-syncer.ts:839-856), init/updateAuth
+    ///     propagate.
     ///
     /// Rust limitation (NOT TS parity — do not read this as equivalent): TS uses
     /// `response.validation`, which can carry the API server's authoritative
@@ -2518,7 +2521,7 @@ impl ViewSyncerService {
         let protocol_version = params.protocol_version;
         let client_group_id = params.client_group_id.clone();
 
-        // Port of syncer.ts:643-650 (`handleConnection`): a clientID that is
+        // Port of workers/syncer.ts:643-650 (`#createConnection`): a clientID that is
         // already connected has its EXISTING socket closed frame-less —
         // `existing.close(`replaced by ${params.wsID}`)` → `Connection.close`
         // → ws close, no error frame. In production the router already sent
@@ -2582,7 +2585,7 @@ impl ViewSyncerService {
         self.client_profile_ids.remove(&client_id);
         // Until profileID is required in the URL, default it to `cg{clientGroupID}`
         // (the value the schema migration writes), exactly as TS does at the
-        // initConnection config-update call site (view-syncer.ts:862:
+        // initConnection config-update call site (view-syncer.ts:952-955:
         // `connCtx.profileID ?? \`cg${this.id}\``, where `this.id` is the client
         // group ID). set_profile_id is materiality-guarded, so re-passing this on
         // later config updates is a no-op once the CVR has it.
@@ -4063,7 +4066,8 @@ impl ViewSyncerService {
     /// An earlier version sent `["error", Rehome "Reconnect required"]` and
     /// cited `#cleanup`'s `client.fail(...)`. Wrong on both counts:
     /// `#cleanup(err)` fails clients only with the error that ESCAPED the run
-    /// loop — the cvr-store ownership / CAS Rehomes (cvr-store.ts:1367-1398,
+    /// loop — the cvr-store `ConcurrentModificationException` /
+    /// `OwnershipError` Rehomes (cvr-store.ts:1367-1398,
     /// `warn`, different messages), which rust reaches through `fail_group` —
     /// and the "Reconnect required" body is thrown to a REQUESTING op in
     /// `#runInLockWithCVR` (:464-478), never handed to `#cleanup`; rust emits it
@@ -5208,7 +5212,7 @@ impl ViewSyncerService {
             let message = e.to_string();
             // TS `versionFromString`: a third `:` part throws `new TypeError(
             // `Invalid version string ${str}`)` (schema/types.ts:339); every
-            // other failure is a plain `Error` (:333, lexi-version.ts:54).
+            // other failure is a plain `Error` (:333, and the `assert` at lexi-version.ts:52-55).
             // `String(e)` prints that class before the message.
             let name = match e {
                 rust_cvr::schema::types::VersionError::TooManyParts(_) => "TypeError",
@@ -6490,7 +6494,7 @@ impl ViewSyncerService {
                     state_version,
                     replica_version,
                     &add_queries,
-                    // TS `removeQueries` (view-syncer.ts:2062-2067): expired +
+                    // TS `removeQueriesQueryIds` (view-syncer.ts:2062-2067): expired +
                     // errored, tracked as removed in this pass (got `del` poked).
                     &remove_queries,
                     poke_ws_ids,
@@ -7214,7 +7218,7 @@ impl ViewSyncerService {
         // fails the connection and the client re-hydrates from the last
         // consistent CVR (no partial flush).
         let mut cvr_err: Option<String> = None;
-        // Port of TS `#hydrateAndSync`'s time-slicing (view-syncer.ts:2244-2260)
+        // Port of TS `#addAndRemoveQueries`'s time-slicing (view-syncer.ts:2244-2260)
         // consumed by `#processChanges` (:2508-2512): one `TimeSliceTimer` for
         // the pass, `await yieldProcess(lc)` "at the very beginning so that the
         // first time slice is properly processed by the time-slice queue", then

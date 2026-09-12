@@ -450,7 +450,7 @@ async fn run_ws_writer(
                     }
                     Some(WsCommand::SendPokePart { body, .. }) => {
                         // TS stringifies the typed `['pokePart', body]` tuple at
-                        // the sink (types/streams.ts:129); this is that site.
+                        // the sink (`BigIntJSON.stringify`, types/streams.ts:129); this is that site.
                         let text = serde_json::to_string(&("pokePart", &body))
                             .unwrap_or_else(|e| {
                                 tracing::error!("serialization error: {e}");
@@ -1146,7 +1146,7 @@ mod tests {
     /// `WsCommand::SendPokePart` exists so the JSON text is produced HERE
     /// instead of on the serial client-group thread — TS's own shape
     /// (`#push(['pokePart', body])` hands the typed tuple along and
-    /// types/streams.ts:129 stringifies it at the sink). This is the one place
+    /// types/streams.ts:129 `BigIntJSON.stringify`s it at the sink). This is the one place
     /// the writer's actual output can be observed, so it is where the wiring
     /// is pinned; `poke_part_serializes_identically_as_a_value_tree_and_as_a_typed_body`
     /// (rust-cvr) pins the two serialization ROUTES against each other.

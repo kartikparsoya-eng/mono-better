@@ -514,7 +514,8 @@ impl CVRConfigDrivenUpdater {
         let mut needed: HashSet<String> = HashSet::new();
 
         // TS `recordQueryForTelemetry` (cvr.ts:335-342) feeds ONLY the
-        // anonymous-telemetry meter (anonymous-otel-start.ts:181-187, a separate
+        // anonymous-telemetry meter (`crudQueriesCounter`, anonymous-otel-start.ts:181-187,
+        // a separate
         // MeterProvider with its own exporter) — nothing on the operator's OTLP
         // pipeline. Rust has no anonymous-telemetry subsystem, so there is
         // nothing to record here.

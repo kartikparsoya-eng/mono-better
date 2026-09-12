@@ -577,7 +577,7 @@ fn apply_correlated_subquery(
 }
 
 /// Apply a related subquery as a Join (not from a WHERE condition).
-/// Port of TS `applyCorrelatedSubQuery` (builder.ts:593).
+/// Port of TS `applyCorrelatedSubQuery` (builder.ts:650).
 fn apply_correlated_subquery_join(
     sq: &RelatedSubquery,
     delegate: &mut dyn BuilderDelegate,
