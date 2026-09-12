@@ -79,10 +79,14 @@ impl WsCommand {
         match self {
             WsCommand::Send { msg, .. } => Some(msg.clone()),
             WsCommand::SendPokePart { body, .. } => Some(serde_json::json!(["pokePart", body])),
-            WsCommand::Fail(_)
-            | WsCommand::FailWithCode { .. }
-            | WsCommand::Close(_)
-            | WsCommand::CloseWithCode { .. } => None,
+            // A failure IS a downstream frame: the writer serializes
+            // `error_message(&error)` and sends it before the close
+            // (ws_server.rs `WsCommand::Fail` / `FailWithCode`). Reporting
+            // `None` here modelled a client that never sees the error, which is
+            // how a test could pass while the error frame moved paths.
+            WsCommand::Fail(error) => Some(crate::protocol::error_message(error)),
+            WsCommand::FailWithCode { error, .. } => Some(crate::protocol::error_message(error)),
+            WsCommand::Close(_) | WsCommand::CloseWithCode { .. } => None,
         }
     }
 }
@@ -277,15 +281,39 @@ impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
     }
 
     fn fail(&self, e: String) {
-        // rust-cvr passes a plain message; the accompanying `["error", ..]`
-        // frame is delivered separately via `push`. Close with code 3000.
-        // TS `ClientHandler.fail(e)` → `wrapWithProtocolError(e)`: Internal with
-        // origin ZeroCache (types/error-with-level.ts).
+        // The wrap branch of TS `wrapWithProtocolError(e)`: a raw value becomes
+        // `{kind: Internal, message: getErrorMessage(e), origin: ZeroCache}`
+        // (types/error-with-level.ts:36-42). `WsCommand::Fail` sends that body
+        // as the client's `["error", …]` frame and then closes.
         let _ = self.send_command(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
             kind: ErrorKind::Internal,
             message: e,
             origin: Some(crate::protocol::ErrorOrigin::ZeroCache),
         })));
+    }
+
+    fn fail_with_error_body(&self, body: Value) {
+        // The passthrough branch: the caller already holds a protocol error, so
+        // the client's single frame carries it verbatim, `kind` included.
+        match serde_json::from_value::<ErrorBody>(body) {
+            Ok(error) => {
+                let _ = self.send_command(WsCommand::Fail(error));
+            }
+            Err(e) => {
+                // Rust-only backstop (no TS twin — TS passes the object it just
+                // constructed): every live caller builds this body from a typed
+                // `TransformFailedBody`, so a body the wire enums cannot read is
+                // a bug here, not client input. Still fail the socket rather
+                // than drop the failure; the writer task's `closing connection
+                // to client with error` WARN carries the kind and this message,
+                // so the backstop needs no log line of its own.
+                let _ = self.send_command(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
+                    kind: ErrorKind::Internal,
+                    message: format!("failure body is not an ErrorBody: {e}"),
+                    origin: Some(crate::protocol::ErrorOrigin::ZeroCache),
+                })));
+            }
+        }
     }
 
     fn cancel(&self) {

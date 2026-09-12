@@ -2115,19 +2115,16 @@ async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
     };
     // The submitted batch, read off the client's `["error", body]` frame.
     let submitted = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| {
-        std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
-            WsCommand::Send { msg, .. }
-                if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
-            {
-                msg.get(1)
-                    .and_then(|b| b.get("queryIDs"))
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
-                    })
-            }
+        std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command.frame_value() {
+            Some(msg) if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") => msg
+                .get(1)
+                .and_then(|b| b.get("queryIDs"))
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                }),
             _ => None,
         })
     };

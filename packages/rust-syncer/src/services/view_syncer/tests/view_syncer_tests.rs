@@ -2524,13 +2524,13 @@ fn init_connection_validates_before_serving_any_data() {
              connection fails validation (TS returns; view-syncer.ts:942)"
     );
 
-    let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| match command {
-        WsCommand::Send { msg, .. }
-            if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
-        {
-            msg.get(1).cloned()
+    let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| {
+        match command.frame_value() {
+            Some(msg) if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") => {
+                msg.get(1).cloned()
+            }
+            _ => None,
         }
-        _ => None,
     });
     let err = err.expect("a failed validation must reach the client as an error frame");
     assert_eq!(err["kind"], "TransformFailed");
@@ -2563,14 +2563,9 @@ fn error_bodies(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
 ) -> Vec<serde_json::Value> {
     std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|command| match command {
-            WsCommand::Send { msg, .. }
-                if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
-            {
+        .filter_map(|command| match command.frame_value() {
+            Some(msg) if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") => {
                 msg.get(1).cloned()
-            }
-            WsCommand::Fail(e) | WsCommand::FailWithCode { error: e, .. } => {
-                Some(crate::protocol::error_message(&e)[1].clone())
             }
             _ => None,
         })
@@ -4476,13 +4471,13 @@ fn init_connection_fires_ccm_init_side_effect() {
     // check SYNCHRONOUSLY (no network) and the failure message quotes the URL
     // it tried. That is a stronger assertion than the field — it proves the
     // recorded URL is the one actually used for the API-server round trip.
-    let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| match command {
-        WsCommand::Send { msg, .. }
-            if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
-        {
-            msg.get(1).cloned()
+    let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| {
+        match command.frame_value() {
+            Some(msg) if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") => {
+                msg.get(1).cloned()
+            }
+            _ => None,
         }
-        _ => None,
     });
     let err = err.expect("initConnection must probe the recorded userQueryURL");
     assert_eq!(err["kind"], "TransformFailed");
@@ -4524,14 +4519,13 @@ fn new_client_group_rejects_init_without_client_schema() {
         CustomQueryTransformMode::All,
     ));
 
-    let error = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
-        WsCommand::Send { msg: value, .. }
-            if value.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
-        {
-            value.get(1).cloned()
-        }
-        _ => None,
-    });
+    let error =
+        std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command.frame_value() {
+            Some(value) if value.get(0).and_then(serde_json::Value::as_str) == Some("error") => {
+                value.get(1).cloned()
+            }
+            _ => None,
+        });
     let error = error.expect("missing schema must close with a protocol error");
     assert_eq!(error["kind"], "InvalidConnectionRequest");
     assert!(

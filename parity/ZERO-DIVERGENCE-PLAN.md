@@ -474,6 +474,32 @@ candidate — the syncer's three copies are gone (rule 9). Not ported: the two
 custom-query cases (need the API-server transformer stub) and
 same-hash-during-deleteClients (unit-pinned).
 
+## ART 2026-09-12 — the replay caught a downstream error-frame divergence
+
+The gate chain on `cd89bf997` ran clean on data (G8: 811,603 rows byte-identical
+rust==TS across four pairs, including the 806,419-row/26-table pair) and on every
+functional rust-only gate. The find came from a gate that ERRORed for an
+unrelated reason: G25's parity arms were rejected because the backend answered
+HTTP 429 under the run's identity pressure, and the rejection printed each arm's
+error mix — rust 209 `TransformFailed` + 209 `Internal: query transform failed`,
+TS 151 `TransformFailed` and no `Internal` at all.
+
+That extra frame is a port defect from Phase 6 (`b564be1cd`):
+`send_query_transform_failed_error` pushed `["error", body]` itself and then
+called `fail("query transform failed")`, whose `wrapWithProtocolError` branch
+appends a SECOND frame with kind `Internal`. TS's
+`sendQueryTransformFailedError` is one line — `this.fail(new
+ProtocolError(error))` — and `wrapWithProtocolError` passes an existing protocol
+error through, so the client sees exactly one frame carrying the original kind.
+
+Two things made it invisible to the existing layers, both now closed: the sink
+trait had no typed-failure channel, so a failure could only carry a string
+(`kind: Internal`); and `WsCommand::frame_value()` reported `None` for a
+failure, so every test that read the wire through it modelled a client that
+never receives the error frame. A mock that cannot represent the failing frame
+cannot fail when the frame moves paths — the same shape as the poke-body default
+noted in the clone-density pass.
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree

@@ -141,7 +141,28 @@ impl WebSocketSink for MockSink {
         Ok(())
     }
     fn fail(&self, e: String) {
+        // The production sink turns this into an `["error", {kind: Internal,
+        // message: e, …}]` frame plus the close (ws_sink.rs `WsCommand::Fail`),
+        // so record the frame the client would see — a mock that only sets a
+        // flag cannot tell a one-frame TS-shaped failure from a push followed
+        // by a second, differently-kinded failure frame.
+        self.messages.lock().unwrap().push(serde_json::json!([
+            "error",
+            {"kind": "Internal", "message": e.clone(), "origin": "zeroCache"}
+        ]));
         *self.failed.lock().unwrap() = Some(e);
+    }
+    fn fail_with_error_body(&self, body: Value) {
+        let message = body
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.messages
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["error", body]));
+        *self.failed.lock().unwrap() = Some(message);
     }
     fn cancel(&self) {
         *self.cancelled.lock().unwrap() = true;
@@ -167,6 +188,8 @@ impl WebSocketSink for FailingSink {
     }
 
     fn fail(&self, _e: String) {}
+
+    fn fail_with_error_body(&self, _body: Value) {}
 
     fn cancel(&self) {}
 }
@@ -197,6 +220,7 @@ impl WebSocketSink for CountingFailSink {
         Err("sink closed".to_string())
     }
     fn fail(&self, _e: String) {}
+    fn fail_with_error_body(&self, _body: Value) {}
     fn cancel(&self) {}
 }
 
@@ -1360,11 +1384,19 @@ fn test_patches_below_base_version_skipped() {
     assert_eq!(msgs.len(), 2);
 }
 
-/// Port of TS `sendQueryTransformFailedError` (client-handler.ts:368):
-/// `this.fail(new ProtocolError(error))`. The ProtocolError body reaches the
-/// client as EXACTLY one `["error", body]` frame, and the downstream is
-/// failed terminally (`downstream.fail`, NOT `cancel` — `close()` is the
-/// cancel path, client-handler.ts:183). Caller: rust-syncer sync_engine.rs.
+/// Port of TS `sendQueryTransformFailedError` (client-handler.ts:367-369):
+/// `this.fail(new ProtocolError(error))`. The transform-failed body reaches the
+/// client as EXACTLY one `["error", body]` frame — `wrapWithProtocolError`
+/// passes an existing protocol error through, so nothing re-kinds it — and the
+/// downstream is failed terminally (`downstream.fail`, NOT `cancel`; `close()`
+/// is the cancel path, client-handler.ts:183).
+///
+/// Mutation test: rust used to `push(["error", body])` and then
+/// `fail("query transform failed")`, whose wrap branch appends a SECOND frame
+/// with kind `Internal`. Restore that pair and the frame-count and kind
+/// assertions below both fail. The 2026-09-12 replay measured the divergence
+/// against the TS mirror under a backend 429: rust sent 209 `TransformFailed`
+/// plus 209 `Internal`, TS sent 151 `TransformFailed` and no `Internal`.
 #[test]
 fn send_query_transform_failed_error_emits_exact_error_frame_and_fails() {
     let messages = Arc::new(StdMutex::new(Vec::new()));
@@ -1397,18 +1429,24 @@ fn send_query_transform_failed_error_emits_exact_error_frame_and_fails() {
     handler.send_query_transform_failed_error(&body);
 
     // Exactly one frame, byte-shape ["error", body] — not wrapped, not
-    // re-keyed, no other frames before/after.
+    // re-keyed, and NOTHING after it: a second frame here is the `Internal`
+    // one the old push-then-fail pair produced.
     let msgs = messages.lock().unwrap();
     assert_eq!(
         *msgs,
         vec![serde_json::json!(["error", body])],
-        "wire frame must be exactly [\"error\", body]"
+        "wire frame must be exactly one [\"error\", body]"
     );
-    // TS fail() puts the subscription in a terminal failed state.
+    assert!(
+        !msgs.iter().any(|m| m[1]["kind"] == "Internal"),
+        "no Internal frame may follow a transform failure: {msgs:?}"
+    );
+    // TS fail() puts the subscription in a terminal failed state, carrying the
+    // transform-failed body's own message rather than a rust-invented string.
     assert_eq!(
         failed.lock().unwrap().as_deref(),
-        Some("query transform failed"),
-        "downstream.fail must fire"
+        Some("failed to transform query"),
+        "downstream.fail must fire with the body TS passes through"
     );
     assert!(
         !*cancelled.lock().unwrap(),

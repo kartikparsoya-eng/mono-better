@@ -300,6 +300,7 @@ mod tests {
             Ok(())
         }
         fn fail(&self, _e: String) {}
+        fn fail_with_error_body(&self, _body: Value) {}
         fn cancel(&self) {}
     }
 

@@ -120,6 +120,15 @@ pub trait WebSocketSink: Send + Sync {
         self.push_sized(serde_json::json!(["pokePart", body]), est_bytes)
     }
     fn fail(&self, e: String);
+    /// Fail the downstream with an error body that is ALREADY a protocol error.
+    ///
+    /// TS `fail(e)` runs `wrapWithProtocolError(e)`
+    /// (types/error-with-level.ts:32-42), which RETURNS a `ProtocolError`
+    /// unchanged and only wraps a raw value into `{kind: Internal, message:
+    /// getErrorMessage(e), origin: ZeroCache}`. [`WebSocketSink::fail`] is the
+    /// wrap branch; this is the passthrough branch, so the client sees ONE
+    /// frame carrying the original body and its original `kind`.
+    fn fail_with_error_body(&self, body: Value);
     fn cancel(&self);
 }
 
@@ -1082,6 +1091,27 @@ impl ClientHandler {
         self.downstream.fail(e.to_string());
     }
 
+    /// [`ClientHandler::fail`] for a value that is already a protocol error:
+    /// `wrapWithProtocolError` hands it through, so the failure carries THIS
+    /// body and the client sees one frame with its original `kind`.
+    ///
+    /// The log line is `String(e)` of a `ProtocolError`, i.e. `name: message`
+    /// with `name = 'ProtocolError'` (zero-protocol/src/error.ts:167), at
+    /// `getLogLevel`'s `isProtocolError` level, WARN.
+    pub fn fail_with_body(&self, body: &Value) {
+        // `String(new ProtocolError(body))` is `name: message` with
+        // `name = 'ProtocolError'`, and TS interpolates that whole string into
+        // the SAME template `fail` uses — one log signature, not two.
+        let e = format!(
+            "ProtocolError: {}",
+            body.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+        );
+        tracing::warn!("view-syncer closing connection with error: {}", e);
+        self.downstream.fail_with_error_body(body.clone());
+    }
+
     pub fn close(&self, reason: &str) {
         // TS `this.#lc.debug?.(`view-syncer closing connection: ${reason}`)`
         // (client-handler.ts:184) — DEBUG, so it must be suppressible by
@@ -1192,13 +1222,18 @@ impl ClientHandler {
             .push(serde_json::json!(["inspect", response]));
     }
 
-    /// Send a query transform failed error to the client.
-    /// Port of `sendQueryTransformFailedError` from TS.
+    /// Port of TS `sendQueryTransformFailedError` (client-handler.ts:367-369):
+    /// `this.fail(new ProtocolError(error))` — ONE failure carrying the
+    /// transform-failed body, which is the single `["error", body]` frame the
+    /// client receives before the close.
+    ///
+    /// This used to push the frame itself and THEN call `fail("query transform
+    /// failed")`, whose wrap branch emitted a second frame with kind `Internal`.
+    /// The 2026-09-12 replay measured that shape against the TS mirror under a
+    /// backend 429: rust 209 `TransformFailed` + 209 `Internal`, TS 151
+    /// `TransformFailed` and no `Internal` at all.
     pub fn send_query_transform_failed_error(&self, error: &Value) {
-        // In TS, this calls `this.fail(new ProtocolError(error))`.
-        // ProtocolError is serialized as ["error", errorBody].
-        let _ = self.downstream.push(serde_json::json!(["error", error]));
-        self.fail("query transform failed");
+        self.fail_with_body(error);
     }
 }
 

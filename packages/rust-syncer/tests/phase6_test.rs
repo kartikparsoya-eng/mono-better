@@ -24,6 +24,20 @@ impl WebSocketSink for MockSink {
         *self.failed.lock().unwrap() = Some(err);
     }
 
+    fn fail_with_error_body(&self, body: serde_json::Value) {
+        // Mirrors the production sink: the typed body IS the client's frame.
+        self.messages
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["error", body.clone()]));
+        *self.failed.lock().unwrap() = Some(
+            body.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+
     fn cancel(&self) {
         *self.cancelled.lock().unwrap() = true;
     }
