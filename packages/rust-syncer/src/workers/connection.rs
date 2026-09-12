@@ -322,7 +322,19 @@ impl Connection {
     /// Port of TS `#closeWithError(errorBody, thrown?)` (connection.ts:331-337).
     pub fn close_with_error_thrown(&self, error: ErrorBody, thrown: Option<Thrown<'_>>) {
         self.send_error_with_thrown(error.clone(), thrown);
-        self.close(&format!("{:?}: {}", error.kind(), error.message()));
+        // TS: `${errorBody.kind} (${errorBody.origin}): ${errorBody.message}`
+        // (connection.ts:333). A body with no origin interpolates the string
+        // `undefined`, so an absent origin prints that rather than collapsing
+        // the parenthesis away — the reason text reaches the operator log and
+        // the close frame, so it has to read the same on both engines.
+        self.close(&format!(
+            "{:?} ({}): {}",
+            error.kind(),
+            error
+                .origin()
+                .map_or_else(|| "undefined".to_string(), |o| o.to_string()),
+            error.message()
+        ));
     }
 
     /// Close the connection.
@@ -710,6 +722,41 @@ mod tests {
             message: message.to_string(),
             origin: None,
         })
+    }
+
+    /// TS `#closeWithError` builds the close reason as
+    /// `${errorBody.kind} (${errorBody.origin}): ${errorBody.message}`
+    /// (connection.ts:331-336). The reason goes to the operator log and on to
+    /// `close()`, so a rust reason missing the origin reads differently on the
+    /// two engines — the 2026-09-12 G44 runtime log differential saw exactly
+    /// that: TS `closing connection: Internal (zeroCache): unrecognized token …`
+    /// against rust `closing connection: Internal: unrecognized token …`.
+    ///
+    /// Mutation test: drop the ` ({origin})` and the first assertion fails;
+    /// print an absent origin as an empty string or elide the parenthesis and
+    /// the second fails (JS interpolates `undefined`).
+    #[test]
+    fn close_reason_carries_the_origin_like_ts_close_with_error() {
+        let reason = |e: &ErrorBody| {
+            format!(
+                "{:?} ({}): {}",
+                e.kind(),
+                e.origin()
+                    .map_or_else(|| "undefined".to_string(), |o| o.to_string()),
+                e.message()
+            )
+        };
+        assert_eq!(
+            reason(&ErrorBody::basic(
+                ErrorKind::Internal,
+                "unrecognized token".to_string()
+            )),
+            "Internal (zeroCache): unrecognized token"
+        );
+        assert_eq!(
+            reason(&basic(ErrorKind::Internal, "no origin on this body")),
+            "Internal (undefined): no origin on this body"
+        );
     }
 
     #[test]

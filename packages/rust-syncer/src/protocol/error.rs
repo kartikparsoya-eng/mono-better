@@ -328,6 +328,22 @@ impl ErrorBody {
         }
     }
 
+    /// `errorBody.origin`. Optional on the basic and backoff bodies (the
+    /// valita schemas mark it `.optional()`, zero-protocol/src/error.ts:29/51),
+    /// and a required literal on each tagged PushFailed/TransformFailed body.
+    pub fn origin(&self) -> Option<&ErrorOrigin> {
+        match self {
+            ErrorBody::Basic(b) => b.origin.as_ref(),
+            ErrorBody::Backoff(b) => b.origin.as_ref(),
+            ErrorBody::PushFailedServer(b) => Some(&b.origin),
+            ErrorBody::PushFailedHttp(b) => Some(&b.origin),
+            ErrorBody::PushFailedZeroCache(b) => Some(&b.origin),
+            ErrorBody::TransformFailedServer(b) => Some(&b.origin),
+            ErrorBody::TransformFailedHttp(b) => Some(&b.origin),
+            ErrorBody::TransformFailedZeroCache(b) => Some(&b.origin),
+        }
+    }
+
     pub fn message(&self) -> &str {
         match self {
             ErrorBody::Basic(b) => &b.message,
