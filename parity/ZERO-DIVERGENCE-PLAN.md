@@ -454,6 +454,26 @@ lines still passes, so the guard catches a citation that no longer points at
 its symbol, not one that is off by a few lines. A citation of *prose* (a TS
 comment, a test name) anchors only if the prose is quoted.
 
+## M17 — restart drift family: the crash-recovery tests TS has (added + executed 2026-09-12)
+
+TS's only crash/restart-shaped tests are the `restartAfter` family in
+`view-syncer.pg.test.ts:4625-5290`: stop the service, tamper the CVR and/or
+the replica, start a fresh service on the same CVR + replica, assert what the
+reconnecting client sees. Rust had unit tests of the drift check but no
+restart. `tests/pg_row_set_signature_restart_test.rs` ports seven of the ten
+(`World` = SQLite replica + PG schema; `restart_after` drops the engine, mutates,
+builds a fresh `IvmPipelines`, `load_cvr`s and reconnects on `ws2`). The port
+found a real divergence on its first run: the legacy-NULL case — TS initialises
+a missing `rowSetSignature` on the first restart through the flush's provider
+pass; rust kept it NULL forever, because `IvmPipelines` had no twin of
+`PipelineDriver.#rowSetSignatures` and the syncer folded throwaway
+accumulators covering only the queries it had executed. Fixed by giving the
+driver the map (folded in both stream iterators, dropped on remove/replace,
+cleared on reset/destroy) and reading it for the flush provider and the drift
+candidate — the syncer's three copies are gone (rule 9). Not ported: the two
+custom-query cases (need the API-server transformer stub) and
+same-hash-during-deleteClients (unit-pinned).
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree

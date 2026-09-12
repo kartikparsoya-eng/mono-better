@@ -401,6 +401,14 @@ pub struct IvmPipelines {
     /// lifecycle log (see [`PipelineLogInfo`]). Set at hydrate start, dropped
     /// with the pipeline (`destroy_pipeline`).
     pipeline_log_info: HashMap<String, PipelineLogInfo>,
+    /// Port of TS `#rowSetSignatures` (pipeline-driver.ts:263): the running
+    /// XOR row-set signature per query, folded by `#trackRowSetSignatures` as
+    /// `addQuery` (:582) and `advance` (:944) yield their changes, dropped with
+    /// the query (:843) and cleared on reset / destroy (:350 / :452). The
+    /// view-syncer reads it through `row_set_signature` for the CVR flush's
+    /// provider and for the drift check — this map is the ONE owner of that
+    /// state (rule 9); the syncer no longer folds its own copies.
+    row_set_signatures: HashMap<String, u64>,
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
@@ -446,6 +454,7 @@ impl IvmPipelines {
             query_asts: HashMap::new(),
             query_order: Vec::new(),
             pipeline_log_info: HashMap::new(),
+            row_set_signatures: HashMap::new(),
             poisoned: false,
             yield_threshold_ms: None,
             hydrate_context: Rc::new(RefCell::new(None)),
@@ -648,6 +657,7 @@ impl IvmPipelines {
         self.sources.clear();
         self.primary_keys.clear();
         self.active_queries.clear();
+        self.row_set_signatures.clear(); // TS `reset()` (pipeline-driver.ts:350)
         self.poisoned = false;
         self.snapshotter = preserved_snap;
 
@@ -703,6 +713,7 @@ impl IvmPipelines {
         self.sources.clear();
         self.primary_keys.clear();
         self.active_queries.clear();
+        self.row_set_signatures.clear(); // TS `reset()` (pipeline-driver.ts:350)
         self.poisoned = false;
         self.snapshotter = None;
         self.build_engine(&tables, Some(conn));
@@ -842,9 +853,39 @@ impl IvmPipelines {
     /// Remove a query's pipeline (and its row-set signature entry).
     /// Port of TS `removeQuery(queryID, stopReason)` (pipeline-driver.ts:834):
     /// `#destroyPipeline` (stop-log + teardown), then delete the bookkeeping.
+    /// Port of TS `rowSetSignature(queryID)` (pipeline-driver.ts:874-876): the
+    /// current XOR signature of the query's row set, `None` when no pipeline
+    /// for the query is active.
+    pub fn row_set_signature(&self, query_id: &str) -> Option<u64> {
+        self.row_set_signatures.get(query_id).copied()
+    }
+
+    /// Port of TS `#trackRowSetSignatures` (pipeline-driver.ts:884-899), applied
+    /// to each change as `hydrate` / `advance` yield it: ADDs and REMOVEs XOR
+    /// the row's unit into the query's signature; EDITs are no-ops.
+    pub(crate) fn track_row_set_signature(&mut self, rc: &RowChange) {
+        if rc.change_type == rust_ivm::ivm::change::ChangeType::Edit {
+            return;
+        }
+        let unit = rust_ivm::row_signature_unit(&rc.table, &rc.row_key);
+        // TS reads then writes the SAME key reference (`get(change.queryID) ??
+        // 0n` … `set(change.queryID, cur ^ unit)`, :889-895), allocating nothing
+        // per row; `entry(k.clone())` would clone the id for every row, so look
+        // up first and clone only for a query's first row. `0 ^ unit == unit`.
+        match self.row_set_signatures.get_mut(&*rc.query_id) {
+            Some(sig) => *sig ^= unit,
+            None => {
+                self.row_set_signatures
+                    .insert(rc.query_id.to_string(), unit);
+            }
+        }
+    }
+
     pub fn remove_query(&mut self, query_id: &str, stop_reason: &'static str) {
         self.destroy_pipeline(query_id, stop_reason);
         self.active_queries.remove(query_id);
+        // TS `this.#rowSetSignatures.delete(queryID)` (pipeline-driver.ts:843).
+        self.row_set_signatures.remove(query_id);
         if self.query_asts.remove(query_id).is_some() {
             self.query_order.retain(|q| q != query_id);
         }
@@ -1055,6 +1096,10 @@ impl IvmPipelines {
                 Some(&info),
             ));
             self.pipeline_log_info.insert(q.query_id.clone(), info);
+            // TS `#addQueryImpl` first runs `this.removeQuery(queryID,
+            // 'replace-query')` (pipeline-driver.ts:606), which drops the
+            // replaced pipeline's signature: the fresh hydration folds from 0.
+            self.row_set_signatures.remove(&q.query_id);
         }
 
         // TS pipeline-driver.ts:623-629.
@@ -1490,6 +1535,7 @@ impl IvmPipelines {
         self.active_queries.clear();
         self.query_asts.clear();
         self.query_order.clear();
+        self.row_set_signatures.clear(); // TS `destroy()` (pipeline-driver.ts:452)
     }
 }
 
@@ -1538,7 +1584,7 @@ impl Iterator for HydrateChanges<'_> {
             return None;
         }
         let stream = self.stream.as_mut()?;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
+        let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
             Ok(item) => item,
             Err(payload) => {
                 // Roll the partially-wired source connections back, then end the
@@ -1555,9 +1601,15 @@ impl Iterator for HydrateChanges<'_> {
                 // `finish_hydrate` on a half-built graph.
                 self.stream = None;
                 self.outcome = Some(hydrate_js_error(&payload));
-                None
+                return None;
             }
+        };
+        // TS `#trackRowSetSignatures` wraps the `addQuery` stream
+        // (pipeline-driver.ts:582): fold the change before handing it on.
+        if let Some(StreamItem::Data(rc)) = &item {
+            self.driver.track_row_set_signature(rc);
         }
+        item
     }
 }
 
@@ -1621,7 +1673,7 @@ impl Iterator for AdvanceChanges<'_> {
             return None;
         }
         let stream = self.stream.as_mut()?;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
+        let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
             Ok(item) => item,
             Err(payload) => {
                 // Drop the stream now (its Drop restores the sources to head —
@@ -1629,9 +1681,15 @@ impl Iterator for AdvanceChanges<'_> {
                 // the unwind) and hand the mapped outcome to `finish`.
                 self.stream = None;
                 self.outcome = Some(self.driver.advance_panic_outcome(payload));
-                None
+                return None;
             }
+        };
+        // TS `#trackRowSetSignatures` wraps the advance stream
+        // (pipeline-driver.ts:944): fold the change before handing it on.
+        if let Some(StreamItem::Data(rc)) = &item {
+            self.driver.track_row_set_signature(rc);
         }
+        item
     }
 }
 

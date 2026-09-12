@@ -6808,10 +6808,11 @@ impl ViewSyncerService {
     /// Build a row-set-signature provider for a `CVRQueryDrivenUpdater` plus the
     /// shared map it reads from. The updater's provider must be `Send + Sync`,
     /// but the engine (`IvmPipelines`) is `!Send`; so instead of capturing the
-    /// engine we hand the updater a closure over a shared map, which we populate
-    /// from the engine (`populate_signatures`) after the row changes are applied
-    /// but before flush. Port of TS `queryID => this.#pipelines.rowSetSignature(queryID)`
-    /// — the updater persists a query's signature and flags drift on change.
+    /// engine we hand the updater a closure over a shared map, which
+    /// `live_row_set_signatures` fills from the driver after the row changes are
+    /// applied but before the flush. Port of TS `queryID =>
+    /// this.#pipelines.rowSetSignature(queryID)` — the updater persists a query's
+    /// signature when it differs from the stored one.
     #[allow(clippy::type_complexity)]
     fn signature_provider() -> (
         Arc<Mutex<HashMap<String, u64>>>,
@@ -6823,21 +6824,21 @@ impl ViewSyncerService {
         (sigs, provider)
     }
 
-    /// Seed a signature accumulator from a CVR's persisted per-query signatures
-    /// (parsed from hex). Used before an advance so the folded delta continues
-    /// from the query's prior full signature. Port of the engine seeding a
-    /// query's running signature from its stored value before XOR-folding a
-    /// change.
-    fn seed_signatures_from_cvr(cvr: &CVR) -> HashMap<String, u64> {
-        let mut acc = HashMap::new();
-        for (qid, q) in &cvr.queries {
-            if let Some(hex) = q.base().row_set_signature.as_deref()
-                && let Ok(sig) = rust_cvr::row_set_signature::parse_signature(Some(hex))
-            {
-                acc.insert(qid.clone(), sig);
-            }
-        }
-        acc
+    /// The driver's live signature for every CVR query with an active pipeline
+    /// — what TS's provider `queryID => this.#pipelines.rowSetSignature(queryID)`
+    /// answers as the flush iterates `this._cvr.queries` (cvr.ts:812-814).
+    /// Rust-only adapter (rule 5): the provider is a `Send` closure over a map
+    /// (see `signature_provider`), so the lookups happen here, right before the
+    /// flush, instead of lazily inside it.
+    fn live_row_set_signatures(&self, cvr: &CVR) -> HashMap<String, u64> {
+        cvr.queries
+            .keys()
+            .filter_map(|qid| {
+                self.pipelines
+                    .row_set_signature(qid)
+                    .map(|sig| (qid.clone(), sig))
+            })
+            .collect()
     }
 
     /// Port of TS `#hydrateUnchangedQueries` (view-syncer.ts:1449). On a
@@ -6947,13 +6948,11 @@ impl ViewSyncerService {
             transformed_queries.len()
         );
         for (qid, record, transformed_ast, new_hash) in transformed_queries {
-            // Re-hydrate (TS `#pipelines.addQuery(..., 'unchanged-query-rehydrate')`),
-            // folding the candidate row-set signature caller-side — rust's
-            // streaming `hydrate` does not maintain `engine.row_set_signature`, so
-            // the caller folds it exactly as `hydrate_and_sync` does. Rows are
-            // discarded: the CVR already holds them; this pass only rebuilds the
-            // pipeline and checks drift.
-            let mut sig_acc: HashMap<String, u64> = HashMap::new();
+            // Re-hydrate (TS `#pipelines.addQuery(..., 'unchanged-query-rehydrate')`);
+            // the driver folds the candidate row-set signature as the changes
+            // stream past (`#trackRowSetSignatures`). Rows are discarded: the CVR
+            // already holds them; this pass only rebuilds the pipeline and checks
+            // drift.
             // TS `addQuery(transformationHash, queryID, ast, timer, queryName,
             // 'unchanged-query-rehydrate')` (view-syncer.ts:1620-1626).
             let one = [HydrateQuery {
@@ -6981,10 +6980,7 @@ impl ViewSyncerService {
                 for item in changes.by_ref() {
                     match item {
                         StreamItem::Yield => timer.yield_process().await,
-                        StreamItem::Data(rc) => {
-                            accumulate_signature(&mut sig_acc, &rc);
-                            count += 1;
-                        }
+                        StreamItem::Data(_) => count += 1,
                     }
                 }
                 changes.finish()?;
@@ -7019,7 +7015,8 @@ impl ViewSyncerService {
             // needlessly resend rows). A mismatch → record the drift, remove the
             // pipeline (so the main reconciliation re-executes + emits the diff),
             // and mark it drifted.
-            let candidate = sig_acc.get(qid).copied().unwrap_or(0);
+            // TS `this.#pipelines.rowSetSignature(queryID) ?? 0n` (view-syncer.ts:1662).
+            let candidate = self.pipelines.row_set_signature(qid).unwrap_or(0);
             if let Some(hex) = record.base().row_set_signature.as_deref()
                 && let Ok(stored) = rust_cvr::row_set_signature::parse_signature(Some(hex))
                 && stored != candidate
@@ -7199,9 +7196,6 @@ impl ViewSyncerService {
             self.inspector_delegate.borrow_mut().remove_query(qid);
         }
 
-        // Freshly-hydrated queries start from an empty row set (signature 0), so
-        // the fold over this hydrate's changes yields the query's full signature.
-        let mut sig_acc: HashMap<String, u64> = HashMap::new();
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
         // Phase profiling (SYNCER_TRACE): the `pipelines.hydrate` call is the
         // initial fetch (SQLite source reads) + IVM operator materialization —
@@ -7247,7 +7241,6 @@ impl ViewSyncerService {
                         yielded += yielded_at.elapsed();
                     }
                     StreamItem::Data(rc) => {
-                        accumulate_signature(&mut sig_acc, &rc);
                         if cvr_err.is_some() {
                             continue;
                         }
@@ -7348,9 +7341,12 @@ impl ViewSyncerService {
         // `RowRecordCache::apply` to copy the client group's entire row set.
         drop(existing_rows_owned);
 
-        // Hand the folded signatures to the updater's provider so its flush can
-        // persist each hydrated query's signature and flag drift.
-        *sigs.lock().unwrap() = sig_acc;
+        // Hand the driver's live signatures to the updater's provider — TS
+        // `queryID => this.#pipelines.rowSetSignature(queryID)` (view-syncer.ts:
+        // 2179), which the flush reads for EVERY CVR query (cvr.ts:808-825), so a
+        // query re-hydrated by `hydrate_unchanged_queries` (or one whose stored
+        // signature is missing) is persisted here too.
+        *sigs.lock().unwrap() = self.live_row_set_signatures(&updater.base.cvr);
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
@@ -7443,9 +7439,6 @@ impl ViewSyncerService {
         // The pre-advance CVR version — only clients AT this version may receive
         // the advance delta (see the poke-target filter below).
         let cvr_version = cvr.version.clone();
-        // An advance folds its delta onto each query's PRIOR full signature, so
-        // seed the accumulator from the CVR's persisted per-query signatures.
-        let mut sig_acc = Self::seed_signatures_from_cvr(&cvr);
 
         // Advance FIRST, capturing the new state version from the header (the
         // version the snapshot advanced TO) and collecting the delta. The updater
@@ -7483,7 +7476,6 @@ impl ViewSyncerService {
                         yields += 1;
                     }
                     StreamItem::Data(rc) => {
-                        accumulate_signature(&mut sig_acc, &rc);
                         if rc.change_type != rust_ivm::ivm::change::ChangeType::Child {
                             collected.push(rc);
                         }
@@ -7594,8 +7586,10 @@ impl ViewSyncerService {
             num_changes = processor.total_processed();
         }
 
-        // Hand the folded post-advance signatures to the updater's provider.
-        *sigs.lock().unwrap() = sig_acc;
+        // Hand the driver's live post-advance signatures to the updater's
+        // provider — TS `queryID => this.#pipelines.rowSetSignature(queryID)`
+        // (view-syncer.ts:2589).
+        *sigs.lock().unwrap() = self.live_row_set_signatures(&updater.base.cvr);
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
@@ -7961,32 +7955,6 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMap
         m
     });
     Some((change_type, &*rc.query_id, rc.table.clone(), row_key, row))
-}
-
-/// XOR-fold a streamed `RowChange` into a per-query row-set-signature
-/// accumulator, mirroring the engine's `add_queries` fold: every non-Edit change
-/// (Add or Remove) XORs the table+rowKey unit, so a Remove undoes a prior Add.
-/// Uses the original `rust_ivm` row key (not the JSON-converted one) so the hash
-/// matches `row_signature_unit` byte-for-byte.
-fn accumulate_signature(acc: &mut HashMap<String, u64>, rc: &rust_ivm::streamer::RowChange) {
-    if rc.change_type != rust_ivm::ivm::change::ChangeType::Edit {
-        let unit = rust_ivm::row_signature_unit(&rc.table, &rc.row_key);
-        // TS reads then writes the SAME key reference
-        // (`#rowSetSignatures.get(change.queryID) ?? 0n` … `.set(change.queryID,
-        // cur ^ unit)`, pipeline-driver.ts:889-895); a JS Map key is a
-        // reference, so TS allocates nothing per row here. `entry(k.clone())`
-        // takes its key eagerly and so allocated a fresh `String` for EVERY row
-        // change even once the query was present — `query_id` is a per-query
-        // constant on a per-row path. Looking up first keeps the clone for the
-        // first row of each query only. `0 ^ unit == unit`, so seeding the
-        // absent entry with `unit` is TS's `?? 0n` followed by the XOR.
-        match acc.get_mut(&*rc.query_id) {
-            Some(sig) => *sig ^= unit,
-            None => {
-                acc.insert(rc.query_id.to_string(), unit);
-            }
-        }
-    }
 }
 
 /// Convert a `rust_ivm` `Value` to `serde_json::Value`, matching TS

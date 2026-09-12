@@ -6,26 +6,16 @@
 
 use super::*;
 
-/// TS folds the row-set signature by reading and re-writing the SAME key
-/// reference: `#trackRowSetSignatures` (pipeline-driver.ts:884-899) does
-/// `const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n` then
-/// `.set(change.queryID, cur ^ unit)` for every non-EDIT change, so a
-/// Remove undoes a prior Add and an Edit contributes nothing.
-/// `accumulate_signature` is the port of that fold.
-///
-/// The fold used to be `*acc.entry(rc.query_id.clone()).or_insert(0) ^=
-/// unit`, which allocated a fresh `String` for every row change because
-/// `entry` takes its key eagerly — `query_id` is a per-query constant on a
-/// per-row path. It now looks the key up first and clones only for a
-/// query's first row. This pins the fold's arithmetic across that change.
-///
-/// Mutation test: make the present-key arm assign rather than XOR
-/// (`Some(sig) => *sig = unit`) and both the two-row and the undo
-/// assertions fail; seed the absent key with `0` instead of `unit` and the
-/// single-row assertion fails; drop the EDIT guard and the last assertion
-/// fails.
+/// Port guard for TS `#trackRowSetSignatures` (pipeline-driver.ts:884-899),
+/// which `IvmPipelines` applies to every change `hydrate` / `advance` yield:
+/// the first row of a query seeds the entry (`?? 0n` ^ unit), later rows XOR
+/// in, a Remove undoes its Add, queries are independent, EDITs are skipped,
+/// and `remove_query` drops the entry (:843). The driver is the ONE owner of
+/// the signature (TS `#rowSetSignatures`, :263) — the syncer reads it through
+/// `row_set_signature` for the flush provider and the drift candidate.
 #[test]
-fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
+fn track_row_set_signature_folds_like_ts_track_row_set_signatures() {
+    use crate::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_ivm::ivm::change::ChangeType;
     use rust_ivm::ivm::data::Value;
     use std::sync::Arc;
@@ -52,40 +42,59 @@ fn accumulate_signature_xor_folds_like_ts_track_row_set_signatures() {
     let unit2 = rust_ivm::row_signature_unit("issues", &row_key("i2"));
     assert_ne!(unit1, unit2, "the fixture rows must hash differently");
 
+    let mut driver = IvmPipelines::new();
+    assert_eq!(
+        driver.row_set_signature("q1"),
+        None,
+        "no pipeline → undefined"
+    );
+
     // First row of a query: the absent entry is seeded, TS's `?? 0n` ^ unit.
-    let mut acc: HashMap<String, u64> = HashMap::new();
-    accumulate_signature(&mut acc, &change(ChangeType::Add, "q1", "i1"));
-    assert_eq!(acc.get("q1"), Some(&unit1));
+    driver.track_row_set_signature(&change(ChangeType::Add, "q1", "i1"));
+    assert_eq!(driver.row_set_signature("q1"), Some(unit1));
 
     // Second row of the SAME query takes the present-key arm: XOR in, do
     // not overwrite.
-    accumulate_signature(&mut acc, &change(ChangeType::Add, "q1", "i2"));
+    driver.track_row_set_signature(&change(ChangeType::Add, "q1", "i2"));
     assert_eq!(
-        acc.get("q1"),
-        Some(&(unit1 ^ unit2)),
+        driver.row_set_signature("q1"),
+        Some(unit1 ^ unit2),
         "a second row must XOR into the running signature, not replace it"
     );
 
     // A Remove of a previously-added row undoes it (XOR is its own inverse).
-    accumulate_signature(&mut acc, &change(ChangeType::Remove, "q1", "i1"));
+    driver.track_row_set_signature(&change(ChangeType::Remove, "q1", "i1"));
     assert_eq!(
-        acc.get("q1"),
-        Some(&unit2),
+        driver.row_set_signature("q1"),
+        Some(unit2),
         "a Remove must undo the matching Add"
     );
 
     // Queries are independent accumulators.
-    accumulate_signature(&mut acc, &change(ChangeType::Add, "q2", "i1"));
-    assert_eq!(acc.get("q2"), Some(&unit1));
-    assert_eq!(acc.get("q1"), Some(&unit2), "q2 must not disturb q1");
+    driver.track_row_set_signature(&change(ChangeType::Add, "q2", "i1"));
+    assert_eq!(driver.row_set_signature("q2"), Some(unit1));
+    assert_eq!(
+        driver.row_set_signature("q1"),
+        Some(unit2),
+        "q2 must not disturb q1"
+    );
 
     // TS skips EDIT entirely (`change.type !== ChangeType.EDIT`).
-    accumulate_signature(&mut acc, &change(ChangeType::Edit, "q1", "i2"));
+    driver.track_row_set_signature(&change(ChangeType::Edit, "q1", "i2"));
     assert_eq!(
-        acc.get("q1"),
-        Some(&unit2),
+        driver.row_set_signature("q1"),
+        Some(unit2),
         "an Edit must not change the row-set signature"
     );
+
+    // TS `removeQuery` → `this.#rowSetSignatures.delete(queryID)` (:843).
+    driver.remove_query("q1", "remove-query");
+    assert_eq!(
+        driver.row_set_signature("q1"),
+        None,
+        "removing the query drops its signature"
+    );
+    assert_eq!(driver.row_set_signature("q2"), Some(unit1));
 }
 // The dissolved `SyncEngine` (1970feeb7): tests keep the old name.
 use super::ViewSyncerService as SyncEngine;
