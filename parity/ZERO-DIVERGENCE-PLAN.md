@@ -500,6 +500,58 @@ never receives the error frame. A mock that cannot represent the failing frame
 cannot fail when the frame moves paths — the same shape as the poke-body default
 noted in the clone-density pass.
 
+## AB2 2026-09-13 — the frame gate's `lmid-invariant-broken=2`, attributed (2026-09-14)
+
+The AB2 sequential A/B left one open item: 2 of 1060 client groups reported
+`lmid-invariant-broken`. **Neither is an engine defect.** `frameseq_gate.py`'s
+`lmid_invariant` ANDed three independent conditions into one bool — final acked
+LMID maps equal ACROSS the two arms, rust monotonic, TS monotonic — so a
+failure never said which one fired. Decomposed over the captures, both CGs are
+`(a) False, (b) True, (c) True`: rust acked `lastMutationID: 2` for its client
+and TS acked nothing, with monotonicity intact on both sides.
+
+That difference is arm variance, not a dropped ack. `trace_replay.py` skips a
+mutation whose args the resolver cannot satisfy against live backend state
+(`margs is None` → `muts_skipped[…:unresolvable]`), so two arms an hour apart
+against a shared backend do not send the same per-client mutation stream
+(`mutations_sent` 3712 vs 3831). A full sweep of both captures confirms the
+asymmetry is SYMMETRIC — 35 rust-acked-only vs 21 TS-acked-only CGs, 82 clients
+where rust ended ahead vs 68 where TS did. A rust ack-drop would skew one way;
+this does not, and the two flagged CGs skew the wrong way for that hypothesis.
+The count of 2 was never a measure of anything: the gate only reaches the LMID
+check for CGs whose sequences already match after ack-stripping (26 of 1060),
+so it saw 2 of the ~56 arm-variance cases at random.
+
+**The real finding is the guard's blind spot.** Monotonicity — the one LMID
+property judgeable from a single arm — was evaluated ONLY for those 26 CGs. A
+genuine backwards ack inside any of the 718 UNKNOWN CGs was invisible. Fixed in
+xyne-art `tools/frameseq_gate.py` (`cd3e7c2`, its own origin/main):
+`lmid_monotonic_sweep` now runs over every cg/client of both runs and always
+fails the gate, while the cross-arm comparison became its own
+`lmid-differs-across-arms` counter that fails only under the default
+`--arms concurrent` (`--arms sequential` reports it). Pinned by `--selftest`,
+non-vacuous against three mutations (re-conflating the AND, narrowing the
+sweep, ignoring backwards acks). **Swept over the AB2 captures: 0
+non-monotonic acks in 558 rust and 544 TS cg/client keys.**
+
+**No rust change, and the guard's split is itself TS-grounded.** Rust's
+`update_lmids` (client_handler.rs:704) is already 1:1 with TS `#updateLMIDs`
+(client-handler.ts:376-390) — same required fields, same wrong-clientGroupID
+log-and-ignore, same del/constrain skip — and the sweep found it emitting no
+backwards ack anywhere. The two split rules differ precisely in provenance,
+which is why only one of them fails unconditionally:
+
+| rule | TS origin | verdict |
+|---|---|---|
+| ack never goes backwards | `replicache/src/sync/pull.ts:238-252` — "Check that the lastMutationIDs are not going backwards", throws `badOrderMessage` | a TS **contract**; always fails |
+| both arms end at the same acked LMID | none | a differential **heuristic**; fails only under `--arms concurrent` |
+
+Note where that contract lives: the CLIENT enforces it. Neither server asserts
+it — zero-cache streams whatever the `clients` rows say through the internal
+`lmids` query (cvr.ts:234-258) — so there is no server-side TS twin for rust to
+be missing, and the ART gate is the only place the server side of the contract
+gets checked.
+
 ## L8 — traffic-driven path differential (added + executed 2026-08-27)
 
 The layer the original five could not cover: L2 proves matched functions agree
