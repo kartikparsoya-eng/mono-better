@@ -516,10 +516,20 @@ async fn run_ws_writer(
                         ))).await;
                         break;
                     }
-                    Some(WsCommand::Close(reason)) => {
-                        // TS Connection.close() → ws.close() with no status
-                        // (workers/connection.ts:182); the reason is logged, not sent.
-                        tracing::info!("closing connection: {reason}");
+                    Some(WsCommand::Close(_reason)) => {
+                        // TS Connection.close() → `this.#ws.close()` with no
+                        // status (workers/connection.ts:182). SILENT, and the
+                        // reason is not sent on the wire either: TS logs it one
+                        // frame up, at connection.ts:173, which rust ports in
+                        // `Connection::close` (workers/connection.rs) — the
+                        // caller that hands us this command two lines later.
+                        // Logging here too put the line out TWICE per close,
+                        // the second copy without the client context this task
+                        // does not have, which doubled every close in
+                        // log-derived counts (prod 2026-09-15: 42 read for 21).
+                        // `_reason` stays bound to document that the writer
+                        // deliberately drops it; see
+                        // `one_close_logs_exactly_one_closing_connection_line`.
                         let _ = ws_writer.send(Message::Close(None)).await;
                         break;
                     }
@@ -1264,6 +1274,152 @@ mod tests {
             matches!(&fr[0], Message::Close(None)),
             "Connection.close() → ws.close() with no status, got {:?}",
             fr[0]
+        );
+    }
+
+    /// One close, one log line.
+    ///
+    /// `Connection::close()` logs `closing connection: <reason>` with the
+    /// client context (`workers/connection.rs:346` = TS `connection.ts:173`)
+    /// and then hands the socket to the writer task. TS's matching
+    /// `this.#ws.close()` (`connection.ts:182`) does NOT log, so the
+    /// `WsCommand::Close` writer arm must stay silent: the reason is already
+    /// on the record, and the writer has no connection context to add
+    /// (no `client_id`/`client_group_id`/`ws_id` is in scope there).
+    ///
+    /// A second line is not cosmetic — it doubles every close in log-based
+    /// analysis. Observed in prod 2026-09-15 (`xyne-spaces-zero-sdlc`, image
+    /// `rust-cvr-v1.0.0-8fb8aa2`): 21 real closes read as 42, exactly half of
+    /// them context-free.
+    ///
+    /// Mutation test: restore `tracing::info!("closing connection:
+    /// {reason}")` in the `WsCommand::Close` arm and this fails with 2 lines
+    /// for one close. The `Message::Close` assertion keeps it non-vacuous in
+    /// the other direction — it proves the writer actually ran the arm.
+    #[tokio::test]
+    async fn one_close_logs_exactly_one_closing_connection_line() {
+        use crate::workers::connection::{Connection, HandlerResult, MessageHandler};
+        use futures_util::StreamExt as _;
+        use std::sync::Mutex;
+
+        struct SilentHandler;
+        #[async_trait::async_trait(?Send)]
+        impl MessageHandler for SilentHandler {
+            async fn handle_message(&self, _msg: &str) -> Vec<HandlerResult> {
+                Vec::new()
+            }
+        }
+
+        #[derive(Clone)]
+        struct CapWriter(Arc<Mutex<Vec<u8>>>);
+        struct CapGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapWriter {
+            type Writer = CapGuard;
+            fn make_writer(&'a self) -> CapGuard {
+                CapGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for CapGuard {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Capture on THIS thread; `#[tokio::test]` is a current-thread
+        // runtime, so the spawned writer task emits here too.
+        crate::ensure_permissive_global_subscriber();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // The real writer task, fed by the real sink a real `Connection` owns.
+        let (tx, rx) = mpsc::unbounded_channel::<WsCommand>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (w, _r) = ws.split();
+            let (kill_tx, kill_rx) = watch::channel(false);
+            let limits = Arc::new(SinkLimits {
+                depth: Arc::new(AtomicI64::new(0)),
+                hwm: 1_000_000,
+                bytes: Arc::new(AtomicI64::new(0)),
+                byte_hwm: i64::MAX,
+                kill: kill_tx,
+                shed_counted: std::sync::atomic::AtomicBool::new(false),
+            });
+            let last = Arc::new(AtomicI64::new(now_epoch_ms()));
+            run_ws_writer(w, rx, limits, kill_rx, last).await;
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut client, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+
+        // The one close, driven through `Connection::close()` exactly as the
+        // supersede path does in production.
+        let reason = "Connection superseded by a newer connection";
+        let conn = Connection::new(
+            DirectWebSocketSink::new(tx),
+            PROTOCOL_VERSION,
+            "ws1".to_string(),
+            "c1".to_string(),
+            "cg1".to_string(),
+            "zero".to_string(),
+            0,
+            Box::new(SilentHandler),
+            Box::new(|| {}),
+        );
+        conn.close(reason);
+
+        // Drain the socket so the writer task runs the arm to completion.
+        let mut frames = Vec::new();
+        while let Ok(Some(Ok(m))) =
+            tokio::time::timeout(Duration::from_secs(5), client.next()).await
+        {
+            let done = matches!(m, Message::Close(_));
+            frames.push(m);
+            if done {
+                break;
+            }
+        }
+        let _ = server.await;
+
+        assert!(
+            matches!(frames.last(), Some(Message::Close(None))),
+            "TS Connection.close() -> ws.close() with no status; got {frames:?}"
+        );
+
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("closing connection: "))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one close must log exactly one `closing connection:` line, got {}:\n{}",
+            lines.len(),
+            lines.join("\n")
+        );
+        // The surviving line is the one carrying the client context.
+        let only = lines[0];
+        assert!(
+            only.contains(reason)
+                && only.contains("client_id")
+                && only.contains("client_group_id")
+                && only.contains("ws_id"),
+            "the surviving line must be `Connection::close()`'s, with the \
+             client context TS logs alongside the reason; got:\n{only}"
         );
     }
 }

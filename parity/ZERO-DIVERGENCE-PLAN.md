@@ -767,6 +767,71 @@ file-local.
 
 ---
 
+## 2026-09-15 — graceful close logged TWICE, and the M14 tier that could not see it
+
+Prod log read (`xyne-spaces-zero-sdlc-67d8db46c9-74wzv`, image
+`rust-cvr-v1.0.0-8fb8aa2`, 150 min) showed every `closing connection: <reason>`
+line in exact pairs — one carrying `client_id`/`client_group_id`/`ws_id`, one
+carrying nothing:
+
+| reason | with ctx | no ctx | real closes |
+| --- | --- | --- | --- |
+| `Connection superseded by a newer connection` | 14 | 14 | 14 |
+| `Unauthorized (zeroCache): Connection auth validation failed` | 7 | 7 | 7 |
+
+**Two emitters, one event.** `Connection::close()` logs the line with the client
+context (`workers/connection.rs`, the port of `connection.ts:173`) and then calls
+`self.sink.close(reason)` two lines below; that sends `WsCommand::Close`, and the
+ws writer task logged the same message again from a context where no connection
+fields are in scope. `connection.rs` is the ONLY production caller of
+`WsSink::close`, so the second line was unconditional.
+
+**TS emits one.** `connection.ts:173` logs, then `:182` calls `this.#ws.close()`,
+which is silent. The writer arm's comment cited `:182` as its justification — but
+`:182` is the close CALL, not a log; the log is `:173`, already ported. So the
+citation was misattached too (M16 checks that a cited line still holds the named
+symbol, not that the citation supports the behavior built on it).
+
+Note the contrast that makes this precise: an ERROR close legitimately logs twice
+in TS as well — `ClientHandler.fail` (`client-handler.ts:176`) and then
+`closeWithError` at the socket layer (`types/ws.ts:19`, reached via
+`streams.ts:91`). Rust mirrors that pair exactly, and the `WsCommand::Fail` arm's
+WARN stays. Only the GRACEFUL path was doubled.
+
+**Client-visible behavior was never wrong** — one `Close` frame, no status code,
+matching `ws.close()` with no args. The damage was to every log-derived count:
+dashboards, the A/B frame gates, capacity reports all read 2x closes.
+
+**Fixed** by deleting the writer arm's line, with
+`one_close_logs_exactly_one_closing_connection_line` (`ws_server.rs`) pinning it:
+it drives a real `Connection` over a real `run_ws_writer` and asserts exactly ONE
+`closing connection:` line plus a `Message::Close(None)` frame — the frame
+assertion keeps it non-vacuous in the other direction by proving the writer ran
+the arm. Reverting the fix fails it 2-vs-1.
+
+### Why M14 was blind — new Tier 2: emission multiplicity
+
+The signature ratchet asks "does this rust line have a TS twin?". This line HAD
+one, so it never appeared in `rust_only`; only the COUNT diverged. `log_differential.py`
+now also compares, per paired template, how many static sites emit it on each side:
+
+- **branch fan-out** (legitimate) — TS's one dynamic-level
+  `lc[getLogLevel(e)]?.(...)` becomes three rust `match` arms; exactly one fires
+  per event. Six such templates are listed in `MULTI_SITE_OK`, each with the
+  reason its sites are exclusive.
+- **sequential double-emission** (the divergence) — two sites in ONE call chain,
+  both firing per event.
+
+Static site-count cannot by itself tell these apart, so the check FLAGS and
+demands a reason rather than deciding. It was mutation-proven against this bug:
+reverting the fix makes it exit 1 naming both rust sites and the single TS site;
+7 of 73 paired templates were over-count before triage, 0 after.
+
+Two things surfaced during that triage and are recorded here rather than acted on:
+`rust-cvr`'s `ClientHandler::close` (`client_handler.rs`) has NO production caller,
+and `client_handler.rs`'s two `view-syncer closing connection with error` sites
+are reached only through the handler-owned path.
+
 ## Part 5 — CVR path map: TS ⇄ rust verdicts + remaining work (2026-08-28)
 
 Derived from code (rust-cvr + the dissolved engine seat in rust-syncer), path

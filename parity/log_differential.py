@@ -492,6 +492,87 @@ def scan_ts() -> list[dict]:
     return found
 
 
+
+# --------------------------------------------- Tier 2: emission MULTIPLICITY --
+# The signature ratchet above asks "does this rust line have a TS twin?". It
+# cannot see a line that HAS a twin but fires TWICE per event, because the
+# signature is present either way and only the COUNT diverges.
+#
+# Two shapes produce rust-emits-from-more-sites-than-TS:
+#
+#  - branch fan-out (legitimate): mutually exclusive arms of one decision. TS's
+#    single `lc[getLogLevel(e)]?.(...)` becomes three rust arms; exactly one
+#    fires per event. Same emissions per event, more static sites.
+#
+#  - SEQUENTIAL double-emission (a divergence): two sites in ONE call chain,
+#    both firing for the same event, so the line lands twice where TS prints it
+#    once. Every log-derived count — dashboards, the A/B frame gates, capacity
+#    reports — then reads 2x.
+#
+# Origin: `closing connection: {}` was emitted by BOTH `Connection::close()`
+# (workers/connection.rs, the port of connection.ts:173) and the ws writer
+# task's `WsCommand::Close` arm, which is the unconditional next step of the
+# first — `sink.close()` is called two lines below the log. TS's matching
+# `this.#ws.close()` (connection.ts:182) is silent. Prod on 2026-09-15
+# (`xyne-spaces-zero-sdlc`, rust-cvr-v1.0.0-8fb8aa2) read 42 closes where 21
+# happened, exactly half of them context-free. Fixed by deleting the writer
+# arm's line; this check keeps the class from coming back.
+#
+# Each entry is a paired template whose extra rust sites were verified NOT to
+# be a chain. Adding one requires naming why the sites are exclusive.
+MULTI_SITE_OK = {
+    "view-syncer closing connection with error": (
+        "branch fan-out: connection.rs:290/295/300 are the three arms of "
+        "`classify_error_log_level` (TS's one dynamic-level site, "
+        "client-handler.ts:176); view_syncer.rs + client_handler.rs are the "
+        "CG-thread and handler-owned paths, one per failure"
+    ),
+    "sending error on websocket": (
+        "branch fan-out: connection.rs:391/399/407 are the level arms of the "
+        "same emit (TS connection.ts:429 picks the level at runtime)"
+    ),
+    "connection auth validation failed; invalidating connection": (
+        "branch fan-out: view_syncer.rs:2217/2258 are the two validate call "
+        "sites (connect vs revalidate) and :6181 the maintenance sweep; a "
+        "given connection takes one"
+    ),
+    "failed to parse response": (
+        "TS has ONE shared helper (custom/fetch.ts:294) that rust inlines at "
+        "each caller (transform_query.rs, mutagen/pusher.rs); one fetch, one "
+        "line"
+    ),
+    "client {} already connected, closing existing connection": (
+        "syncer.rs is the worker-level supersede, view_syncer.rs the CG-level "
+        "one; a duplicate client arrives through one of them"
+    ),
+    "view-syncer closing connection": (
+        "view_syncer.rs:4086 is the live shutdown path; rust-cvr "
+        "`ClientHandler::close` (client_handler.rs:1115) has NO production "
+        "caller, so it cannot co-fire"
+    ),
+}
+
+
+def multi_site(rust: list[dict], ts: list[dict]) -> list[tuple[str, list[str], list[str]]]:
+    """Paired templates rust emits from more static sites than TS, minus the
+    reviewed branch-fan-out entries. A hit is a candidate double-emission."""
+    rs: dict[str, list[str]] = {}
+    tsc: dict[str, list[str]] = {}
+    for r in rust:
+        if r["test"] or not r["template"] or r["level"] == "unstructured":
+            continue
+        rs.setdefault(loose(r["template"]), []).append(f"{r['file']}:{r['line']}")
+    for t in ts:
+        if t["test"] or not t["template"]:
+            continue
+        tsc.setdefault(loose(t["template"]), []).append(f"{t['file']}:{t['line']}")
+    out = []
+    for k, sites in sorted(rs.items()):
+        if k not in tsc or len(sites) <= len(tsc[k]) or k in MULTI_SITE_OK:
+            continue
+        out.append((k, sorted(sites), sorted(tsc[k])))
+    return out
+
 # ------------------------------------------------------------------- join ----
 def loose(tpl: str) -> str:
     """Pairing fallback: rust often appends a value the TS site passes as a
@@ -617,6 +698,26 @@ def main() -> int:
             print(f"  {t['level']:<5} {t['template'][:86]!r}  ({t['file']}:{t['line']})")
         if len(j["ts_only"]) > 200:
             print(f"  … and {len(j['ts_only']) - 200} more")
+
+    dup = multi_site(rust, ts)
+    print(
+        f"MULTI-SITE (rust emits from more sites than TS) {len(dup)}  <- candidate "
+        f"double-emission: same signature, 2x the count"
+    )
+    if dup:
+        print("\n-- MULTI-SITE: rust emits a paired line from MORE sites than TS --")
+        for k, rsites, tsites in dup:
+            print(f"  {k[:84]!r}")
+            for s in rsites:
+                print(f"      rust {s}")
+            for s in tsites:
+                print(f"      TS   {s}")
+        print(
+            "  Either the sites are mutually exclusive (one fires per event) — add\n"
+            "  it to MULTI_SITE_OK naming WHY — or they are a call chain and the\n"
+            "  line lands twice where TS prints it once: delete the downstream one."
+        )
+        failed = True
 
     loud = [r for r in j["rust_only"] if r["level"] in ("error", "warn")]
     print(
